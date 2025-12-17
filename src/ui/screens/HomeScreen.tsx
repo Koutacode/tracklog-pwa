@@ -415,7 +415,7 @@ export default function HomeScreen() {
                 `総距離: ${event.extras.totalKm} km\n` +
                 `最終区間: ${event.extras.lastLegKm} km`,
             );
-            navigate('/history');
+            await refresh();
           } catch (e: any) {
             alert(e?.message ?? '運行終了に失敗しました');
           } finally {
