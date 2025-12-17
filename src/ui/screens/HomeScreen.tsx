@@ -23,6 +23,15 @@ import {
 } from '../../db/repositories';
 import type { AppEvent } from '../../domain/types';
 
+function fmtDuration(ms: number) {
+  const totalSec = Math.max(0, Math.floor(ms / 1000));
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const s = totalSec % 60;
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
+}
+
 // Helpers to find open sessions
 function getOpenRestSessionId(events: AppEvent[]): string | null {
   const restStarts = events.filter(e => e.type === 'rest_start').sort((a, b) => a.ts.localeCompare(b.ts));
@@ -71,6 +80,7 @@ export default function HomeScreen() {
   const [odoDialog, setOdoDialog] = useState<null | { kind: 'trip_start' | 'rest_start' | 'trip_end' }>(null);
   const [confirmDayCloseOpen, setConfirmDayCloseOpen] = useState(false);
   const [fuelOpen, setFuelOpen] = useState(false);
+  const [now, setNow] = useState(() => Date.now());
 
   const openRestSessionId = useMemo(() => getOpenRestSessionId(events), [events]);
   const openLoadSessionId = useMemo(() => getOpenToggle(events, 'load_start', 'load_end', 'loadSessionId'), [events]);
@@ -103,6 +113,12 @@ export default function HomeScreen() {
   useEffect(() => {
     refresh();
   }, []);
+
+  useEffect(() => {
+    if (!tripId) return;
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [tripId]);
 
   // Render when no trip is active
   if (!tripId) {
@@ -150,6 +166,16 @@ export default function HomeScreen() {
   // trip is active
   const tripStart = events.find(e => e.type === 'trip_start') as any;
   const tripStartOdo = tripStart?.extras?.odoKm;
+  const tripElapsed = tripStart?.ts ? now - new Date(tripStart.ts).getTime() : null;
+  const restStart = openRestSessionId
+    ? (events.find(e => e.type === 'rest_start' && (e as any).extras?.restSessionId === openRestSessionId) as any)
+    : null;
+  const loadStart = openLoadSessionId
+    ? (events.find(e => e.type === 'load_start' && (e as any).extras?.loadSessionId === openLoadSessionId) as any)
+    : null;
+  const breakStart = openBreakSessionId
+    ? (events.find(e => e.type === 'break_start' && (e as any).extras?.breakSessionId === openBreakSessionId) as any)
+    : null;
   return (
     <div style={{ padding: 16, maxWidth: 720, margin: '0 auto' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
@@ -166,6 +192,36 @@ export default function HomeScreen() {
           <Link to="/history" style={{ color: '#93c5fd' }}>
             履歴
           </Link>
+        </div>
+      </div>
+      <div style={{ background: '#0b0b0b', color: '#fff', padding: 12, borderRadius: 14, marginBottom: 12 }}>
+        <div style={{ fontWeight: 900, marginBottom: 6 }}>進行中のイベント</div>
+        <div style={{ display: 'grid', gap: 4 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: 800 }}>
+            <span>運行</span>
+            <span>{tripElapsed != null ? fmtDuration(tripElapsed) : '-'}</span>
+          </div>
+          {restStart && (
+            <div style={{ display: 'flex', justifyContent: 'space-between', opacity: 0.9 }}>
+              <span>休息</span>
+              <span>{fmtDuration(now - new Date(restStart.ts).getTime())}</span>
+            </div>
+          )}
+          {loadStart && (
+            <div style={{ display: 'flex', justifyContent: 'space-between', opacity: 0.9 }}>
+              <span>積込</span>
+              <span>{fmtDuration(now - new Date(loadStart.ts).getTime())}</span>
+            </div>
+          )}
+          {breakStart && (
+            <div style={{ display: 'flex', justifyContent: 'space-between', opacity: 0.9 }}>
+              <span>休憩</span>
+              <span>{fmtDuration(now - new Date(breakStart.ts).getTime())}</span>
+            </div>
+          )}
+          {!restStart && !loadStart && !breakStart && (
+            <div style={{ opacity: 0.8 }}>他の進行中イベントはありません</div>
+          )}
         </div>
       </div>
       <div style={{ display: 'grid', gap: 10 }}>
