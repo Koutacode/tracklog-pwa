@@ -8,6 +8,9 @@ import HomeScreen from '../ui/screens/HomeScreen';
 import TripDetail from '../ui/screens/TripDetail';
 import HistoryScreen from '../ui/screens/HistoryScreen';
 
+// Ensure routing works under GitHub Pages subpath (/runlog-pwa/).
+const routerBase = import.meta.env.BASE_URL;
+
 /**
  * App configures the top-level routing and persistent components. The
  * PwaUpdater and IcResolverJob components are mounted once to handle
@@ -16,7 +19,7 @@ import HistoryScreen from '../ui/screens/HistoryScreen';
  */
 export default function App() {
   return (
-    <BrowserRouter>
+    <BrowserRouter basename={routerBase}>
       <PwaUpdater />
       <IcResolverJob />
       <Routes>
