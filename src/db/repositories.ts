@@ -397,22 +397,42 @@ export async function addBoarding(params: { tripId: string; geo?: Geo; address?:
 }
 
 // Expressway (高速道路)
-export async function addExpressway(params: { tripId: string; geo?: Geo; address?: string }) {
+export async function startExpressway(params: { tripId: string; geo?: Geo; address?: string }) {
+  const events = await getTripEventsCached(params.tripId);
+  const open = findOpenToggleSessionId(events, 'expressway_start', 'expressway_end', 'expresswaySessionId');
+  if (open) throw new Error('高速道路が開始済みです（終了を押してください）');
+  const expresswaySessionId = uuid();
   const e = baseEvent({
     tripId: params.tripId,
-    type: 'expressway',
+    type: 'expressway_start',
     geo: params.geo,
     address: params.address,
-    extras: { icResolveStatus: 'pending' },
+    extras: { expresswaySessionId, icResolveStatus: 'pending' },
+  });
+  await addEvent(e);
+  return { expresswaySessionId, eventId: e.id };
+}
+
+export async function endExpressway(params: { tripId: string; geo?: Geo; address?: string }) {
+  const events = await getTripEventsCached(params.tripId);
+  const open = findOpenToggleSessionId(events, 'expressway_start', 'expressway_end', 'expresswaySessionId');
+  if (!open) throw new Error('高速道路が開始されていません');
+  const e = baseEvent({
+    tripId: params.tripId,
+    type: 'expressway_end',
+    geo: params.geo,
+    address: params.address,
+    extras: open === '__legacy__' ? { icResolveStatus: 'pending' } : { expresswaySessionId: open, icResolveStatus: 'pending' },
   });
   await addEvent(e);
   return { eventId: e.id };
 }
 
 export async function getPendingExpresswayEvents(tripId?: string) {
+  const types = ['expressway', 'expressway_start', 'expressway_end'];
   const arr = tripId
-    ? await db.events.where('[tripId+type]').equals([tripId, 'expressway']).toArray()
-    : await db.events.where('type').equals('expressway').toArray();
+    ? await db.events.where('[tripId+type]').anyOf(types.map(t => [tripId, t])).toArray()
+    : await db.events.where('type').anyOf(types).toArray();
   return arr.filter(e => (e as any).extras?.icResolveStatus === 'pending');
 }
 

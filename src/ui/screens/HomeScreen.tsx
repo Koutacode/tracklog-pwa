@@ -20,7 +20,8 @@ import {
   endBreak,
   addRefuel,
   addBoarding,
-  addExpressway,
+  startExpressway,
+  endExpressway,
   backfillMissingAddresses,
 } from '../../db/repositories';
 import type { AppEvent } from '../../domain/types';
@@ -93,10 +94,15 @@ export default function HomeScreen() {
   const openRestSessionId = useMemo(() => getOpenRestSessionId(events), [events]);
   const openLoadSessionId = useMemo(() => getOpenToggle(events, 'load_start', 'load_end', 'loadSessionId'), [events]);
   const openBreakSessionId = useMemo(() => getOpenToggle(events, 'break_start', 'break_end', 'breakSessionId'), [events]);
+  const openExpresswaySessionId = useMemo(
+    () => getOpenToggle(events, 'expressway_start', 'expressway_end', 'expresswaySessionId'),
+    [events],
+  );
 
   const restActive = !!openRestSessionId;
   const loadActive = !!openLoadSessionId;
   const breakActive = !!openBreakSessionId;
+  const expresswayActive = !!openExpresswaySessionId;
   const canStartRest = !loadActive && !breakActive && !restActive;
   const canStartLoad = !restActive && !breakActive && !loadActive;
   const canStartBreak = !restActive && !loadActive && !breakActive;
@@ -481,19 +487,34 @@ export default function HomeScreen() {
         {/* Fuel (給油) */}
         <BigButton label="給油（数量入力）" onClick={() => setFuelOpen(true)} />
         {/* Expressway (高速道路) */}
-        <BigButton
-          label="高速道路（IC記録）"
-          onClick={async () => {
-            try {
-              const geo = await getGeo();
-              await addExpressway({ tripId, geo });
-              alert('高速道路を記録しました（IC名はオンライン時に自動取得します）');
-              await refresh();
-            } catch (e: any) {
-              alert(e?.message ?? '高速道路の記録に失敗しました');
-            }
-          }}
-        />
+        {expresswayActive ? (
+          <BigButton
+            label="高速道路終了"
+            variant="neutral"
+            onClick={async () => {
+              try {
+                const geo = await getGeo();
+                await endExpressway({ tripId, geo });
+                await refresh();
+              } catch (e: any) {
+                alert(e?.message ?? '高速道路の記録に失敗しました');
+              }
+            }}
+          />
+        ) : (
+          <BigButton
+            label="高速道路開始"
+            onClick={async () => {
+              try {
+                const geo = await getGeo();
+                await startExpressway({ tripId, geo });
+                await refresh();
+              } catch (e: any) {
+                alert(e?.message ?? '高速道路の記録に失敗しました');
+              }
+            }}
+          />
+        )}
         {/* Boarding (乗船) */}
         <BigButton
           label="乗船"

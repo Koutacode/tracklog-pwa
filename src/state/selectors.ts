@@ -148,6 +148,10 @@ export function buildTimeline(events: AppEvent[]): TimelineItem[] {
         return '給油';
       case 'expressway':
         return '高速道路';
+      case 'expressway_start':
+        return '高速開始';
+      case 'expressway_end':
+        return '高速終了';
       case 'boarding':
         return '乗船';
       default:
@@ -159,6 +163,7 @@ export function buildTimeline(events: AppEvent[]): TimelineItem[] {
     { start: 'rest_start', end: 'rest_end', key: 'restSessionId', label: '休息' },
     { start: 'break_start', end: 'break_end', key: 'breakSessionId', label: '休憩' },
     { start: 'load_start', end: 'load_end', key: 'loadSessionId', label: '積込' },
+    { start: 'expressway_start', end: 'expressway_end', key: 'expresswaySessionId', label: '高速道路' },
   ];
   const toggleMap = new Map<string, { start: AppEvent; def: any }>();
   const timeline: TimelineItem[] = [];
@@ -176,7 +181,15 @@ export function buildTimeline(events: AppEvent[]): TimelineItem[] {
         if (entry) {
           const start = entry.start;
           const loc = formatGeo(start) || formatGeo(e);
-          const detail = `${fmtRange(start.ts, e.ts)}（${fmtDuration(start.ts, e.ts)}）${loc ? ' / ' + loc : ''}`;
+          let detail = `${fmtRange(start.ts, e.ts)}（${fmtDuration(start.ts, e.ts)}）`;
+          if (def.label === '高速道路') {
+            const icFrom = (start as any).extras?.icName;
+            const icTo = (e as any).extras?.icName;
+            if (icFrom || icTo) {
+              detail = `IC: ${icFrom ?? '不明'} → ${icTo ?? '不明'} / ${detail}`;
+            }
+          }
+          if (loc) detail += ` / ${loc}`;
           timeline.push({ ts: start.ts, title: def.label, detail });
           toggleMap.delete(`${def.key}-${key}`);
           continue;
@@ -189,7 +202,7 @@ export function buildTimeline(events: AppEvent[]): TimelineItem[] {
       const liters = (e as any).extras?.liters;
       detail = liters != null ? `${liters} L` : undefined;
     }
-    if (e.type === 'expressway') {
+    if (e.type === 'expressway' || e.type === 'expressway_start' || e.type === 'expressway_end') {
       const st = (e as any).extras?.icResolveStatus;
       const name = (e as any).extras?.icName;
       detail =

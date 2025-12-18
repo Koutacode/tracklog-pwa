@@ -9,7 +9,9 @@ export type EventType =
   | 'load_end'
   | 'refuel'
   | 'boarding'
-  | 'expressway';
+  | 'expressway'
+  | 'expressway_start'
+  | 'expressway_end';
 
 export type Geo = {
   lat: number;
