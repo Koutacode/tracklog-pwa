@@ -38,6 +38,11 @@ export default function OdoDialog(props: OdoDialogProps) {
               type="number"
               inputMode="decimal"
               enterKeyHint="done"
+              onKeyDown={e => {
+                if (e.key === 'Enter') {
+                  handleSubmit(e);
+                }
+              }}
               placeholder="オドメーター（km）"
               value={value}
               onChange={e => setValue(e.target.value.replace(/[^\d.]/g, ''))}
