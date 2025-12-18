@@ -34,7 +34,7 @@ export async function reverseGeocode(geo: Geo): Promise<string | undefined> {
   try {
     const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(
       lng,
-    )}&zoom=14&addressdetails=1`;
+    )}&zoom=17&addressdetails=1`;
     const res = await fetch(url, {
       signal: controller.signal,
       headers: { 'Accept-Language': 'ja' },
@@ -42,8 +42,24 @@ export async function reverseGeocode(geo: Geo): Promise<string | undefined> {
     if (!res.ok) return undefined;
     const data = await res.json();
     const addr = data?.address ?? {};
-    const city = addr.city || addr.town || addr.village || addr.hamlet;
-    const parts = [addr.state, addr.county, city].filter(Boolean);
+    const prefecture = addr.state;
+    const county = addr.county || addr.city_district;
+    const city = addr.city || addr.town || addr.village || addr.hamlet || addr.municipality;
+    const area = addr.suburb || addr.quarter || addr.neighbourhood;
+    const block = addr.road;
+    const house = addr.house_number;
+    const detail = block && house ? `${block} ${house}` : block;
+
+    // Deduplicate while preserving order
+    const seen = new Set<string>();
+    const parts = [prefecture, county, city, area, detail, addr.postcode]
+      .filter((p): p is string => !!p)
+      .filter(p => {
+        if (seen.has(p)) return false;
+        seen.add(p);
+        return true;
+      });
+
     const text = parts.join(' ');
     return text || data?.display_name;
   } catch {
