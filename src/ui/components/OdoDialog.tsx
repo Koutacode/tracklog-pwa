@@ -92,20 +92,21 @@ export default function OdoDialog(props: OdoDialogProps) {
             <span style={{ opacity: 0.85 }}>km</span>
           </div>
           <div style={{ marginTop: 12 }}>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10 }}>
               {[1,2,3,4,5,6,7,8,9].map(n => (
                 <button
                   key={n}
                   type="button"
                   onClick={() => handleDigit(String(n))}
                   style={{
-                    height: 52,
-                    borderRadius: 12,
+                    height: 64,
+                    borderRadius: 14,
                     border: '1px solid #374151',
                     background: '#1f2937',
                     color: '#fff',
-                    fontSize: 18,
+                    fontSize: 20,
                     fontWeight: 800,
+                    padding: '10px 0',
                   }}
                 >
                   {n}
@@ -115,13 +116,14 @@ export default function OdoDialog(props: OdoDialogProps) {
                 type="button"
                 onClick={handleClear}
                 style={{
-                  height: 52,
-                  borderRadius: 12,
+                  height: 64,
+                  borderRadius: 14,
                   border: '1px solid #374151',
                   background: '#0f172a',
                   color: '#e5e7eb',
-                  fontSize: 16,
+                  fontSize: 18,
                   fontWeight: 700,
+                  padding: '10px 0',
                 }}
               >
                 C
@@ -130,13 +132,14 @@ export default function OdoDialog(props: OdoDialogProps) {
                 type="button"
                 onClick={() => handleDigit('0')}
                 style={{
-                  height: 52,
-                  borderRadius: 12,
+                  height: 64,
+                  borderRadius: 14,
                   border: '1px solid #374151',
                   background: '#1f2937',
                   color: '#fff',
-                  fontSize: 18,
+                  fontSize: 20,
                   fontWeight: 800,
+                  padding: '10px 0',
                 }}
               >
                 0
@@ -145,13 +148,14 @@ export default function OdoDialog(props: OdoDialogProps) {
                 type="button"
                 onClick={handleBackspace}
                 style={{
-                  height: 52,
-                  borderRadius: 12,
+                  height: 64,
+                  borderRadius: 14,
                   border: '1px solid #374151',
                   background: '#0f172a',
                   color: '#e5e7eb',
-                  fontSize: 16,
+                  fontSize: 18,
                   fontWeight: 700,
+                  padding: '10px 0',
                 }}
               >
                 ⌫
