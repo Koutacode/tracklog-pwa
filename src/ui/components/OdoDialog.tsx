@@ -28,8 +28,31 @@ export default function OdoDialog(props: OdoDialogProps) {
   }, [open, initialValue]);
   if (!open) return null;
   return (
-    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.6)', display: 'grid', placeItems: 'center', zIndex: 9999 }}>
-      <div style={{ width: 'min(520px, 92vw)', background: '#111', color: '#fff', borderRadius: 16, padding: 16 }}>
+    <div
+      style={{
+        position: 'fixed',
+        inset: 0,
+        background: 'rgba(0,0,0,.6)',
+        display: 'flex',
+        justifyContent: 'center',
+        alignItems: 'flex-start',
+        padding: '16px 12px',
+        overflowY: 'auto',
+        zIndex: 9999,
+      }}
+    >
+      <div
+        style={{
+          width: 'min(520px, 100%)',
+          background: '#111',
+          color: '#fff',
+          borderRadius: 16,
+          padding: 16,
+          marginTop: 24,
+          maxHeight: '90vh',
+          boxSizing: 'border-box',
+        }}
+      >
         <div style={{ fontSize: 18, fontWeight: 800, marginBottom: 8 }}>{title}</div>
         {description && <div style={{ opacity: 0.85, marginBottom: 12 }}>{description}</div>}
         <form onSubmit={handleSubmit}>
@@ -60,7 +83,19 @@ export default function OdoDialog(props: OdoDialogProps) {
             />
             <span style={{ opacity: 0.85 }}>km</span>
           </div>
-          <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 16 }}>
+          <div
+            style={{
+              display: 'flex',
+              gap: 8,
+              justifyContent: 'flex-end',
+              marginTop: 16,
+              position: 'sticky',
+              bottom: 0,
+              paddingTop: 8,
+              paddingBottom: 'env(safe-area-inset-bottom, 6px)',
+              background: '#111',
+            }}
+          >
             <button type="button" onClick={onCancel} style={{ padding: '10px 14px', borderRadius: 12 }}>
               キャンセル
             </button>
