@@ -6,6 +6,7 @@ import ConfirmDialog from '../components/ConfirmDialog';
 import FuelDialog from '../components/FuelDialog';
 import InstallButton from '../components/InstallButton';
 import { getGeo, getGeoWithAddress } from '../../services/geo';
+import { isWakeLockSupported, requestWakeLock, releaseWakeLock } from '../../services/wakeLock';
 import {
   getActiveTripId,
   getEventsByTripId,
@@ -84,6 +85,9 @@ export default function HomeScreen() {
   const [now, setNow] = useState(() => Date.now());
   const [geoStatus, setGeoStatus] = useState<{ lat: number; lng: number; accuracy?: number; at: string; address?: string } | null>(null);
   const [geoError, setGeoError] = useState<string | null>(null);
+  const [wakeLockOn, setWakeLockOn] = useState(false);
+  const [wakeLockAvailable, setWakeLockAvailable] = useState(false);
+  const [wakeLockError, setWakeLockError] = useState<string | null>(null);
 
   const openRestSessionId = useMemo(() => getOpenRestSessionId(events), [events]);
   const openLoadSessionId = useMemo(() => getOpenToggle(events, 'load_start', 'load_end', 'loadSessionId'), [events]);
@@ -134,6 +138,7 @@ export default function HomeScreen() {
 
   useEffect(() => {
     refresh();
+    setWakeLockAvailable(isWakeLockSupported());
   }, []);
 
   async function captureGeoOnce() {
@@ -167,6 +172,19 @@ export default function HomeScreen() {
     const t = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(t);
   }, [tripId]);
+
+  // Re-acquire wake lock when tab returns to foreground
+  useEffect(() => {
+    if (!wakeLockOn) return;
+    const handler = async () => {
+      if (document.visibilityState === 'visible') {
+        const ok = await requestWakeLock();
+        if (!ok) setWakeLockError('画面スリープ防止を再取得できませんでした');
+      }
+    };
+    document.addEventListener('visibilitychange', handler);
+    return () => document.removeEventListener('visibilitychange', handler);
+  }, [wakeLockOn]);
 
   // Render when no trip is active
   if (!tripId) {
@@ -233,15 +251,38 @@ export default function HomeScreen() {
             開始: {tripStart?.ts ? new Intl.DateTimeFormat('ja-JP', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).format(new Date(tripStart.ts)) : '-'} / 開始ODO: {tripStartOdo ?? '-'} km
           </div>
         </div>
-        <div style={{ display: 'flex', gap: 12 }}>
+        <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
           <Link to={`/trip/${tripId}`} className="pill-link">
             詳細
           </Link>
           <Link to="/history" className="pill-link">
             履歴
           </Link>
+          {wakeLockAvailable && (
+            <button
+              className="pill-link"
+              style={{ background: wakeLockOn ? '#0ea5e9' : undefined, color: wakeLockOn ? '#fff' : undefined }}
+              onClick={async () => {
+                setWakeLockError(null);
+                if (wakeLockOn) {
+                  await releaseWakeLock();
+                  setWakeLockOn(false);
+                  return;
+                }
+                const ok = await requestWakeLock();
+                if (ok) {
+                  setWakeLockOn(true);
+                } else {
+                  setWakeLockError('画面スリープ防止を有効にできませんでした（ブラウザを確認）');
+                }
+              }}
+            >
+              画面ON維持
+            </button>
+          )}
         </div>
       </div>
+      {wakeLockError && <div style={{ color: '#fca5a5', marginBottom: 8 }}>{wakeLockError}</div>}
       <div className="card" style={{ color: '#fff', padding: 12, borderRadius: 14, marginBottom: 12 }}>
         <div style={{ fontWeight: 900, marginBottom: 6 }}>進行中のイベント</div>
         <div style={{ display: 'grid', gap: 4 }}>
