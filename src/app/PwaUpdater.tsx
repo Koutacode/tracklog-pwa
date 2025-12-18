@@ -12,12 +12,14 @@ import UpdateDialog from '../ui/components/UpdateDialog';
 export default function PwaUpdater() {
   const [needRefresh, setNeedRefresh] = useState(false);
   const [updateSW, setUpdateSW] = useState<null | ((reload?: boolean) => void)>(null);
+  const [remindLater, setRemindLater] = useState(false);
 
   useEffect(() => {
     const unregister = registerSW({
       immediate: true,
       onNeedRefresh() {
         setNeedRefresh(true);
+        setRemindLater(true);
       },
       onOfflineReady() {
         // Optionally notify the user that the app can be used offline.
@@ -36,13 +38,35 @@ export default function PwaUpdater() {
   }, []);
 
   return (
-    <UpdateDialog
-      open={needRefresh}
-      onClose={() => setNeedRefresh(false)}
-      onUpdate={() => {
-        // Force the waiting worker to become active and reload the page.
-        updateSW?.(true);
-      }}
-    />
+    <>
+      <UpdateDialog
+        open={needRefresh}
+        onClose={() => setNeedRefresh(false)}
+        onUpdate={() => {
+          // Force the waiting worker to become active and reload the page.
+          updateSW?.(true);
+        }}
+      />
+      {remindLater && !needRefresh && (
+        <button
+          onClick={() => setNeedRefresh(true)}
+          style={{
+            position: 'fixed',
+            right: 12,
+            bottom: 52,
+            zIndex: 9998,
+            background: '#1f2937',
+            color: '#fff',
+            border: '1px solid #4b5563',
+            borderRadius: 999,
+            padding: '10px 14px',
+            fontWeight: 800,
+            boxShadow: '0 6px 20px rgba(0,0,0,0.35)',
+          }}
+        >
+          更新があります（押して適用）
+        </button>
+      )}
+    </>
   );
 }
