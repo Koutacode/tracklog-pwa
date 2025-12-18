@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import BigButton from '../components/BigButton';
 import OdoDialog from '../components/OdoDialog';
@@ -88,6 +88,7 @@ export default function HomeScreen() {
   const [wakeLockOn, setWakeLockOn] = useState(false);
   const [wakeLockAvailable, setWakeLockAvailable] = useState(false);
   const [wakeLockError, setWakeLockError] = useState<string | null>(null);
+  const breakReminderTimer = useRef<number | null>(null);
 
   const openRestSessionId = useMemo(() => getOpenRestSessionId(events), [events]);
   const openLoadSessionId = useMemo(() => getOpenToggle(events, 'load_start', 'load_end', 'loadSessionId'), [events]);
@@ -119,9 +120,20 @@ export default function HomeScreen() {
         const ev = await getEventsByTripId(active);
         setEvents(ev);
         void backfillAddresses(active);
+        // Re-schedule break reminder based on open break session
+        const openBreakId = getOpenToggle(ev, 'break_start', 'break_end', 'breakSessionId');
+        if (openBreakId) {
+          const startEv = ev.find(e => e.type === 'break_start' && (e as any).extras?.breakSessionId === openBreakId);
+          if (startEv) {
+            scheduleBreakReminder(new Date(startEv.ts).getTime());
+          }
+        } else {
+          cancelBreakReminder();
+        }
       } else {
         setEvents([]);
         void backfillAddresses(null);
+        cancelBreakReminder();
       }
     } finally {
       setLoading(false);
@@ -185,6 +197,55 @@ export default function HomeScreen() {
     document.addEventListener('visibilitychange', handler);
     return () => document.removeEventListener('visibilitychange', handler);
   }, [wakeLockOn]);
+
+  // -------- Break reminder (30min) --------
+  function cancelBreakReminder() {
+    if (breakReminderTimer.current != null) {
+      window.clearTimeout(breakReminderTimer.current);
+      breakReminderTimer.current = null;
+    }
+  }
+
+  async function showBreakNotification() {
+    if (!('Notification' in window)) return;
+    if (Notification.permission === 'default') {
+      await Notification.requestPermission();
+    }
+    if (Notification.permission !== 'granted') return;
+
+    const options: NotificationOptions = {
+      body: '休憩開始から30分経ちました',
+      vibrate: [200, 100, 200],
+      requireInteraction: true,
+      tag: 'runlog-break-30min',
+      renotify: true,
+    };
+
+    try {
+      const reg = await navigator.serviceWorker?.ready;
+      if (reg?.showNotification) {
+        await reg.showNotification('30分経過', options);
+      } else {
+        new Notification('30分経過', options);
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  function scheduleBreakReminder(startMs: number) {
+    cancelBreakReminder();
+    const elapsed = Date.now() - startMs;
+    const remaining = 30 * 60 * 1000 - elapsed;
+    if (remaining <= 0) {
+      void showBreakNotification();
+      return;
+    }
+    breakReminderTimer.current = window.setTimeout(() => {
+      void showBreakNotification();
+      breakReminderTimer.current = null;
+    }, remaining);
+  }
 
   // Render when no trip is active
   if (!tripId) {
@@ -385,6 +446,7 @@ export default function HomeScreen() {
               try {
                 const geo = await getGeo();
                 await endBreak({ tripId, geo });
+                cancelBreakReminder();
                 await refresh();
               } catch (e: any) {
                 alert(e?.message ?? '休憩終了に失敗しました');
