@@ -82,6 +82,10 @@ export async function updateEventAddress(eventId: string, address?: string) {
   await db.events.update(eventId, { address });
 }
 
+export async function updateEventTimestamp(eventId: string, ts: string) {
+  await db.events.update(eventId, { ts, syncStatus: 'pending' });
+}
+
 export async function addEvent(event: AppEvent) {
   await db.events.put(event);
 }
@@ -490,4 +494,14 @@ export async function backfillMissingAddresses(limit = 5): Promise<boolean> {
     }
   }
   return updated;
+}
+
+export async function deleteTrip(tripId: string): Promise<void> {
+  await db.transaction('rw', db.events, db.meta, async () => {
+    await db.events.where('tripId').equals(tripId).delete();
+    const active = await db.meta.get(META_ACTIVE_TRIP_ID);
+    if (active?.value === tripId) {
+      await db.meta.delete(META_ACTIVE_TRIP_ID);
+    }
+  });
 }

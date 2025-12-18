@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { listTrips, TripSummary } from '../../db/repositories';
+import { deleteTrip, listTrips, TripSummary } from '../../db/repositories';
 
 function fmtLocal(ts?: string) {
   if (!ts) return '-';
@@ -47,6 +47,16 @@ export default function HistoryScreen() {
   useEffect(() => {
     load();
   }, []);
+  async function handleDelete(tripId: string) {
+    const ok = window.confirm('この運行の履歴を削除します。よろしいですか？');
+    if (!ok) return;
+    try {
+      await deleteTrip(tripId);
+      await load();
+    } catch (e: any) {
+      setErr(e?.message ?? '削除に失敗しました');
+    }
+  }
   return (
     <div style={{ padding: 16, maxWidth: 900, margin: '0 auto' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
@@ -73,7 +83,19 @@ export default function HistoryScreen() {
                   ODO: {r.odoStart} → {r.odoEnd ?? '-'} / 総距離: {r.totalKm ?? '-'} km / 最終区間: {r.lastLegKm ?? '-'} km
                 </div>
               </div>
-              <div style={{ opacity: 0.8, fontSize: 12 }}>{r.tripId.slice(0, 8)}</div>
+              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
+                <div style={{ opacity: 0.8, fontSize: 12 }}>{r.tripId.slice(0, 8)}</div>
+                <button
+                  onClick={e => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    void handleDelete(r.tripId);
+                  }}
+                  style={{ padding: '4px 6px', borderRadius: 8, fontSize: 12 }}
+                >
+                  削除
+                </button>
+              </div>
             </div>
           </Link>
         ))}

@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
-import { getEventsByTripId } from '../../db/repositories';
-import { buildTripViewModel, TripViewModel } from '../../state/selectors';
+import { Link, useNavigate, useParams } from 'react-router-dom';
+import { deleteTrip, getEventsByTripId, updateEventTimestamp } from '../../db/repositories';
+import type { AppEvent } from '../../domain/types';
+import { buildTripViewModel, buildTimeline, TripViewModel } from '../../state/selectors';
 
 function fmtLocal(ts?: string) {
   if (!ts) return '-';
@@ -17,8 +18,27 @@ function fmtLocal(ts?: string) {
 
 export default function TripDetail() {
   const { tripId } = useParams();
+  const navigate = useNavigate();
   const [vm, setVm] = useState<TripViewModel | null>(null);
+  const [events, setEvents] = useState<AppEvent[]>([]);
   const [err, setErr] = useState<string | null>(null);
+  const [editing, setEditing] = useState<{ id: string; value: string } | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+
+  const timeline = events.length ? buildTimeline(events) : vm?.timeline ?? [];
+
+  function toLocalInputValue(ts: string) {
+    const d = new Date(ts);
+    const iso = d.toISOString();
+    return iso.slice(0, 16); // YYYY-MM-DDTHH:mm
+  }
+
+  function fromLocalInputValue(v: string) {
+    const d = new Date(v);
+    return isNaN(d.getTime()) ? null : d.toISOString();
+  }
+
   async function load() {
     if (!tripId) return;
     setErr(null);
@@ -26,6 +46,7 @@ export default function TripDetail() {
       const events = await getEventsByTripId(tripId);
       const model = buildTripViewModel(tripId, events);
       setVm(model);
+      setEvents(events);
     } catch (e: any) {
       setErr(e?.message ?? '読み込みに失敗しました');
     }
@@ -55,6 +76,28 @@ export default function TripDetail() {
       {!vm && !err && <div>読み込み中…</div>}
       {vm && (
         <>
+          <div style={{ marginBottom: 12 }}>
+            <button
+              style={{ padding: '8px 12px', borderRadius: 12, background: '#7f1d1d', color: '#fff', fontWeight: 800 }}
+              onClick={async () => {
+                if (!tripId) return;
+                const ok = window.confirm('この運行の履歴をすべて削除します。よろしいですか？');
+                if (!ok) return;
+                setDeleting(true);
+                try {
+                  await deleteTrip(tripId);
+                  navigate('/history');
+                } catch (e: any) {
+                  setErr(e?.message ?? '削除に失敗しました');
+                } finally {
+                  setDeleting(false);
+                }
+              }}
+              disabled={deleting}
+            >
+              {deleting ? '削除中…' : 'この運行を削除'}
+            </button>
+          </div>
           <div style={{ display: 'grid', gap: 10, marginBottom: 14 }}>
             <div style={{ background: '#111', color: '#fff', padding: 12, borderRadius: 16 }}>
               <div style={{ fontWeight: 900, marginBottom: 6 }}>距離サマリー</div>
@@ -109,15 +152,75 @@ export default function TripDetail() {
             <div style={{ background: '#111', color: '#fff', padding: 12, borderRadius: 16 }}>
               <div style={{ fontWeight: 900, marginBottom: 8 }}>イベント一覧</div>
               <div style={{ display: 'grid', gap: 6 }}>
-                {vm.timeline.map((t, idx) => (
-                  <div key={idx} style={{ padding: '8px 10px', borderRadius: 12, background: '#0b0b0b' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10 }}>
-                      <div style={{ fontWeight: 900 }}>{t.title}</div>
-                      <div style={{ opacity: 0.8, fontSize: 12 }}>{fmtLocal(t.ts)}</div>
+                {events.map((ev, idx) => {
+                  const t = timeline[idx];
+                  const isEditing = editing?.id === ev.id;
+                  return (
+                    <div key={ev.id} style={{ padding: '8px 10px', borderRadius: 12, background: '#0b0b0b' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'center' }}>
+                        <div>
+                          <div style={{ fontWeight: 900 }}>{t?.title ?? ev.type}</div>
+                          <div style={{ opacity: 0.8, fontSize: 12 }}>
+                            {isEditing ? (
+                              <input
+                                type="datetime-local"
+                                value={editing?.value ?? toLocalInputValue(ev.ts)}
+                                onChange={e => setEditing({ id: ev.id, value: e.target.value })}
+                                style={{ background: '#111', color: '#fff', border: '1px solid #374151', borderRadius: 8, padding: '4px 6px' }}
+                              />
+                            ) : (
+                              fmtLocal(ev.ts)
+                            )}
+                          </div>
+                        </div>
+                        <div style={{ display: 'flex', gap: 8 }}>
+                          {isEditing ? (
+                            <>
+                              <button
+                                onClick={async () => {
+                                  if (!editing) return;
+                                  const iso = fromLocalInputValue(editing.value);
+                                  if (!iso) {
+                                    alert('日時の形式が不正です');
+                                    return;
+                                  }
+                                  setSaving(true);
+                                  try {
+                                    await updateEventTimestamp(editing.id, iso);
+                                    setEditing(null);
+                                    await load();
+                                  } catch (e: any) {
+                                    setErr(e?.message ?? '更新に失敗しました');
+                                  } finally {
+                                    setSaving(false);
+                                  }
+                                }}
+                                disabled={saving}
+                                style={{ padding: '6px 8px', borderRadius: 8 }}
+                              >
+                                {saving ? '保存中…' : '保存'}
+                              </button>
+                              <button
+                                onClick={() => setEditing(null)}
+                                style={{ padding: '6px 8px', borderRadius: 8 }}
+                              >
+                                キャンセル
+                              </button>
+                            </>
+                          ) : (
+                            <button
+                              onClick={() => setEditing({ id: ev.id, value: toLocalInputValue(ev.ts) })}
+                              style={{ padding: '6px 8px', borderRadius: 8 }}
+                            >
+                              編集
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                      {t?.detail && <div style={{ opacity: 0.85, fontSize: 12, marginTop: 4 }}>{t.detail}</div>}
                     </div>
-                    {t.detail && <div style={{ opacity: 0.85, fontSize: 12, marginTop: 4 }}>{t.detail}</div>}
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           </div>
