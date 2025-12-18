@@ -105,6 +105,19 @@ export function buildTripViewModel(tripId: string, events: AppEvent[]): TripView
  */
 export function buildTimeline(events: AppEvent[]): TimelineItem[] {
   const sorted = [...events].sort((a, b) => a.ts.localeCompare(b.ts));
+  const fmtRange = (s: string, e?: string) => {
+    const fmt = (ts: string) =>
+      new Intl.DateTimeFormat('ja-JP', { hour: '2-digit', minute: '2-digit' }).format(new Date(ts));
+    return e ? `${fmt(s)} → ${fmt(e)}` : `${fmt(s)} → -`;
+  };
+  const fmtDuration = (s: string, e?: string) => {
+    if (!e) return '';
+    const diff = Math.max(0, new Date(e).getTime() - new Date(s).getTime());
+    const mins = Math.floor(diff / 60000);
+    const h = Math.floor(mins / 60);
+    const m = mins % 60;
+    return h > 0 ? `${h}時間${m}分` : `${m}分`;
+  };
   const formatGeo = (e: AppEvent) => {
     if (e.address) return e.address as string;
     if (e.geo) {
@@ -141,7 +154,36 @@ export function buildTimeline(events: AppEvent[]): TimelineItem[] {
         return e.type;
     }
   };
-  return sorted.map(e => {
+
+  const toggleDefs = [
+    { start: 'rest_start', end: 'rest_end', key: 'restSessionId', label: '休息' },
+    { start: 'break_start', end: 'break_end', key: 'breakSessionId', label: '休憩' },
+    { start: 'load_start', end: 'load_end', key: 'loadSessionId', label: '積込' },
+  ];
+  const toggleMap = new Map<string, { start: AppEvent; def: any }>();
+  const timeline: TimelineItem[] = [];
+
+  for (const e of sorted) {
+    const def = toggleDefs.find(d => d.start === e.type || d.end === e.type);
+    if (def) {
+      const key = (e as any).extras?.[def.key];
+      if (def.start === e.type && key) {
+        toggleMap.set(`${def.key}-${key}`, { start: e, def });
+        continue;
+      }
+      if (def.end === e.type && key) {
+        const entry = toggleMap.get(`${def.key}-${key}`);
+        if (entry) {
+          const start = entry.start;
+          const loc = formatGeo(start) || formatGeo(e);
+          const detail = `${fmtRange(start.ts, e.ts)}（${fmtDuration(start.ts, e.ts)}）${loc ? ' / ' + loc : ''}`;
+          timeline.push({ ts: start.ts, title: def.label, detail });
+          toggleMap.delete(`${def.key}-${key}`);
+          continue;
+        }
+      }
+    }
+
     let detail: string | undefined;
     if (e.type === 'refuel') {
       const liters = (e as any).extras?.liters;
@@ -167,6 +209,15 @@ export function buildTimeline(events: AppEvent[]): TimelineItem[] {
     }
     const loc = formatGeo(e);
     const mergedDetail = detail ? (loc ? `${detail} / ${loc}` : detail) : loc;
-    return { ts: e.ts, title: label(e), detail: mergedDetail };
-  });
+    timeline.push({ ts: e.ts, title: label(e), detail: mergedDetail });
+  }
+
+  for (const { start, def } of toggleMap.values()) {
+    const loc = formatGeo(start);
+    const detail = `${fmtRange(start.ts, undefined)}（進行中）${loc ? ' / ' + loc : ''}`;
+    timeline.push({ ts: start.ts, title: def.label, detail });
+  }
+
+  timeline.sort((a, b) => a.ts.localeCompare(b.ts));
+  return timeline;
 }
