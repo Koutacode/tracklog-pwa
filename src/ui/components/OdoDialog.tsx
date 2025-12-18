@@ -13,6 +13,14 @@ interface OdoDialogProps {
 export default function OdoDialog(props: OdoDialogProps) {
   const { open, title, description, initialValue, confirmText = '保存', onCancel, onConfirm } = props;
   const [value, setValue] = useState('');
+
+  const handleSubmit = (e?: React.FormEvent) => {
+    e?.preventDefault();
+    const n = Number(value);
+    if (!Number.isFinite(n) || n <= 0) return;
+    onConfirm(n);
+  };
+
   useEffect(() => {
     if (open) {
       setValue(initialValue != null ? String(initialValue) : '');
@@ -24,41 +32,41 @@ export default function OdoDialog(props: OdoDialogProps) {
       <div style={{ width: 'min(520px, 92vw)', background: '#111', color: '#fff', borderRadius: 16, padding: 16 }}>
         <div style={{ fontSize: 18, fontWeight: 800, marginBottom: 8 }}>{title}</div>
         {description && <div style={{ opacity: 0.85, marginBottom: 12 }}>{description}</div>}
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-          <input
-            inputMode="numeric"
-            placeholder="オドメーター（km）"
-            value={value}
-            onChange={e => setValue(e.target.value.replace(/[^\d]/g, ''))}
-            style={{
-              flex: 1,
-              height: 48,
-              borderRadius: 12,
-              border: '1px solid #374151',
-              background: '#0b0b0b',
-              color: '#fff',
-              padding: '0 12px',
-              fontSize: 18,
-              fontWeight: 700,
-            }}
-          />
-          <span style={{ opacity: 0.85 }}>km</span>
-        </div>
-        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 16 }}>
-          <button onClick={onCancel} style={{ padding: '10px 14px', borderRadius: 12 }}>
-            キャンセル
-          </button>
-          <button
-            onClick={() => {
-              const n = Number(value);
-              if (!Number.isFinite(n) || n <= 0) return;
-              onConfirm(n);
-            }}
-            style={{ padding: '10px 14px', borderRadius: 12, fontWeight: 800 }}
-          >
-            {confirmText}
-          </button>
-        </div>
+        <form onSubmit={handleSubmit}>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <input
+              type="number"
+              inputMode="decimal"
+              enterKeyHint="done"
+              placeholder="オドメーター（km）"
+              value={value}
+              onChange={e => setValue(e.target.value.replace(/[^\d.]/g, ''))}
+              style={{
+                flex: 1,
+                height: 52,
+                borderRadius: 12,
+                border: '1px solid #374151',
+                background: '#0b0b0b',
+                color: '#fff',
+                padding: '0 12px',
+                fontSize: 18,
+                fontWeight: 700,
+              }}
+            />
+            <span style={{ opacity: 0.85 }}>km</span>
+          </div>
+          <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 16 }}>
+            <button type="button" onClick={onCancel} style={{ padding: '10px 14px', borderRadius: 12 }}>
+              キャンセル
+            </button>
+            <button
+              type="submit"
+              style={{ padding: '10px 14px', borderRadius: 12, fontWeight: 800 }}
+            >
+              {confirmText}
+            </button>
+          </div>
+        </form>
       </div>
     </div>
   );
