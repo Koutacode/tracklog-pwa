@@ -48,8 +48,8 @@ export default function OdoDialog(props: OdoDialogProps) {
         background: 'rgba(0,0,0,.6)',
         display: 'flex',
         justifyContent: 'center',
-        alignItems: 'flex-start',
-        padding: '16px 12px',
+        alignItems: 'flex-end',
+        padding: '16px 12px 24px',
         overflowY: 'auto',
         zIndex: 9999,
       }}
