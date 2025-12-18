@@ -21,6 +21,19 @@ export default function OdoDialog(props: OdoDialogProps) {
     onConfirm(n);
   };
 
+  const handleDigit = (d: string) => {
+    setValue(prev => {
+      if (!prev || prev === '0') return d;
+      return (prev + d).replace(/^0+/, '') || '0';
+    });
+  };
+
+  const handleBackspace = () => {
+    setValue(prev => (prev.length > 1 ? prev.slice(0, -1) : ''));
+  };
+
+  const handleClear = () => setValue('');
+
   useEffect(() => {
     if (open) {
       setValue(initialValue != null ? String(initialValue) : '');
@@ -59,16 +72,10 @@ export default function OdoDialog(props: OdoDialogProps) {
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
             <input
               type="number"
-              inputMode="decimal"
-              enterKeyHint="done"
-              onKeyDown={e => {
-                if (e.key === 'Enter') {
-                  handleSubmit(e);
-                }
-              }}
+              inputMode="none"
+              readOnly
               placeholder="オドメーター（km）"
               value={value}
-              onChange={e => setValue(e.target.value.replace(/[^\d.]/g, ''))}
               style={{
                 flex: 1,
                 height: 52,
@@ -82,6 +89,73 @@ export default function OdoDialog(props: OdoDialogProps) {
               }}
             />
             <span style={{ opacity: 0.85 }}>km</span>
+          </div>
+          <div style={{ marginTop: 12 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8 }}>
+              {[1,2,3,4,5,6,7,8,9].map(n => (
+                <button
+                  key={n}
+                  type="button"
+                  onClick={() => handleDigit(String(n))}
+                  style={{
+                    height: 52,
+                    borderRadius: 12,
+                    border: '1px solid #374151',
+                    background: '#1f2937',
+                    color: '#fff',
+                    fontSize: 18,
+                    fontWeight: 800,
+                  }}
+                >
+                  {n}
+                </button>
+              ))}
+              <button
+                type="button"
+                onClick={handleClear}
+                style={{
+                  height: 52,
+                  borderRadius: 12,
+                  border: '1px solid #374151',
+                  background: '#0f172a',
+                  color: '#e5e7eb',
+                  fontSize: 16,
+                  fontWeight: 700,
+                }}
+              >
+                C
+              </button>
+              <button
+                type="button"
+                onClick={() => handleDigit('0')}
+                style={{
+                  height: 52,
+                  borderRadius: 12,
+                  border: '1px solid #374151',
+                  background: '#1f2937',
+                  color: '#fff',
+                  fontSize: 18,
+                  fontWeight: 800,
+                }}
+              >
+                0
+              </button>
+              <button
+                type="button"
+                onClick={handleBackspace}
+                style={{
+                  height: 52,
+                  borderRadius: 12,
+                  border: '1px solid #374151',
+                  background: '#0f172a',
+                  color: '#e5e7eb',
+                  fontSize: 16,
+                  fontWeight: 700,
+                }}
+              >
+                ⌫
+              </button>
+            </div>
           </div>
           <div
             style={{
