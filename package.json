@@ -6,21 +6,15 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview",
-    "cap:sync": "npx cap sync",
-    "cap:add:android": "npx cap add android",
-    "cap:open:android": "npx cap open android"
+    "preview": "vite preview"
   },
   "dependencies": {
-    "@capacitor/core": "^5.7.0",
     "react": "^18.3.0",
     "react-dom": "^18.3.0",
     "react-router-dom": "^6.20.0",
     "dexie": "^4.0.4"
   },
   "devDependencies": {
-    "@capacitor/cli": "^5.7.0",
-    "@capacitor/android": "^5.7.0",
     "typescript": "^5.3.3",
     "vite": "^5.0.0",
     "@vitejs/plugin-react": "^4.1.0",
