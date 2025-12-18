@@ -20,6 +20,7 @@ import {
   addRefuel,
   addBoarding,
   addExpressway,
+  backfillMissingAddresses,
 } from '../../db/repositories';
 import type { AppEvent } from '../../domain/types';
 
@@ -96,6 +97,15 @@ export default function HomeScreen() {
   const canStartBreak = !restActive && !loadActive && !breakActive;
   const nextDayIndex = useMemo(() => getNextDayIndex(events), [events]);
 
+  // Fill missing addresses later whenオンラインになった際に補完する
+  async function backfillAddresses(active: string | null) {
+    const updated = await backfillMissingAddresses();
+    if (updated && active) {
+      const ev = await getEventsByTripId(active);
+      setEvents(ev);
+    }
+  }
+
   async function refresh() {
     setLoading(true);
     try {
@@ -104,8 +114,10 @@ export default function HomeScreen() {
       if (active) {
         const ev = await getEventsByTripId(active);
         setEvents(ev);
+        void backfillAddresses(active);
       } else {
         setEvents([]);
+        void backfillAddresses(null);
       }
     } finally {
       setLoading(false);

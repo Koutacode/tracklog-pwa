@@ -8,6 +8,7 @@ import type {
   Geo,
 } from '../domain/types';
 import { computeTotals } from '../domain/metrics';
+import { reverseGeocode } from '../services/geo';
 
 /*
  * Utilities
@@ -76,6 +77,10 @@ export async function clearActiveTripId() {
 }
 
 // Event CRUD
+
+export async function updateEventAddress(eventId: string, address?: string) {
+  await db.events.update(eventId, { address });
+}
 
 export async function addEvent(event: AppEvent) {
   await db.events.put(event);
@@ -457,4 +462,32 @@ export async function listTrips(): Promise<TripSummary[]> {
   });
   summaries.sort((a, b) => b.startTs.localeCompare(a.startTs));
   return summaries;
+}
+
+/**
+ * Backfill addresses for events that already have geo but no address (e.g. recordedオフライン).
+ * Limits requests to avoid spamming the API.
+ * Returns true if any address was updated.
+ */
+export async function backfillMissingAddresses(limit = 5): Promise<boolean> {
+  if (typeof navigator === 'undefined' || !navigator.onLine) return false;
+  const candidates = await db.events
+    .filter(e => !e.address && !!(e as any).geo)
+    .limit(limit)
+    .toArray();
+  if (candidates.length === 0) return false;
+  let updated = false;
+  for (const ev of candidates) {
+    const geo = (ev as any).geo as Geo;
+    try {
+      const addr = await reverseGeocode(geo);
+      if (addr) {
+        await updateEventAddress(ev.id, addr);
+        updated = true;
+      }
+    } catch {
+      // ignore failures; will retry later
+    }
+  }
+  return updated;
 }
