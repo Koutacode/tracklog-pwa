@@ -701,7 +701,20 @@ export default function HomeScreen() {
           setLoading(true);
           try {
             const geo = await getGeo();
+            // 直近チェックポイント（運行開始 or 直前の休息開始）との差を計算して通知する
+            const lastCheckpointOdo = (() => {
+              const checkpoints = events
+                .filter(e => e.type === 'trip_start' || e.type === 'rest_start')
+                .sort((a, b) => a.ts.localeCompare(b.ts));
+              const last = checkpoints[checkpoints.length - 1] as any;
+              return last?.extras?.odoKm as number | undefined;
+            })();
+            const diffKm = lastCheckpointOdo != null ? odoKm - lastCheckpointOdo : undefined;
+
             await startRest({ tripId, odoKm, geo });
+            if (diffKm != null && diffKm >= 0) {
+              alert(`休息開始までの走行距離: ${diffKm} km`);
+            }
             await refresh();
           } catch (e: any) {
             alert(e?.message ?? '休息開始に失敗しました');
