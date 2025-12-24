@@ -41,21 +41,19 @@ export async function reverseGeocode(geo: Geo): Promise<string | undefined> {
     });
     if (!res.ok) return undefined;
     const data = await res.json();
-    const displayName: string | undefined = typeof data?.display_name === 'string'
-      ? data.display_name.replace(/,/g, ' ').replace(/\s+/g, ' ').trim()
-      : undefined;
+    const rawDisplayName: string | undefined = typeof data?.display_name === 'string' ? data.display_name : undefined;
     const addr = data?.address ?? {};
     const prefecture = addr.state;
-    const county = addr.county || addr.city_district;
     const city = addr.city || addr.town || addr.village || addr.hamlet || addr.municipality;
+    const county = addr.county || addr.city_district;
     const area = addr.suburb || addr.quarter || addr.neighbourhood;
     const block = addr.road || addr.residential;
     const house = addr.house_number || addr.building || addr.house;
     const detail = block && house ? `${block} ${house}` : block || house;
 
-    // Deduplicate while preserving order
+    // 北海道札幌市…のように左から読める順番を優先し、重複は除去
     const seen = new Set<string>();
-    const parts = [prefecture, county, city, area, detail, addr.postcode]
+    const parts = [prefecture, city, county, area, detail, addr.postcode]
       .filter((p): p is string => !!p)
       .filter(p => {
         if (seen.has(p)) return false;
@@ -63,9 +61,9 @@ export async function reverseGeocode(geo: Geo): Promise<string | undefined> {
         return true;
       });
 
-    // display_name からも補完してできるだけ詳細を返す
-    if (displayName) {
-      const displayParts = displayName
+    // display_name からも補完（元のカンマ区切りを保持して順序を崩さない）
+    if (rawDisplayName) {
+      const displayParts = rawDisplayName
         .split(',')
         .map((p: string) => p.trim())
         .filter(Boolean)
@@ -78,7 +76,7 @@ export async function reverseGeocode(geo: Geo): Promise<string | undefined> {
     }
 
     const text = parts.join(' ').trim();
-    return text || displayName;
+    return text || rawDisplayName;
   } catch {
     return undefined;
   } finally {

@@ -23,6 +23,39 @@ function fmtLocal(ts?: string) {
   }).format(d);
 }
 
+function label(ev: AppEvent) {
+  switch (ev.type) {
+    case 'trip_start':
+      return '運行開始';
+    case 'trip_end':
+      return '運行終了';
+    case 'rest_start':
+      return '休息開始';
+    case 'rest_end':
+      return '休息終了';
+    case 'break_start':
+      return '休憩開始';
+    case 'break_end':
+      return '休憩終了';
+    case 'load_start':
+      return '積込開始';
+    case 'load_end':
+      return '積込終了';
+    case 'refuel':
+      return '給油';
+    case 'expressway':
+      return '高速道路';
+    case 'expressway_start':
+      return '高速開始';
+    case 'expressway_end':
+      return '高速終了';
+    case 'boarding':
+      return '乗船';
+    default:
+      return ev.type;
+  }
+}
+
 export default function TripDetail() {
   const { tripId } = useParams();
   const navigate = useNavigate();
@@ -235,11 +268,12 @@ export default function TripDetail() {
                   const isEditingAddress = addressEditing?.id === ev.id;
                   const busy = workingId === ev.id;
                   const geo = (ev as any).geo as any;
+                  const title = label(ev);
                   return (
                     <div key={ev.id} style={{ padding: '8px 10px', borderRadius: 12, background: '#0b0b0b' }}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'center' }}>
                         <div>
-                          <div style={{ fontWeight: 900 }}>{t?.title ?? ev.type}</div>
+                          <div style={{ fontWeight: 900 }}>{t?.title ?? title}</div>
                           <div style={{ opacity: 0.8, fontSize: 12 }}>
                             {isEditing ? (
                               <input
