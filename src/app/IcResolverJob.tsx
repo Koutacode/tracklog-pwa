@@ -16,7 +16,7 @@ export default function IcResolverJob() {
     const runOnce = async () => {
       if (!navigator.onLine) return;
       const pending = await getPendingExpresswayEvents();
-      const targets = pending.slice(0, 2);
+      const targets = pending.slice(0, 1);
       for (const ev of targets) {
         const geo = ev.geo;
         if (!geo) {

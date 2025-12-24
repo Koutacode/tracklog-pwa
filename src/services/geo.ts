@@ -7,19 +7,29 @@ import type { Geo } from '../domain/types';
  */
 export async function getGeo(): Promise<Geo | undefined> {
   if (!navigator.geolocation) return undefined;
-  return new Promise<Geo | undefined>(resolve => {
-    navigator.geolocation.getCurrentPosition(
-      pos => {
-        resolve({
-          lat: pos.coords.latitude,
-          lng: pos.coords.longitude,
-          accuracy: pos.coords.accuracy,
-        });
-      },
-      () => resolve(undefined),
-      { enableHighAccuracy: true, timeout: 8000, maximumAge: 30000 },
-    );
-  });
+  const timeouts = [5000, 8000]; // try fast first, then a bit longer
+
+  for (let i = 0; i < timeouts.length; i++) {
+    // eslint-disable-next-line no-await-in-loop
+    const res = await new Promise<Geo | undefined>(resolve => {
+      navigator.geolocation.getCurrentPosition(
+        pos => {
+          resolve({
+            lat: pos.coords.latitude,
+            lng: pos.coords.longitude,
+            accuracy: pos.coords.accuracy,
+          });
+        },
+        () => resolve(undefined),
+        { enableHighAccuracy: true, timeout: timeouts[i], maximumAge: 30000 },
+      );
+    });
+    if (res) return res;
+    // brief delay before retry
+    // eslint-disable-next-line no-await-in-loop
+    await new Promise(r => setTimeout(r, 300));
+  }
+  return undefined;
 }
 
 /**
@@ -30,7 +40,7 @@ export async function getGeo(): Promise<Geo | undefined> {
 export async function reverseGeocode(geo: Geo): Promise<string | undefined> {
   const { lat, lng } = geo;
   const controller = new AbortController();
-  const id = setTimeout(() => controller.abort(), 8000);
+  const id = setTimeout(() => controller.abort(), 5000);
   try {
     const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(
       lng,

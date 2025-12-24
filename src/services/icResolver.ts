@@ -29,11 +29,14 @@ export async function resolveNearestIC(
 ): Promise<IcResult | null> {
   const query = `\n[out:json][timeout:12];\n(\n  node(around:${radiusM},${lat},${lon})['highway'='motorway_junction'];\n);\nout body;\n`.trim();
   for (const endpoint of OVERPASS_ENDPOINTS) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 7000);
     try {
       const res = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
         body: new URLSearchParams({ data: query }),
+        signal: controller.signal,
       });
       if (!res.ok) continue;
       const json = await res.json();
@@ -51,6 +54,8 @@ export async function resolveNearestIC(
       }
     } catch {
       // Continue to next endpoint on error
+    } finally {
+      clearTimeout(timer);
     }
   }
   return null;
