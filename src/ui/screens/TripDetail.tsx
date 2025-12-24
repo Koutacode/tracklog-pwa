@@ -9,7 +9,7 @@ import {
   updateEventTimestamp,
 } from '../../db/repositories';
 import type { AppEvent } from '../../domain/types';
-import { buildTripViewModel, buildTimeline, TripViewModel } from '../../state/selectors';
+import { buildTripViewModel, TripViewModel } from '../../state/selectors';
 
 function fmtLocal(ts?: string) {
   if (!ts) return '-';
@@ -56,6 +56,107 @@ function label(ev: AppEvent) {
   }
 }
 
+function fmtRange(s: string, e?: string) {
+  const fmt = (ts: string) =>
+    new Intl.DateTimeFormat('ja-JP', { hour: '2-digit', minute: '2-digit' }).format(new Date(ts));
+  return e ? `${fmt(s)} → ${fmt(e)}` : `${fmt(s)} → -`;
+}
+
+function fmtDurationMs(ms: number) {
+  const mins = Math.max(0, Math.floor(ms / 60000));
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return h > 0 ? `${h}時間${m}分` : `${m}分`;
+}
+
+function formatGeo(ev: AppEvent) {
+  if (ev.address) return ev.address as string;
+  if ((ev as any).geo) {
+    const { lat, lng } = (ev as any).geo;
+    return `(${Number(lat).toFixed(5)}, ${Number(lng).toFixed(5)})`;
+  }
+  return undefined;
+}
+
+function findTogglePair(events: AppEvent[], ev: AppEvent) {
+  const defs = [
+    { start: 'rest_start', end: 'rest_end', key: 'restSessionId', label: '休息' },
+    { start: 'break_start', end: 'break_end', key: 'breakSessionId', label: '休憩' },
+    { start: 'load_start', end: 'load_end', key: 'loadSessionId', label: '積込' },
+    { start: 'expressway_start', end: 'expressway_end', key: 'expresswaySessionId', label: '高速道路' },
+  ];
+  const def = defs.find(d => d.start === ev.type || d.end === ev.type);
+  if (!def) return null;
+  const keyVal = (ev as any).extras?.[def.key];
+  const sorted = [...events].sort((a, b) => a.ts.localeCompare(b.ts));
+  if (ev.type === def.start) {
+    const end = sorted.find(e => e.type === def.end && ((e as any).extras?.[def.key] ?? '__legacy__') === (keyVal ?? '__legacy__'));
+    return { start: ev, end, def };
+  }
+  if (ev.type === def.end) {
+    const startCandidates = sorted.filter(e => e.type === def.start);
+    let start: AppEvent | undefined = startCandidates.find(
+      s => ((s as any).extras?.[def.key] ?? '__legacy__') === (keyVal ?? '__legacy__'),
+    );
+    if (!start && startCandidates.length > 0) {
+      // fallback to latest start before this end
+      start = [...startCandidates].reverse().find(s => s.ts <= ev.ts);
+    }
+    return { start, end: ev, def };
+  }
+  return null;
+}
+
+function buildDetail(events: AppEvent[], ev: AppEvent): string | undefined {
+  // Toggle pairs with duration
+  const pair = findTogglePair(events, ev);
+  if (pair && pair.start && pair.end) {
+    const range = fmtRange(pair.start.ts, pair.end.ts);
+    const dur = fmtDurationMs(new Date(pair.end.ts).getTime() - new Date(pair.start.ts).getTime());
+    let text = `${range}（${dur}）`;
+    if (pair.def.label === '高速道路') {
+      const icFrom = (pair.start as any).extras?.icName;
+      const icTo = (pair.end as any).extras?.icName;
+      if (icFrom || icTo) {
+        text = `IC: ${icFrom ?? '不明'} → ${icTo ?? '不明'} / ${text}`;
+      }
+    }
+    const loc = formatGeo(pair.start) || formatGeo(pair.end);
+    return loc ? `${text} / ${loc}` : text;
+  }
+
+  // Single event detail
+  switch (ev.type) {
+    case 'refuel': {
+      const liters = (ev as any).extras?.liters;
+      return liters != null ? `${liters} L` : undefined;
+    }
+    case 'expressway':
+    case 'expressway_start':
+    case 'expressway_end': {
+      const st = (ev as any).extras?.icResolveStatus;
+      const name = (ev as any).extras?.icName;
+      return st === 'resolved' ? `${name ?? 'IC'}（取得済）` : st === 'failed' ? 'IC取得失敗' : 'IC検索中';
+    }
+    case 'trip_end': {
+      const totalKm = (ev as any).extras?.totalKm;
+      const lastLegKm = (ev as any).extras?.lastLegKm;
+      if (totalKm != null && lastLegKm != null) {
+        return `総距離 ${totalKm}km / 最終区間 ${lastLegKm}km`;
+      }
+      return undefined;
+    }
+    case 'rest_end': {
+      const dc = (ev as any).extras?.dayClose;
+      const di = (ev as any).extras?.dayIndex;
+      return dc ? `${di ?? ''}日目を締める` : '分割休息';
+    }
+    default: {
+      return formatGeo(ev);
+    }
+  }
+}
+
 export default function TripDetail() {
   const { tripId } = useParams();
   const navigate = useNavigate();
@@ -67,8 +168,6 @@ export default function TripDetail() {
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [workingId, setWorkingId] = useState<string | null>(null);
-
-  const timeline = events.length ? buildTimeline(events) : vm?.timeline ?? [];
 
   function toLocalInputValue(ts: string) {
     const d = new Date(ts);
