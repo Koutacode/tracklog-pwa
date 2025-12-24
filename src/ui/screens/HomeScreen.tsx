@@ -197,7 +197,7 @@ export default function HomeScreen() {
         const kmh = spd * 3.6;
         if (kmh >= 80 && !expresswayActive) {
           const last = lastHighSpeedPromptAt.current ?? 0;
-          if (Date.now() - last > 5 * 60 * 1000) {
+          if (Date.now() - last > 60 * 1000) {
             setHighSpeedPrompt(Math.round(kmh));
             lastHighSpeedPromptAt.current = Date.now();
           }
@@ -206,7 +206,7 @@ export default function HomeScreen() {
       () => {
         // ignore errors
       },
-      { enableHighAccuracy: true, maximumAge: 5000, timeout: 5000 },
+      { enableHighAccuracy: true, maximumAge: 2000, timeout: 3000 },
     );
     speedWatchId.current = id;
     return () => {
