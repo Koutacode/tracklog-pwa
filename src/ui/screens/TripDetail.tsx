@@ -261,8 +261,7 @@ function buildAiPayload(tripId: string, vm: TripViewModel, events: AppEvent[]): 
 
 function buildAiShareText(payload: AiSharePayload) {
   return [
-    '以下の運行ログを確認し、気づいた点や不整合があれば指摘してください。',
-    '必要なら追加で確認すべき事項も教えてください。',
+    '以下の運行履歴を要約してください。',
     '',
     '---',
     JSON.stringify(payload, null, 2),
