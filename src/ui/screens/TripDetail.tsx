@@ -60,6 +60,14 @@ function label(ev: AppEvent) {
   }
 }
 
+const toggleDefs = [
+  { start: 'rest_start', end: 'rest_end', key: 'restSessionId', label: '休息' },
+  { start: 'break_start', end: 'break_end', key: 'breakSessionId', label: '休憩' },
+  { start: 'load_start', end: 'load_end', key: 'loadSessionId', label: '積込' },
+  { start: 'unload_start', end: 'unload_end', key: 'unloadSessionId', label: '荷卸' },
+  { start: 'expressway_start', end: 'expressway_end', key: 'expresswaySessionId', label: '高速道路' },
+];
+
 function fmtRange(s: string, e?: string) {
   const fmt = (ts: string) =>
     new Intl.DateTimeFormat('ja-JP', { hour: '2-digit', minute: '2-digit' }).format(new Date(ts));
@@ -73,93 +81,125 @@ function fmtDurationMs(ms: number) {
   return h > 0 ? `${h}時間${m}分` : `${m}分`;
 }
 
-function formatGeo(ev: AppEvent) {
-  if (ev.address) return ev.address as string;
-  if ((ev as any).geo) {
-    const { lat, lng } = (ev as any).geo;
-    return `(${Number(lat).toFixed(5)}, ${Number(lng).toFixed(5)})`;
-  }
-  return undefined;
-}
+type GroupedItem = {
+  id: string;
+  title: string;
+  range?: string;
+  duration?: string;
+  detail?: string;
+  addresses?: string[];
+};
 
-function findTogglePair(events: AppEvent[], ev: AppEvent) {
-  const defs = [
-    { start: 'rest_start', end: 'rest_end', key: 'restSessionId', label: '休息' },
-    { start: 'break_start', end: 'break_end', key: 'breakSessionId', label: '休憩' },
-    { start: 'load_start', end: 'load_end', key: 'loadSessionId', label: '積込' },
-    { start: 'unload_start', end: 'unload_end', key: 'unloadSessionId', label: '荷卸' },
-    { start: 'expressway_start', end: 'expressway_end', key: 'expresswaySessionId', label: '高速道路' },
-  ];
-  const def = defs.find(d => d.start === ev.type || d.end === ev.type);
-  if (!def) return null;
-  const keyVal = (ev as any).extras?.[def.key];
+function buildGrouped(events: AppEvent[]): GroupedItem[] {
   const sorted = [...events].sort((a, b) => a.ts.localeCompare(b.ts));
-  if (ev.type === def.start) {
-    const end = sorted.find(e => e.type === def.end && ((e as any).extras?.[def.key] ?? '__legacy__') === (keyVal ?? '__legacy__'));
-    return { start: ev, end, def };
-  }
-  if (ev.type === def.end) {
-    const startCandidates = sorted.filter(e => e.type === def.start);
-    let start: AppEvent | undefined = startCandidates.find(
-      s => ((s as any).extras?.[def.key] ?? '__legacy__') === (keyVal ?? '__legacy__'),
-    );
-    if (!start && startCandidates.length > 0) {
-      // fallback to latest start before this end
-      start = [...startCandidates].reverse().find(s => s.ts <= ev.ts);
-    }
-    return { start, end: ev, def };
-  }
-  return null;
-}
+  const used = new Set<string>();
+  const out: GroupedItem[] = [];
 
-function buildDetail(events: AppEvent[], ev: AppEvent): string | undefined {
-  // Toggle pairs with duration
-  const pair = findTogglePair(events, ev);
-  if (pair && pair.start && pair.end) {
-    const range = fmtRange(pair.start.ts, pair.end.ts);
-    const dur = fmtDurationMs(new Date(pair.end.ts).getTime() - new Date(pair.start.ts).getTime());
-    let text = `${range}（${dur}）`;
-    if (pair.def.label === '高速道路') {
-      const icFrom = (pair.start as any).extras?.icName;
-      const icTo = (pair.end as any).extras?.icName;
-      if (icFrom || icTo) {
-        text = `IC: ${icFrom ?? '不明'} → ${icTo ?? '不明'} / ${text}`;
+  const findStartForEnd = (endEv: AppEvent, def: typeof toggleDefs[number]) => {
+    const keyVal = (endEv as any).extras?.[def.key];
+    const candidates = sorted.filter(e => e.type === def.start);
+    let start = candidates.find(s => ((s as any).extras?.[def.key] ?? '__legacy__') === (keyVal ?? '__legacy__'));
+    if (!start && candidates.length > 0) {
+      start = [...candidates].reverse().find(s => s.ts <= endEv.ts);
+    }
+    return start;
+  };
+
+  for (const ev of sorted) {
+    if (used.has(ev.id)) continue;
+    // Pairable types
+    const def = toggleDefs.find(d => d.start === ev.type || d.end === ev.type);
+    if (def) {
+      let start: AppEvent | undefined;
+      let end: AppEvent | undefined;
+      if (ev.type === def.start) {
+        start = ev;
+        const keyVal = (ev as any).extras?.[def.key];
+        end = sorted.find(
+          e => e.type === def.end && ((e as any).extras?.[def.key] ?? '__legacy__') === (keyVal ?? '__legacy__') && e.ts >= ev.ts,
+        );
+      } else {
+        end = ev;
+        start = findStartForEnd(ev, def);
+      }
+      if (start && end) {
+        used.add(start.id);
+        used.add(end.id);
+        const range = fmtRange(start.ts, end.ts);
+        const duration = fmtDurationMs(new Date(end.ts).getTime() - new Date(start.ts).getTime());
+        const addresses = [start.address, end.address].filter((a): a is string => !!a);
+        let detail: string | undefined;
+        if (def.label === '高速道路') {
+          const icFrom = (start as any).extras?.icName;
+          const icTo = (end as any).extras?.icName;
+          detail = `IC: ${icFrom ?? '不明'} → ${icTo ?? '不明'}`;
+        }
+        out.push({
+          id: `${start.id}-${end.id}`,
+          title: def.label,
+          range,
+          duration,
+          detail,
+          addresses: addresses.length ? Array.from(new Set(addresses)) : undefined,
+        });
+        continue;
       }
     }
-    const loc = formatGeo(pair.start) || formatGeo(pair.end);
-    return loc ? `${text} / ${loc}` : text;
-  }
 
-  // Single event detail
-  switch (ev.type) {
-    case 'refuel': {
-      const liters = (ev as any).extras?.liters;
-      return liters != null ? `${liters} L` : undefined;
+    // Trip start/end grouping
+    if (ev.type === 'trip_start') {
+      const end = sorted.find(e => e.type === 'trip_end');
+      if (end) {
+        used.add(ev.id);
+        used.add(end.id);
+        out.push({
+          id: `${ev.id}-${end.id}`,
+          title: '運行',
+          range: fmtRange(ev.ts, end.ts),
+          duration: fmtDurationMs(new Date(end.ts).getTime() - new Date(ev.ts).getTime()),
+          addresses: [ev.address, end.address].filter((a): a is string => !!a),
+          detail: (() => {
+            const totalKm = (end as any).extras?.totalKm;
+            const lastLegKm = (end as any).extras?.lastLegKm;
+            if (totalKm != null && lastLegKm != null) return `総距離 ${totalKm}km / 最終区間 ${lastLegKm}km`;
+            return undefined;
+          })(),
+        });
+        continue;
+      }
     }
-    case 'expressway':
-    case 'expressway_start':
-    case 'expressway_end': {
+    if (ev.type === 'trip_end' && sorted.find(e => e.type === 'trip_start')) {
+      // trip_end は trip_start で処理済み
+      if (!used.has(ev.id)) used.add(ev.id);
+      continue;
+    }
+
+    // Single events
+    used.add(ev.id);
+    let detail: string | undefined;
+    if (ev.type === 'refuel') {
+      const liters = (ev as any).extras?.liters;
+      detail = liters != null ? `${liters} L` : undefined;
+    } else if (ev.type === 'expressway') {
       const st = (ev as any).extras?.icResolveStatus;
       const name = (ev as any).extras?.icName;
-      return st === 'resolved' ? `${name ?? 'IC'}（取得済）` : st === 'failed' ? 'IC取得失敗' : 'IC検索中';
-    }
-    case 'trip_end': {
-      const totalKm = (ev as any).extras?.totalKm;
-      const lastLegKm = (ev as any).extras?.lastLegKm;
-      if (totalKm != null && lastLegKm != null) {
-        return `総距離 ${totalKm}km / 最終区間 ${lastLegKm}km`;
-      }
-      return undefined;
-    }
-    case 'rest_end': {
+      detail = st === 'resolved' ? `${name ?? 'IC'}（取得済）` : st === 'failed' ? 'IC取得失敗' : 'IC検索中';
+    } else if (ev.type === 'rest_end') {
       const dc = (ev as any).extras?.dayClose;
       const di = (ev as any).extras?.dayIndex;
-      return dc ? `${di ?? ''}日目を締める` : '分割休息';
+      detail = dc ? `${di ?? ''}日目を締める` : '分割休息';
     }
-    default: {
-      return formatGeo(ev);
-    }
+
+    out.push({
+      id: ev.id,
+      title: label(ev),
+      range: fmtRange(ev.ts),
+      detail,
+      addresses: ev.address ? [ev.address] : undefined,
+    });
   }
+
+  return out;
 }
 
 export default function TripDetail() {
@@ -271,10 +311,7 @@ export default function TripDetail() {
   if (!tripId) {
     return <div style={{ padding: 16 }}>tripId が不正です</div>;
   }
-  const timeline = events.map(ev => ({
-    title: label(ev),
-    detail: buildDetail(events, ev),
-  }));
+  const grouped = buildGrouped(events);
   return (
     <div style={{ padding: 18, maxWidth: 960, margin: '0 auto', fontSize: 17, lineHeight: 1.6 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, flexWrap: 'wrap', gap: 12 }}>
@@ -370,117 +407,25 @@ export default function TripDetail() {
             <div className="card" style={{ color: '#fff', padding: 18, borderRadius: 20 }}>
               <div style={{ fontWeight: 900, marginBottom: 12, fontSize: 18 }}>イベント一覧</div>
               <div style={{ display: 'grid', gap: 12 }}>
-                {events.map((ev, idx) => {
-                  const t = timeline[idx];
-                  const isEditing = editing?.id === ev.id;
-                  const isEditingAddress = addressEditing?.id === ev.id;
-                  const busy = workingId === ev.id;
-                  const geo = (ev as any).geo as any;
-                  const title = label(ev);
-                  return (
-                    <div key={ev.id} style={{ padding: '14px 14px', borderRadius: 16, background: '#0b0b0b' }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
-                        <div>
-                          <div style={{ fontWeight: 900, fontSize: 17 }}>{t?.title ?? title}</div>
-                          <div style={{ opacity: 0.9, fontSize: 15 }}>
-                            {isEditing ? (
-                              <input
-                                type="datetime-local"
-                                value={editing?.value ?? toLocalInputValue(ev.ts)}
-                                onChange={e => setEditing({ id: ev.id, value: e.target.value })}
-                                style={{ background: '#111', color: '#fff', border: '1px solid #374151', borderRadius: 8, padding: '4px 6px' }}
-                              />
-                            ) : (
-                              fmtLocal(ev.ts)
-                            )}
-                          </div>
-                        </div>
-                        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
-                          {isEditing ? (
-                            <>
-                              <button
-                                onClick={handleSaveTime}
-                                disabled={saving || busy}
-                                style={{ padding: '10px 12px', borderRadius: 12, fontWeight: 800, fontSize: 15 }}
-                              >
-                                {saving ? '保存中…' : '保存'}
-                              </button>
-                              <button
-                                onClick={() => setEditing(null)}
-                                style={{ padding: '10px 12px', borderRadius: 12, fontSize: 15 }}
-                              >
-                                キャンセル
-                              </button>
-                            </>
-                          ) : (
-                            <button
-                              onClick={() => setEditing({ id: ev.id, value: toLocalInputValue(ev.ts) })}
-                              style={{ padding: '10px 12px', borderRadius: 12, fontSize: 15 }}
-                            >
-                              時刻編集
-                            </button>
-                          )}
-                          <button
-                            onClick={() => void handleDeleteEvent(ev.id)}
-                            disabled={busy}
-                            style={{ padding: '10px 12px', borderRadius: 12, background: '#7f1d1d', color: '#fff', fontWeight: 800, fontSize: 15 }}
-                          >
-                            {busy ? '削除中…' : '削除'}
-                          </button>
-                        </div>
-                      </div>
-                      {t?.detail && <div style={{ opacity: 0.92, fontSize: 15, marginTop: 8 }}>{t.detail}</div>}
-                      <div style={{ marginTop: 12, display: 'grid', gap: 10 }}>
-                        <div style={{ fontSize: 15, opacity: 0.95 }}>
-                          地点: {ev.address ?? '未取得'}
-                          {geo ? (
-                            <span style={{ marginLeft: 6, opacity: 0.75 }}>
-                              ({Number(geo.lat).toFixed(5)}, {Number(geo.lng).toFixed(5)})
-                            </span>
-                          ) : (
-                            <span style={{ marginLeft: 6, opacity: 0.65 }}>(位置情報なし)</span>
-                          )}
-                        </div>
-                        {isEditingAddress ? (
-                          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-                            <input
-                              type="text"
-                              value={addressEditing?.value ?? ''}
-                              onChange={e => setAddressEditing({ id: ev.id, value: e.target.value })}
-                              style={{ flex: 1, minWidth: 220, background: '#111', color: '#fff', border: '1px solid #374151', borderRadius: 8, padding: '6px 8px' }}
-                            />
-                            <button
-                              onClick={handleSaveAddress}
-                              disabled={saving || busy}
-                              style={{ padding: '10px 12px', borderRadius: 12, fontWeight: 800, fontSize: 15 }}
-                            >
-                              {saving ? '保存中…' : '住所保存'}
-                            </button>
-                            <button onClick={() => setAddressEditing(null)} style={{ padding: '10px 12px', borderRadius: 12, fontSize: 15 }}>
-                              キャンセル
-                            </button>
-                          </div>
-                        ) : (
-                          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-                            <button
-                              onClick={() => setAddressEditing({ id: ev.id, value: ev.address ?? '' })}
-                              style={{ padding: '10px 12px', borderRadius: 12, fontSize: 15 }}
-                            >
-                              住所編集
-                            </button>
-                            <button
-                              onClick={() => void handleRefreshAddress(ev.id)}
-                              disabled={!geo || busy}
-                              style={{ padding: '10px 12px', borderRadius: 12, opacity: geo ? 1 : 0.5, fontSize: 15 }}
-                            >
-                              {busy ? '再取得中…' : '位置から再取得'}
-                            </button>
-                          </div>
-                        )}
-                      </div>
+                {grouped.map(item => (
+                  <div key={item.id} style={{ padding: '14px 14px', borderRadius: 16, background: '#0b0b0b', display: 'grid', gap: 10 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', alignItems: 'baseline' }}>
+                      <div style={{ fontWeight: 900, fontSize: 18 }}>{item.title}</div>
+                      {item.range && <div style={{ fontSize: 16, opacity: 0.92 }}>{item.range}</div>}
                     </div>
-                  );
-                })}
+                    {item.duration && (
+                      <div style={{ fontSize: 16, fontWeight: 700, opacity: 0.9 }}>所要時間: {item.duration}</div>
+                    )}
+                    {item.detail && <div style={{ opacity: 0.92, fontSize: 15 }}>{item.detail}</div>}
+                    {item.addresses && item.addresses.length > 0 && (
+                      <div style={{ display: 'grid', gap: 4, fontSize: 15, opacity: 0.92 }}>
+                        {item.addresses.map((a, i) => (
+                          <div key={i}>住所: {a}</div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ))}
               </div>
             </div>
           </div>
