@@ -88,6 +88,7 @@ type GroupedItem = {
   duration?: string;
   detail?: string;
   addresses?: string[];
+  places?: Array<{ label?: string; lat?: number; lng?: number; address?: string }>;
 };
 
 function buildGrouped(events: AppEvent[]): GroupedItem[] {
@@ -128,6 +129,9 @@ function buildGrouped(events: AppEvent[]): GroupedItem[] {
         const range = fmtRange(start.ts, end.ts);
         const duration = fmtDurationMs(new Date(end.ts).getTime() - new Date(start.ts).getTime());
         const addresses = [start.address, end.address].filter((a): a is string => !!a);
+        const places: GroupedItem['places'] = [];
+        if ((start as any).geo) places.push({ label: '開始', ...(start as any).geo, address: start.address });
+        if ((end as any).geo) places.push({ label: '終了', ...(end as any).geo, address: end.address });
         let detail: string | undefined;
         if (def.label === '高速道路') {
           const icFrom = (start as any).extras?.icName;
@@ -141,6 +145,7 @@ function buildGrouped(events: AppEvent[]): GroupedItem[] {
           duration,
           detail,
           addresses: addresses.length ? Array.from(new Set(addresses)) : undefined,
+          places: places.length ? places : undefined,
         });
         continue;
       }
@@ -158,6 +163,10 @@ function buildGrouped(events: AppEvent[]): GroupedItem[] {
           range: fmtRange(ev.ts, end.ts),
           duration: fmtDurationMs(new Date(end.ts).getTime() - new Date(ev.ts).getTime()),
           addresses: [ev.address, end.address].filter((a): a is string => !!a),
+          places: [
+            ...(ev.geo ? [{ label: '開始', ...(ev.geo as any), address: ev.address }] : []),
+            ...(end.geo ? [{ label: '終了', ...(end.geo as any), address: end.address }] : []),
+          ].filter(Boolean),
           detail: (() => {
             const totalKm = (end as any).extras?.totalKm;
             const lastLegKm = (end as any).extras?.lastLegKm;
@@ -196,6 +205,7 @@ function buildGrouped(events: AppEvent[]): GroupedItem[] {
       range: fmtRange(ev.ts),
       detail,
       addresses: ev.address ? [ev.address] : undefined,
+      places: ev.geo ? [{ ...(ev as any).geo, address: ev.address }] : undefined,
     });
   }
 
@@ -422,6 +432,42 @@ export default function TripDetail() {
                         {item.addresses.map((a, i) => (
                           <div key={i}>住所: {a}</div>
                         ))}
+                      </div>
+                    )}
+                    {item.places && item.places.length > 0 && (
+                      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                        {item.places.map((p, i) => {
+                          const query = p.lat != null && p.lng != null
+                            ? `${p.lat},${p.lng}`
+                            : encodeURIComponent(p.address ?? '');
+                          const mapUrl = p.lat != null && p.lng != null
+                            ? `https://www.google.com/maps?q=${query}`
+                            : `https://www.google.com/maps/search/?api=1&query=${query}`;
+                          const navUrl = `https://www.google.com/maps/dir/?api=1&destination=${query}`;
+                          const label = p.label ? `${p.label}地点` : '地点';
+                          return (
+                            <div key={i} style={{ display: 'flex', gap: 6 }}>
+                              <a
+                                href={mapUrl}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="pill-link"
+                                style={{ fontSize: 13 }}
+                              >
+                                {label}を地図で開く
+                              </a>
+                              <a
+                                href={navUrl}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="pill-link"
+                                style={{ fontSize: 13 }}
+                              >
+                                ナビで開く
+                              </a>
+                            </div>
+                          );
+                        })}
                       </div>
                     )}
                   </div>
