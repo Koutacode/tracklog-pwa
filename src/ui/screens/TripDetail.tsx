@@ -91,6 +91,27 @@ type GroupedItem = {
   places?: Array<{ label?: string; lat?: number; lng?: number; address?: string }>;
 };
 
+type AiSharePayload = {
+  tripId: string;
+  generatedAt: string;
+  summary: {
+    hasTripEnd: boolean;
+    startTs: string | null;
+    endTs: string | null;
+    startAddress: string | null;
+    endAddress: string | null;
+    odoStart: number;
+    odoEnd: number | null;
+    totalKm: number | null;
+    lastLegKm: number | null;
+  };
+  validation: TripViewModel['validation'];
+  segments: TripViewModel['segments'];
+  dayRuns: TripViewModel['dayRuns'];
+  timeline: TripViewModel['timeline'];
+  events: AppEvent[];
+};
+
 function buildGrouped(events: AppEvent[]): GroupedItem[] {
   const sorted = [...events].sort((a, b) => a.ts.localeCompare(b.ts));
   const used = new Set<string>();
@@ -212,6 +233,61 @@ function buildGrouped(events: AppEvent[]): GroupedItem[] {
   return out;
 }
 
+function buildAiPayload(tripId: string, vm: TripViewModel, events: AppEvent[]): AiSharePayload {
+  const sorted = [...events].sort((a, b) => a.ts.localeCompare(b.ts));
+  const tripStart = sorted.find(e => e.type === 'trip_start');
+  const tripEnd = [...sorted].reverse().find(e => e.type === 'trip_end');
+  return {
+    tripId,
+    generatedAt: new Date().toISOString(),
+    summary: {
+      hasTripEnd: vm.hasTripEnd,
+      startTs: tripStart?.ts ?? null,
+      endTs: tripEnd?.ts ?? null,
+      startAddress: tripStart?.address ?? null,
+      endAddress: tripEnd?.address ?? null,
+      odoStart: vm.odoStart,
+      odoEnd: vm.odoEnd ?? null,
+      totalKm: vm.totalKm ?? null,
+      lastLegKm: vm.lastLegKm ?? null,
+    },
+    validation: vm.validation,
+    segments: vm.segments,
+    dayRuns: vm.dayRuns,
+    timeline: vm.timeline,
+    events: sorted,
+  };
+}
+
+function buildAiShareText(payload: AiSharePayload) {
+  return [
+    '以下の運行ログを確認し、気づいた点や不整合があれば指摘してください。',
+    '必要なら追加で確認すべき事項も教えてください。',
+    '',
+    '---',
+    JSON.stringify(payload, null, 2),
+  ].join('\n');
+}
+
+async function copyText(text: string) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  const area = document.createElement('textarea');
+  area.value = text;
+  area.style.position = 'fixed';
+  area.style.opacity = '0';
+  document.body.appendChild(area);
+  area.focus();
+  area.select();
+  const ok = document.execCommand('copy');
+  area.remove();
+  if (!ok) {
+    throw new Error('コピーに失敗しました');
+  }
+}
+
 export default function TripDetail() {
   const { tripId } = useParams();
   const navigate = useNavigate();
@@ -222,6 +298,7 @@ export default function TripDetail() {
   const [addressEditing, setAddressEditing] = useState<{ id: string; value: string } | null>(null);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [sharing, setSharing] = useState(false);
   const [workingId, setWorkingId] = useState<string | null>(null);
 
   function toLocalInputValue(ts: string) {
@@ -318,6 +395,30 @@ export default function TripDetail() {
     }
   }
 
+  async function handleShareAi() {
+    if (!tripId || !vm) return;
+    setSharing(true);
+    setErr(null);
+    try {
+      const payload = buildAiPayload(tripId, vm, events);
+      const text = buildAiShareText(payload);
+      if (navigator.share) {
+        try {
+          await navigator.share({ title: '運行ログ', text });
+          return;
+        } catch (e: any) {
+          if (e?.name === 'AbortError') return;
+        }
+      }
+      await copyText(text);
+      alert('AI送信用テキストをコピーしました。ChatGPT/Geminiに貼り付けてください。');
+    } catch (e: any) {
+      setErr(e?.message ?? 'AI共有に失敗しました');
+    } finally {
+      setSharing(false);
+    }
+  }
+
   if (!tripId) {
     return <div style={{ padding: 16 }}>tripId が不正です</div>;
   }
@@ -332,6 +433,14 @@ export default function TripDetail() {
         <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
           <Link to="/" className="pill-link">ホーム</Link>
           <Link to="/history" className="pill-link">履歴</Link>
+          <button
+            onClick={handleShareAi}
+            disabled={sharing || !vm}
+            className="pill-link"
+            style={{ borderColor: '#334155', background: '#0f172a' }}
+          >
+            {sharing ? 'AI共有中…' : 'AI共有'}
+          </button>
           <button onClick={load} style={{ padding: '12px 14px', borderRadius: 12, fontWeight: 800, fontSize: 15 }}>再読込</button>
         </div>
       </div>
