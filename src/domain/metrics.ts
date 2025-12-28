@@ -115,6 +115,7 @@ export function computeDayRuns(params: {
       fromLabel: prevDayIndex === 0 ? 'trip_start' : `day_${prevDayIndex}_close`,
       toLabel: `day_${b.dayIndex}_close`,
       km,
+      closeOdo: b.boundaryOdo,
       status: 'confirmed',
     });
     prevOdo = b.boundaryOdo;
@@ -128,6 +129,7 @@ export function computeDayRuns(params: {
       fromLabel: prevDayIndex === 0 ? 'trip_start' : `day_${prevDayIndex}_close`,
       toLabel: 'trip_end',
       km,
+      closeOdo: params.odoEnd,
       status: 'confirmed',
     });
   } else {

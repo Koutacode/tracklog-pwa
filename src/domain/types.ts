@@ -77,6 +77,7 @@ export type DayRun = {
   fromLabel: string;
   toLabel: string;
   km: number;
+  closeOdo?: number;
   status: 'confirmed' | 'pending';
 };
 
