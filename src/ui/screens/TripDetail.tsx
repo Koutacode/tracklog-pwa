@@ -12,6 +12,7 @@ import {
 } from '../../db/repositories';
 import type { AppEvent } from '../../domain/types';
 import { buildTripViewModel, TripViewModel } from '../../state/selectors';
+import { DAY_MS, getJstDateInfo } from '../../domain/jst';
 
 function fmtLocal(ts?: string) {
   if (!ts) return '-';
@@ -85,6 +86,7 @@ function fmtDurationMs(ms: number) {
 
 type GroupedItem = {
   id: string;
+  ts: string;
   title: string;
   range?: string;
   duration?: string;
@@ -101,6 +103,12 @@ type NumericEditDef = {
   value?: number;
   min?: number;
   step?: number;
+};
+
+type DayGroup<T> = {
+  dayIndex: number;
+  dateLabel: string;
+  items: T[];
 };
 
 type AiSharePayload = {
@@ -141,8 +149,42 @@ function getNumericEditDef(ev: AppEvent): NumericEditDef | null {
   return null;
 }
 
+function getDayIndexByStamp(dayStamp: number, startDayStamp: number) {
+  if (!Number.isFinite(dayStamp) || !Number.isFinite(startDayStamp)) return 1;
+  return Math.floor((dayStamp - startDayStamp) / DAY_MS) + 1;
+}
+
+function groupItemsByDay<T extends { ts: string }>(items: T[], tripStartTs: string): DayGroup<T>[] {
+  if (items.length === 0) return [];
+  const startInfo = getJstDateInfo(tripStartTs);
+  const startDayStamp = startInfo.dayStamp;
+  const groups = new Map<number, DayGroup<T>>();
+  for (const item of items) {
+    const info = getJstDateInfo(item.ts);
+    const dayIndex = getDayIndexByStamp(info.dayStamp, startDayStamp);
+    const entry = groups.get(info.dayStamp);
+    if (entry) {
+      entry.items.push(item);
+    } else {
+      groups.set(info.dayStamp, {
+        dayIndex,
+        dateLabel: info.dateLabel,
+        items: [item],
+      });
+    }
+  }
+  return [...groups.entries()].sort((a, b) => a[0] - b[0]).map(([, v]) => v);
+}
+
 function buildGrouped(events: AppEvent[]): GroupedItem[] {
   const sorted = [...events].sort((a, b) => a.ts.localeCompare(b.ts));
+  const tripStart = sorted.find(e => e.type === 'trip_start');
+  const startDayStamp = tripStart ? getJstDateInfo(tripStart.ts).dayStamp : null;
+  const getDayIndex = (ts: string) => {
+    if (startDayStamp == null) return undefined;
+    const info = getJstDateInfo(ts);
+    return getDayIndexByStamp(info.dayStamp, startDayStamp);
+  };
   const used = new Set<string>();
   const out: GroupedItem[] = [];
 
@@ -190,6 +232,7 @@ function buildGrouped(events: AppEvent[]): GroupedItem[] {
         }
         out.push({
           id: `${start.id}-${end.id}`,
+          ts: start.ts,
           title: def.label,
           range,
           duration,
@@ -209,6 +252,7 @@ function buildGrouped(events: AppEvent[]): GroupedItem[] {
         used.add(end.id);
         out.push({
           id: `${ev.id}-${end.id}`,
+          ts: ev.ts,
           title: '運行',
           range: fmtRange(ev.ts, end.ts),
           duration: fmtDurationMs(new Date(end.ts).getTime() - new Date(ev.ts).getTime()),
@@ -245,12 +289,13 @@ function buildGrouped(events: AppEvent[]): GroupedItem[] {
       detail = st === 'resolved' ? `${name ?? 'IC'}（取得済）` : st === 'failed' ? 'IC取得失敗' : 'IC検索中';
     } else if (ev.type === 'rest_end') {
       const dc = (ev as any).extras?.dayClose;
-      const di = (ev as any).extras?.dayIndex;
+      const di = dc ? getDayIndex(ev.ts) : undefined;
       detail = dc ? `${di ?? ''}日目を締める` : '分割休息';
     }
 
     out.push({
       id: ev.id,
+      ts: ev.ts,
       title: label(ev),
       range: fmtRange(ev.ts),
       detail,
@@ -490,6 +535,9 @@ export default function TripDetail() {
     return <div style={{ padding: 16 }}>tripId が不正です</div>;
   }
   const grouped = buildGrouped(events);
+  const tripStartEvent = events.find(e => e.type === 'trip_start');
+  const tripStartTs = tripStartEvent?.ts ?? events[0]?.ts;
+  const groupedByDay = tripStartTs ? groupItemsByDay(grouped, tripStartTs) : [];
   return (
     <div style={{ padding: 18, maxWidth: 960, margin: '0 auto', fontSize: 17, lineHeight: 1.6 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, flexWrap: 'wrap', gap: 12 }}>
@@ -577,15 +625,15 @@ export default function TripDetail() {
               </div>
             </div>
             <div className="card" style={{ color: '#fff', padding: 18, borderRadius: 20 }}>
-              <div style={{ fontWeight: 900, marginBottom: 12, fontSize: 18 }}>日別運行（休息終了で「はい」を押した分だけ確定）</div>
+              <div style={{ fontWeight: 900, marginBottom: 12, fontSize: 18 }}>日別運行（日本時間24時で日付切替）</div>
               <div style={{ display: 'grid', gap: 10 }}>
                 {vm.dayRuns.map(day => (
                   <div key={day.dayIndex} style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 12, padding: '12px 14px', borderRadius: 16, background: '#0b0b0b' }}>
                     <div>
-                      <div style={{ fontWeight: 900, fontSize: 17 }}>{day.dayIndex}日目 {day.status === 'pending' ? '（締め待ち）' : ''}</div>
-                      <div style={{ opacity: 0.85, fontSize: 14 }}>{day.fromLabel} → {day.toLabel}</div>
+                      <div style={{ fontWeight: 900, fontSize: 17 }}>{day.dayIndex}日目 {day.status === 'pending' ? '（運行中）' : ''}</div>
+                      <div style={{ opacity: 0.85, fontSize: 14 }}>{day.dateLabel}</div>
                       {day.closeOdo != null && (
-                        <div style={{ opacity: 0.85, fontSize: 14 }}>休息開始: {day.closeOdo} km</div>
+                        <div style={{ opacity: 0.85, fontSize: 14 }}>{day.closeLabel ?? '休息開始'}: {day.closeOdo} km</div>
                       )}
                     </div>
                     <div style={{ fontSize: 21, fontWeight: 900 }}>{day.km} km</div>
@@ -594,61 +642,68 @@ export default function TripDetail() {
               </div>
             </div>
             <div className="card" style={{ color: '#fff', padding: 18, borderRadius: 20 }}>
-              <div style={{ fontWeight: 900, marginBottom: 12, fontSize: 18 }}>イベント一覧</div>
-              <div style={{ display: 'grid', gap: 12 }}>
-                {grouped.map(item => (
-                  <div key={item.id} style={{ padding: '14px 14px', borderRadius: 16, background: '#0b0b0b', display: 'grid', gap: 10 }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', alignItems: 'baseline' }}>
-                      <div style={{ fontWeight: 900, fontSize: 18 }}>{item.title}</div>
-                      {item.range && <div style={{ fontSize: 16, opacity: 0.92 }}>{item.range}</div>}
+              <div style={{ fontWeight: 900, marginBottom: 12, fontSize: 18 }}>イベント一覧（日別）</div>
+              <div style={{ display: 'grid', gap: 16 }}>
+                {(groupedByDay.length > 0 ? groupedByDay : [{ dayIndex: 1, dateLabel: '', items: grouped }]).map(day => (
+                  <div key={`${day.dayIndex}-${day.dateLabel}`} style={{ display: 'grid', gap: 10 }}>
+                    <div style={{ fontWeight: 900, fontSize: 17 }}>
+                      {day.dayIndex}日目 {day.dateLabel ? `(${day.dateLabel})` : ''}
                     </div>
-                    {item.duration && (
-                      <div style={{ fontSize: 16, fontWeight: 700, opacity: 0.9 }}>所要時間: {item.duration}</div>
-                    )}
-                    {item.detail && <div style={{ opacity: 0.92, fontSize: 15 }}>{item.detail}</div>}
-                    {item.addresses && item.addresses.length > 0 && (
-                      <div style={{ display: 'grid', gap: 4, fontSize: 15, opacity: 0.92 }}>
-                        {item.addresses.map((a, i) => (
-                          <div key={i}>住所: {a}</div>
-                        ))}
+                    {day.items.map(item => (
+                      <div key={item.id} style={{ padding: '14px 14px', borderRadius: 16, background: '#0b0b0b', display: 'grid', gap: 10 }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', alignItems: 'baseline' }}>
+                          <div style={{ fontWeight: 900, fontSize: 18 }}>{item.title}</div>
+                          {item.range && <div style={{ fontSize: 16, opacity: 0.92 }}>{item.range}</div>}
+                        </div>
+                        {item.duration && (
+                          <div style={{ fontSize: 16, fontWeight: 700, opacity: 0.9 }}>所要時間: {item.duration}</div>
+                        )}
+                        {item.detail && <div style={{ opacity: 0.92, fontSize: 15 }}>{item.detail}</div>}
+                        {item.addresses && item.addresses.length > 0 && (
+                          <div style={{ display: 'grid', gap: 4, fontSize: 15, opacity: 0.92 }}>
+                            {item.addresses.map((a, i) => (
+                              <div key={i}>住所: {a}</div>
+                            ))}
+                          </div>
+                        )}
+                        {item.places && item.places.length > 0 && (
+                          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                            {item.places.map((p, i) => {
+                              const query = p.lat != null && p.lng != null
+                                ? `${p.lat},${p.lng}`
+                                : encodeURIComponent(p.address ?? '');
+                              const mapUrl = p.lat != null && p.lng != null
+                                ? `https://www.google.com/maps?q=${query}`
+                                : `https://www.google.com/maps/search/?api=1&query=${query}`;
+                              const navUrl = `https://www.google.com/maps/dir/?api=1&destination=${query}`;
+                              const label = p.label ? `${p.label}地点` : '地点';
+                              return (
+                                <div key={i} style={{ display: 'flex', gap: 6 }}>
+                                  <a
+                                    href={mapUrl}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="pill-link"
+                                    style={{ fontSize: 13 }}
+                                  >
+                                    {label}を地図で開く
+                                  </a>
+                                  <a
+                                    href={navUrl}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="pill-link"
+                                    style={{ fontSize: 13 }}
+                                  >
+                                    ナビで開く
+                                  </a>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
                       </div>
-                    )}
-                    {item.places && item.places.length > 0 && (
-                      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                        {item.places.map((p, i) => {
-                          const query = p.lat != null && p.lng != null
-                            ? `${p.lat},${p.lng}`
-                            : encodeURIComponent(p.address ?? '');
-                          const mapUrl = p.lat != null && p.lng != null
-                            ? `https://www.google.com/maps?q=${query}`
-                            : `https://www.google.com/maps/search/?api=1&query=${query}`;
-                          const navUrl = `https://www.google.com/maps/dir/?api=1&destination=${query}`;
-                          const label = p.label ? `${p.label}地点` : '地点';
-                          return (
-                            <div key={i} style={{ display: 'flex', gap: 6 }}>
-                              <a
-                                href={mapUrl}
-                                target="_blank"
-                                rel="noreferrer"
-                                className="pill-link"
-                                style={{ fontSize: 13 }}
-                              >
-                                {label}を地図で開く
-                              </a>
-                              <a
-                                href={navUrl}
-                                target="_blank"
-                                rel="noreferrer"
-                                className="pill-link"
-                                style={{ fontSize: 13 }}
-                              >
-                                ナビで開く
-                              </a>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    )}
+                    ))}
                   </div>
                 ))}
               </div>

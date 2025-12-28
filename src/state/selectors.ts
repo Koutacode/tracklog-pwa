@@ -9,6 +9,7 @@ import type {
   TimelineItem,
 } from '../domain/types';
 import { computeSegments, computeDayRuns, computeTotals } from '../domain/metrics';
+import { DAY_MS, getJstDateInfo } from '../domain/jst';
 
 export type TripViewModel = {
   tripId: string;
@@ -69,7 +70,12 @@ export function buildTripViewModel(tripId: string, events: AppEvent[]): TripView
     }
   });
   // Day runs
-  const dayRuns = computeDayRuns({ odoStart, restStarts, restEnds, odoEnd });
+  const dayRuns = computeDayRuns({
+    odoStart,
+    tripStartTs: tripStart.ts,
+    restStarts,
+    tripEnd: odoEnd != null ? { odoEnd, tripEndTs: tripEnd!.ts } : undefined,
+  });
   // Totals and last leg
   let totalKm: number | undefined;
   let lastLegKm: number | undefined;
@@ -105,6 +111,8 @@ export function buildTripViewModel(tripId: string, events: AppEvent[]): TripView
  */
 export function buildTimeline(events: AppEvent[]): TimelineItem[] {
   const sorted = [...events].sort((a, b) => a.ts.localeCompare(b.ts));
+  const tripStart = sorted.find(e => e.type === 'trip_start') as TripStartEvent | undefined;
+  const tripStartDayStamp = tripStart ? getJstDateInfo(tripStart.ts).dayStamp : null;
   const fmtRange = (s: string, e?: string) => {
     const fmt = (ts: string) =>
       new Intl.DateTimeFormat('ja-JP', { hour: '2-digit', minute: '2-digit' }).format(new Date(ts));
@@ -222,8 +230,13 @@ export function buildTimeline(events: AppEvent[]): TimelineItem[] {
     }
     if (e.type === 'rest_end') {
       const dc = (e as any).extras?.dayClose;
-      const di = (e as any).extras?.dayIndex;
-      detail = dc ? `${di ?? ''}日目を締める` : '分割休息';
+      if (dc && tripStartDayStamp != null) {
+        const info = getJstDateInfo(e.ts);
+        const di = Math.floor((info.dayStamp - tripStartDayStamp) / DAY_MS) + 1;
+        detail = `${di}日目を締める`;
+      } else {
+        detail = '分割休息';
+      }
     }
     const loc = formatGeo(e);
     const mergedDetail = detail ? (loc ? `${detail} / ${loc}` : detail) : loc;

@@ -74,10 +74,11 @@ export type Segment = {
 
 export type DayRun = {
   dayIndex: number;
-  fromLabel: string;
-  toLabel: string;
+  dateKey: string;
+  dateLabel: string;
   km: number;
   closeOdo?: number;
+  closeLabel?: string;
   status: 'confirmed' | 'pending';
 };
 

@@ -7,6 +7,7 @@ import FuelDialog from '../components/FuelDialog';
 import InstallButton from '../components/InstallButton';
 import { getGeo, getGeoWithAddress } from '../../services/geo';
 import { isWakeLockSupported, requestWakeLock, releaseWakeLock } from '../../services/wakeLock';
+import { DAY_MS, getJstDateInfo } from '../../domain/jst';
 import {
   getActiveTripId,
   getEventsByTripId,
@@ -71,13 +72,13 @@ function getOpenToggle(events: AppEvent[], startType: string, endType: string, k
   return null;
 }
 
-function getNextDayIndex(events: AppEvent[]): number {
-  const closes = events.filter(e => e.type === 'rest_end' && (e as any).extras?.dayClose === true);
-  const idxs = closes
-    .map(e => (e as any).extras?.dayIndex)
-    .filter((n: any) => typeof n === 'number') as number[];
-  if (idxs.length > 0) return Math.max(...idxs) + 1;
-  return closes.length + 1;
+function getNextDayIndex(events: AppEvent[], nowTs: string): number {
+  const tripStart = events.find(e => e.type === 'trip_start');
+  if (!tripStart) return 1;
+  const startInfo = getJstDateInfo(tripStart.ts);
+  const nowInfo = getJstDateInfo(nowTs);
+  if (!Number.isFinite(startInfo.dayStamp) || !Number.isFinite(nowInfo.dayStamp)) return 1;
+  return Math.floor((nowInfo.dayStamp - startInfo.dayStamp) / DAY_MS) + 1;
 }
 
 export default function HomeScreen() {
@@ -122,7 +123,7 @@ export default function HomeScreen() {
   const canStartLoad = !restActive && !breakActive && !loadActive && !unloadActive;
   const canStartUnload = !restActive && !breakActive && !unloadActive && !loadActive;
   const canStartBreak = !restActive && !loadActive && !breakActive && !unloadActive;
-  const nextDayIndex = useMemo(() => getNextDayIndex(events), [events]);
+  const nextDayIndex = useMemo(() => getNextDayIndex(events, new Date(now).toISOString()), [events, now]);
   const expresswayStart = openExpresswaySessionId
     ? (events.find(e => e.type === 'expressway_start' && (e as any).extras?.expresswaySessionId === openExpresswaySessionId) as any)
     : null;

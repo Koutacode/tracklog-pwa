@@ -1,4 +1,5 @@
-import type { RestStartEvent, RestEndEvent, Segment, DayRun } from './types';
+import type { RestStartEvent, Segment, DayRun } from './types';
+import { DAY_MS, getJstDateInfo } from './jst';
 
 function sortByTs<T extends { ts: string }>(arr: T[]): T[] {
   return [...arr].sort((a, b) => a.ts.localeCompare(b.ts));
@@ -76,74 +77,68 @@ export function computeTotals(params: {
 }
 
 /**
- * Compute day runs based on rest end boundaries marked with dayClose=true. Each
- * confirmed day run represents the distance from the previous boundary (or
- * trip start) to the day close boundary. A pending day run is added for
- * ongoing trips to indicate the next segment that has not yet been closed.
+ * Compute day runs using Japan Standard Time (24:00 boundary).
+ * Distances are still derived from odometer checkpoints at trip start,
+ * rest starts and trip end.
  */
 export function computeDayRuns(params: {
   odoStart: number;
+  tripStartTs: string;
   restStarts: RestStartEvent[];
-  restEnds: RestEndEvent[];
-  odoEnd?: number;
+  tripEnd?: { odoEnd: number; tripEndTs: string };
 }): DayRun[] {
-  const rs = sortByTs(params.restStarts);
-  const re = sortByTs(params.restEnds);
-  // Map sessionId to odoKm for quick lookup.
-  const startOdoBySession = new Map<string, number>();
-  for (const r of rs) {
-    startOdoBySession.set(r.extras.restSessionId, r.extras.odoKm);
-  }
-  // Extract boundaries (dayClose=true)
-  const closes = re.filter(e => e.extras.dayClose);
-  const boundaries: Array<{ dayIndex: number; boundaryOdo: number; ts: string }> = [];
-  closes.forEach((e, idx) => {
-    const dayIndex = e.extras.dayIndex ?? idx + 1;
-    const boundaryOdo = startOdoBySession.get(e.extras.restSessionId);
-    if (boundaryOdo != null) {
-      boundaries.push({ dayIndex, boundaryOdo, ts: e.ts });
-    }
+  const segments = computeSegments({
+    odoStart: params.odoStart,
+    tripStartTs: params.tripStartTs,
+    restStarts: params.restStarts,
+    tripEnd: params.tripEnd,
   });
-  boundaries.sort((a, b) => a.ts.localeCompare(b.ts));
-  const days: DayRun[] = [];
-  let prevOdo = params.odoStart;
-  let prevDayIndex = 0;
-  boundaries.forEach(b => {
-    const km = b.boundaryOdo - prevOdo;
-    days.push({
-      dayIndex: b.dayIndex,
-      fromLabel: prevDayIndex === 0 ? 'trip_start' : `day_${prevDayIndex}_close`,
-      toLabel: `day_${b.dayIndex}_close`,
-      km,
-      closeOdo: b.boundaryOdo,
-      status: 'confirmed',
-    });
-    prevOdo = b.boundaryOdo;
-    prevDayIndex = b.dayIndex;
-  });
-  if (params.odoEnd != null) {
-    const km = params.odoEnd - prevOdo;
-    const dayIndex = prevDayIndex + 1;
-    days.push({
-      dayIndex,
-      fromLabel: prevDayIndex === 0 ? 'trip_start' : `day_${prevDayIndex}_close`,
-      toLabel: 'trip_end',
-      km,
-      closeOdo: params.odoEnd,
-      status: 'confirmed',
-    });
-  } else {
-    // For an ongoing trip, add a pending day run to show the next segment.
-    if (prevDayIndex >= 0) {
-      const dayIndex = prevDayIndex + 1;
-      days.push({
+  const startInfo = getJstDateInfo(params.tripStartTs);
+  const startDayStamp = startInfo.dayStamp;
+
+  const groups = new Map<number, DayRun>();
+  for (const seg of segments) {
+    if (!seg.toTs) continue;
+    const info = getJstDateInfo(seg.toTs);
+    const dayIndex = Math.floor((info.dayStamp - startDayStamp) / DAY_MS) + 1;
+    const entry = groups.get(info.dayStamp);
+    const closeLabel = seg.toLabel === 'trip_end' ? '運行終了' : '休息開始';
+    if (entry) {
+      entry.km += seg.km;
+      entry.closeOdo = seg.toOdo;
+      entry.closeLabel = closeLabel;
+    } else {
+      groups.set(info.dayStamp, {
         dayIndex,
-        fromLabel: prevDayIndex === 0 ? 'trip_start' : `day_${prevDayIndex}_close`,
-        toLabel: 'pending',
-        km: 0,
-        status: 'pending',
+        dateKey: info.dateKey,
+        dateLabel: info.dateLabel,
+        km: seg.km,
+        closeOdo: seg.toOdo,
+        closeLabel,
+        status: 'confirmed',
       });
     }
+  }
+
+  if (groups.size === 0) {
+    return [
+      {
+        dayIndex: 1,
+        dateKey: startInfo.dateKey,
+        dateLabel: startInfo.dateLabel,
+        km: 0,
+        status: params.tripEnd ? 'confirmed' : 'pending',
+      },
+    ];
+  }
+
+  const days = [...groups.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([, run]) => run);
+
+  if (!params.tripEnd) {
+    const last = days[days.length - 1];
+    if (last) last.status = 'pending';
   }
   return days;
 }
