@@ -1,5 +1,5 @@
 {
-  "name": "runlog-pwa",
+  "name": "tracklog-pwa",
   "version": "0.1.2",
   "private": true,
   "description": "Truck operation log PWA with offline support and day-based segment calculations.",
