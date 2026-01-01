@@ -25,9 +25,14 @@ import {
   addBoarding,
   startExpressway,
   endExpressway,
+  deleteEvent,
   updateExpresswayResolved,
   backfillMissingAddresses,
+  getAutoExpresswayConfig,
+  setAutoExpresswayConfig,
+  DEFAULT_AUTO_EXPRESSWAY_CONFIG,
 } from '../../db/repositories';
+import type { AutoExpresswayConfig } from '../../db/repositories';
 import type { AppEvent } from '../../domain/types';
 import { resolveNearestIC } from '../../services/icResolver';
 
@@ -96,11 +101,21 @@ export default function HomeScreen() {
   const [wakeLockError, setWakeLockError] = useState<string | null>(null);
   const [fullscreenOn, setFullscreenOn] = useState(false);
   const [fullscreenSupported, setFullscreenSupported] = useState(false);
+  const [autoExpresswayConfig, setAutoExpresswayConfigState] = useState<AutoExpresswayConfig>(DEFAULT_AUTO_EXPRESSWAY_CONFIG);
+  const [autoExpresswaySettingsOpen, setAutoExpresswaySettingsOpen] = useState(false);
+  const [autoExpresswaySettingsError, setAutoExpresswaySettingsError] = useState<string | null>(null);
+  const [autoExpresswayDraft, setAutoExpresswayDraft] = useState({
+    speedKmh: String(DEFAULT_AUTO_EXPRESSWAY_CONFIG.speedKmh),
+    durationSec: String(DEFAULT_AUTO_EXPRESSWAY_CONFIG.durationSec),
+  });
+  const [autoExpresswayToast, setAutoExpresswayToast] = useState<null | { eventId: string; speedKmh: number }>(null);
   const breakReminderTimer = useRef<number | null>(null);
   const fullscreenAttempted = useRef(false);
   const speedWatchId = useRef<number | null>(null);
   const autoExpresswayInFlight = useRef(false);
   const lastAutoExpresswayAt = useRef<number | null>(null);
+  const speedAboveSince = useRef<number | null>(null);
+  const autoExpresswayToastTimer = useRef<number | null>(null);
 
   const openRestSessionId = useMemo(() => getOpenRestSessionId(events), [events]);
   const openLoadSessionId = useMemo(() => getOpenToggle(events, 'load_start', 'load_end', 'loadSessionId'), [events]);
@@ -167,6 +182,60 @@ export default function HomeScreen() {
     }
   }
 
+  function showAutoExpresswayToast(eventId: string, speedKmh: number) {
+    if (autoExpresswayToastTimer.current != null) {
+      window.clearTimeout(autoExpresswayToastTimer.current);
+    }
+    setAutoExpresswayToast({ eventId, speedKmh });
+    autoExpresswayToastTimer.current = window.setTimeout(() => {
+      setAutoExpresswayToast(null);
+      autoExpresswayToastTimer.current = null;
+    }, 12000);
+  }
+
+  function dismissAutoExpresswayToast() {
+    if (autoExpresswayToastTimer.current != null) {
+      window.clearTimeout(autoExpresswayToastTimer.current);
+      autoExpresswayToastTimer.current = null;
+    }
+    setAutoExpresswayToast(null);
+  }
+
+  async function cancelAutoExpressway(eventId: string) {
+    dismissAutoExpresswayToast();
+    try {
+      await deleteEvent(eventId);
+      await refresh();
+    } catch (e: any) {
+      alert(e?.message ?? '自動記録の取り消しに失敗しました');
+    }
+  }
+
+  function openAutoExpresswaySettings() {
+    setAutoExpresswaySettingsError(null);
+    setAutoExpresswayDraft({
+      speedKmh: String(autoExpresswayConfig.speedKmh),
+      durationSec: String(autoExpresswayConfig.durationSec),
+    });
+    setAutoExpresswaySettingsOpen(true);
+  }
+
+  async function saveAutoExpresswaySettings() {
+    const speed = Number(autoExpresswayDraft.speedKmh);
+    const duration = Number(autoExpresswayDraft.durationSec);
+    if (!Number.isFinite(speed) || speed < 30 || speed > 160) {
+      setAutoExpresswaySettingsError('開始速度は30〜160km/hで入力してください');
+      return;
+    }
+    if (!Number.isFinite(duration) || duration < 1 || duration > 60) {
+      setAutoExpresswaySettingsError('継続秒数は1〜60秒で入力してください');
+      return;
+    }
+    const saved = await setAutoExpresswayConfig({ speedKmh: Math.round(speed), durationSec: Math.round(duration) });
+    setAutoExpresswayConfigState(saved);
+    setAutoExpresswaySettingsOpen(false);
+  }
+
   // Periodic backfill while画面を開いている間も走らせる
   useEffect(() => {
     const id = setInterval(() => {
@@ -184,7 +253,7 @@ export default function HomeScreen() {
     return () => window.removeEventListener('online', handler);
   }, [tripId]);
 
-  // Speed watcher for高速道路の自動記録（72km/h以上で開始）
+  // Speed watcher for高速道路の自動記録（一定速度を一定時間キープで開始）
   useEffect(() => {
     if (!tripId || !navigator.geolocation) return;
     if (speedWatchId.current != null) {
@@ -192,15 +261,29 @@ export default function HomeScreen() {
       speedWatchId.current = null;
     }
     const tripIdForWatch = tripId;
+    const thresholdKmh = autoExpresswayConfig.speedKmh;
+    const durationMs = autoExpresswayConfig.durationSec * 1000;
+    speedAboveSince.current = null;
     const id = navigator.geolocation.watchPosition(
       pos => {
         const spd = pos.coords.speed; // m/s
-        if (spd == null || Number.isNaN(spd)) return;
+        const nowMs = pos.timestamp ? pos.timestamp : Date.now();
+        if (spd == null || Number.isNaN(spd)) {
+          speedAboveSince.current = null;
+          return;
+        }
         const kmh = spd * 3.6;
-        if (kmh < 72 || expresswayActive) return;
-        const nowMs = Date.now();
+        if (kmh < thresholdKmh) {
+          speedAboveSince.current = null;
+          return;
+        }
+        if (speedAboveSince.current == null) {
+          speedAboveSince.current = nowMs;
+        }
+        if (expresswayActive) return;
         const last = lastAutoExpresswayAt.current ?? 0;
         if (autoExpresswayInFlight.current || nowMs - last < 60 * 1000) return;
+        if (nowMs - speedAboveSince.current < durationMs) return;
 
         autoExpresswayInFlight.current = true;
         lastAutoExpresswayAt.current = nowMs;
@@ -212,6 +295,7 @@ export default function HomeScreen() {
         void (async () => {
           try {
             const { eventId } = await startExpressway({ tripId: tripIdForWatch, geo });
+            showAutoExpresswayToast(eventId, Math.round(kmh));
             if (navigator.onLine && geo) {
               const result = await resolveNearestIC(geo.lat, geo.lng);
               if (result) {
@@ -240,11 +324,21 @@ export default function HomeScreen() {
     return () => {
       if (id != null) navigator.geolocation.clearWatch(id);
       speedWatchId.current = null;
+      speedAboveSince.current = null;
+      autoExpresswayInFlight.current = false;
     };
-  }, [tripId, expresswayActive]);
+  }, [tripId, expresswayActive, autoExpresswayConfig.speedKmh, autoExpresswayConfig.durationSec]);
 
   useEffect(() => {
     refresh();
+    void (async () => {
+      const config = await getAutoExpresswayConfig();
+      setAutoExpresswayConfigState(config);
+      setAutoExpresswayDraft({
+        speedKmh: String(config.speedKmh),
+        durationSec: String(config.durationSec),
+      });
+    })();
     setWakeLockAvailable(isWakeLockSupported());
     setFullscreenSupported(
       typeof document !== 'undefined' &&
@@ -404,6 +498,96 @@ export default function HomeScreen() {
     }, remaining);
   }
 
+  const autoExpresswayToastView = autoExpresswayToast ? (
+    <div
+      className="card"
+      style={{
+        position: 'fixed',
+        left: '50%',
+        bottom: 16,
+        transform: 'translateX(-50%)',
+        zIndex: 10000,
+        padding: '12px 14px',
+        minWidth: 260,
+        background: 'rgba(15, 23, 42, 0.92)',
+        borderColor: 'rgba(251, 146, 60, 0.35)',
+      }}
+    >
+      <div style={{ fontWeight: 800, marginBottom: 6 }}>
+        高速道路を自動で開始しました（{autoExpresswayToast.speedKmh}km/h）
+      </div>
+      <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+        <button
+          style={{ padding: '8px 12px', borderRadius: 10 }}
+          onClick={() => cancelAutoExpressway(autoExpresswayToast.eventId)}
+        >
+          取り消し
+        </button>
+        <button
+          style={{ padding: '8px 12px', borderRadius: 10, fontWeight: 800 }}
+          onClick={dismissAutoExpresswayToast}
+        >
+          閉じる
+        </button>
+      </div>
+    </div>
+  ) : null;
+
+  const autoExpresswaySettingsDialog = autoExpresswaySettingsOpen ? (
+    <div
+      style={{
+        position: 'fixed',
+        inset: 0,
+        background: 'rgba(0,0,0,.6)',
+        display: 'grid',
+        placeItems: 'center',
+        zIndex: 10000,
+      }}
+    >
+      <div style={{ width: 'min(520px, 92vw)', background: '#111', color: '#fff', borderRadius: 16, padding: 16 }}>
+        <div style={{ fontSize: 18, fontWeight: 800, marginBottom: 8 }}>自動高速開始の設定</div>
+        <div style={{ display: 'grid', gap: 12 }}>
+          <label style={{ display: 'grid', gap: 6 }}>
+            開始速度 (km/h)
+            <input
+              type="number"
+              min={30}
+              max={160}
+              value={autoExpresswayDraft.speedKmh}
+              onChange={e => setAutoExpresswayDraft(prev => ({ ...prev, speedKmh: e.target.value }))}
+              style={{ padding: '10px 12px', borderRadius: 10, border: '1px solid #334155', background: '#0f172a', color: '#fff' }}
+            />
+          </label>
+          <label style={{ display: 'grid', gap: 6 }}>
+            継続秒数 (秒)
+            <input
+              type="number"
+              min={1}
+              max={60}
+              value={autoExpresswayDraft.durationSec}
+              onChange={e => setAutoExpresswayDraft(prev => ({ ...prev, durationSec: e.target.value }))}
+              style={{ padding: '10px 12px', borderRadius: 10, border: '1px solid #334155', background: '#0f172a', color: '#fff' }}
+            />
+          </label>
+          {autoExpresswaySettingsError && (
+            <div style={{ color: '#fca5a5', fontSize: 13 }}>{autoExpresswaySettingsError}</div>
+          )}
+        </div>
+        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 16 }}>
+          <button
+            onClick={() => setAutoExpresswaySettingsOpen(false)}
+            style={{ padding: '10px 14px', borderRadius: 12 }}
+          >
+            キャンセル
+          </button>
+          <button onClick={saveAutoExpresswaySettings} style={{ padding: '10px 14px', borderRadius: 12, fontWeight: 800 }}>
+            保存
+          </button>
+        </div>
+      </div>
+    </div>
+  ) : null;
+
   // Render when no trip is active
   if (!tripId) {
     return (
@@ -433,6 +617,9 @@ export default function HomeScreen() {
                   全画面
                 </button>
               )}
+              <button className="pill-link" onClick={openAutoExpresswaySettings}>
+                自動高速設定
+              </button>
               <Link to="/history" className="pill-link">
                 履歴
               </Link>
@@ -476,6 +663,8 @@ export default function HomeScreen() {
             }}
           />
         </div>
+        {autoExpresswaySettingsDialog}
+        {autoExpresswayToastView}
       </div>
     );
   }
@@ -509,6 +698,9 @@ export default function HomeScreen() {
           <Link to={`/trip/${tripId}`} className="pill-link">
             詳細
           </Link>
+          <button className="pill-link" onClick={openAutoExpresswaySettings}>
+            自動高速設定
+          </button>
           <Link to="/history" className="pill-link">
             履歴
           </Link>
@@ -915,6 +1107,8 @@ export default function HomeScreen() {
           }
         }}
       />
+      {autoExpresswaySettingsDialog}
+      {autoExpresswayToastView}
     </div>
   );
 }

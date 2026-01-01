@@ -42,6 +42,44 @@ async function getMeta(key: string): Promise<string | null> {
 }
 
 const META_ACTIVE_TRIP_ID = 'activeTripId';
+const META_AUTO_EXPRESSWAY_CONFIG = 'autoExpresswayConfig';
+
+export type AutoExpresswayConfig = {
+  speedKmh: number;
+  durationSec: number;
+};
+
+export const DEFAULT_AUTO_EXPRESSWAY_CONFIG: AutoExpresswayConfig = {
+  speedKmh: 72,
+  durationSec: 5,
+};
+
+function normalizeAutoExpresswayConfig(raw: Partial<AutoExpresswayConfig> | null): AutoExpresswayConfig {
+  const speed = Number(raw?.speedKmh);
+  const duration = Number(raw?.durationSec);
+  const speedKmh = Number.isFinite(speed) ? Math.min(Math.max(Math.round(speed), 30), 160) : DEFAULT_AUTO_EXPRESSWAY_CONFIG.speedKmh;
+  const durationSec = Number.isFinite(duration)
+    ? Math.min(Math.max(Math.round(duration), 1), 60)
+    : DEFAULT_AUTO_EXPRESSWAY_CONFIG.durationSec;
+  return { speedKmh, durationSec };
+}
+
+export async function getAutoExpresswayConfig(): Promise<AutoExpresswayConfig> {
+  const raw = await getMeta(META_AUTO_EXPRESSWAY_CONFIG);
+  if (!raw) return DEFAULT_AUTO_EXPRESSWAY_CONFIG;
+  try {
+    const parsed = JSON.parse(raw) as Partial<AutoExpresswayConfig>;
+    return normalizeAutoExpresswayConfig(parsed);
+  } catch {
+    return DEFAULT_AUTO_EXPRESSWAY_CONFIG;
+  }
+}
+
+export async function setAutoExpresswayConfig(config: AutoExpresswayConfig): Promise<AutoExpresswayConfig> {
+  const normalized = normalizeAutoExpresswayConfig(config);
+  await setMeta(META_AUTO_EXPRESSWAY_CONFIG, JSON.stringify(normalized));
+  return normalized;
+}
 
 // Trip active handling
 
