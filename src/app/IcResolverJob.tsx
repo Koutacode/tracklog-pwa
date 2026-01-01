@@ -13,27 +13,33 @@ import { resolveNearestIC } from '../services/icResolver';
  */
 export default function IcResolverJob() {
   useEffect(() => {
+    let running = false;
     const runOnce = async () => {
-      if (!navigator.onLine) return;
+      if (running || !navigator.onLine) return;
+      running = true;
       const pending = await getPendingExpresswayEvents();
-      const targets = pending.slice(0, 1);
-      for (const ev of targets) {
-        const geo = ev.geo;
-        if (!geo) {
-          await updateExpresswayResolved({ eventId: ev.id, status: 'failed' });
-          continue;
+      try {
+        const targets = pending.slice(0, 1);
+        for (const ev of targets) {
+          const geo = ev.geo;
+          if (!geo) {
+            await updateExpresswayResolved({ eventId: ev.id, status: 'failed' });
+            continue;
+          }
+          const result = await resolveNearestIC(geo.lat, geo.lng);
+          if (result) {
+            await updateExpresswayResolved({
+              eventId: ev.id,
+              status: 'resolved',
+              icName: result.icName,
+              icDistanceM: result.distanceM,
+            });
+          } else {
+            await updateExpresswayResolved({ eventId: ev.id, status: 'failed' });
+          }
         }
-        const result = await resolveNearestIC(geo.lat, geo.lng);
-        if (result) {
-          await updateExpresswayResolved({
-            eventId: ev.id,
-            status: 'resolved',
-            icName: result.icName,
-            icDistanceM: result.distanceM,
-          });
-        } else {
-          await updateExpresswayResolved({ eventId: ev.id, status: 'failed' });
-        }
+      } finally {
+        running = false;
       }
     };
 
@@ -42,7 +48,7 @@ export default function IcResolverJob() {
     };
     window.addEventListener('online', onOnline);
     runOnce();
-    const interval = setInterval(runOnce, 15 * 60 * 1000);
+    const interval = setInterval(runOnce, 60 * 1000);
     return () => {
       window.removeEventListener('online', onOnline);
       clearInterval(interval);

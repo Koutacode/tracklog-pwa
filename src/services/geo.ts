@@ -38,9 +38,10 @@ export async function getGeo(): Promise<Geo | undefined> {
  * returns undefined so that callers can degrade gracefully.
  */
 export async function reverseGeocode(geo: Geo): Promise<string | undefined> {
+  if (typeof navigator !== 'undefined' && !navigator.onLine) return undefined;
   const { lat, lng } = geo;
   const controller = new AbortController();
-  const id = setTimeout(() => controller.abort(), 5000);
+  const id = setTimeout(() => controller.abort(), 2500);
   try {
     const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(
       lng,

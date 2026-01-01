@@ -29,11 +29,15 @@ export default function PwaUpdater() {
     setUpdateSW(() => updateServiceWorker);
 
     // Periodically check for updates while the app is open.
-    const interval = setInterval(() => {
+    const checkForUpdates = () => {
+      if (typeof navigator !== 'undefined' && !navigator.onLine) return;
       updateServiceWorker?.(false);
-    }, 60 * 60 * 1000);
+    };
+    const interval = setInterval(checkForUpdates, 5 * 60 * 1000);
+    window.addEventListener('online', checkForUpdates);
 
     return () => {
+      window.removeEventListener('online', checkForUpdates);
       clearInterval(interval);
     };
   }, []);

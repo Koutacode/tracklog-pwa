@@ -27,10 +27,11 @@ export async function resolveNearestIC(
   lon: number,
   radiusM = 5000,
 ): Promise<IcResult | null> {
-  const query = `\n[out:json][timeout:12];\n(\n  node(around:${radiusM},${lat},${lon})['highway'='motorway_junction'];\n);\nout body;\n`.trim();
+  if (typeof navigator !== 'undefined' && !navigator.onLine) return null;
+  const query = `\n[out:json][timeout:8];\n(\n  node(around:${radiusM},${lat},${lon})['highway'='motorway_junction'];\n);\nout body;\n`.trim();
   for (const endpoint of OVERPASS_ENDPOINTS) {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 7000);
+    const timer = setTimeout(() => controller.abort(), 4000);
     try {
       const res = await fetch(endpoint, {
         method: 'POST',
