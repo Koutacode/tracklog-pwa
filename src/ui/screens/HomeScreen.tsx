@@ -184,7 +184,7 @@ export default function HomeScreen() {
     return () => window.removeEventListener('online', handler);
   }, [tripId]);
 
-  // Speed watcher for高速道路の自動記録（75km/h以上で開始）
+  // Speed watcher for高速道路の自動記録（72km/h以上で開始）
   useEffect(() => {
     if (!tripId || !navigator.geolocation) return;
     if (speedWatchId.current != null) {
@@ -197,7 +197,7 @@ export default function HomeScreen() {
         const spd = pos.coords.speed; // m/s
         if (spd == null || Number.isNaN(spd)) return;
         const kmh = spd * 3.6;
-        if (kmh < 75 || expresswayActive) return;
+        if (kmh < 72 || expresswayActive) return;
         const nowMs = Date.now();
         const last = lastAutoExpresswayAt.current ?? 0;
         if (autoExpresswayInFlight.current || nowMs - last < 60 * 1000) return;
