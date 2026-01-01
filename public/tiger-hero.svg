@@ -1,0 +1,36 @@
+<svg width="1200" height="1200" viewBox="0 0 1200 1200" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <radialGradient id="glow" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(600 360) rotate(90) scale(540)">
+      <stop stop-color="#f59e0b" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#f97316" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="face" x1="300" y1="240" x2="920" y2="940" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#fbbf24" stop-opacity="0.85"/>
+      <stop offset="1" stop-color="#f97316" stop-opacity="0.45"/>
+    </linearGradient>
+    <linearGradient id="muzzle" x1="470" y1="620" x2="730" y2="820" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#fde68a" stop-opacity="0.7"/>
+      <stop offset="1" stop-color="#fb923c" stop-opacity="0.45"/>
+    </linearGradient>
+  </defs>
+  <circle cx="600" cy="600" r="520" fill="url(#glow)" opacity="0.65"/>
+  <path d="M300 450 C320 320 440 240 600 230 C760 240 880 320 900 450 C920 600 860 780 740 860 C690 900 650 920 600 935 C550 920 510 900 460 860 C340 780 280 600 300 450 Z" fill="url(#face)" opacity="0.7"/>
+  <path d="M360 310 L460 250 L440 360 Z" fill="url(#face)" opacity="0.65"/>
+  <path d="M840 310 L740 250 L760 360 Z" fill="url(#face)" opacity="0.65"/>
+  <path d="M470 640 C520 610 680 610 730 640 C750 690 730 750 680 790 C640 820 560 820 520 790 C470 750 450 690 470 640 Z" fill="url(#muzzle)" opacity="0.65"/>
+  <path d="M560 670 L640 670 L600 710 Z" fill="#111827" opacity="0.4"/>
+  <g stroke="#0f172a" stroke-width="20" opacity="0.35" stroke-linecap="round">
+    <path d="M600 330 L600 440"/>
+    <path d="M520 360 L470 440"/>
+    <path d="M680 360 L730 440"/>
+  </g>
+  <g stroke="#0f172a" stroke-width="16" opacity="0.28" stroke-linecap="round">
+    <path d="M380 530 C430 550 470 590 490 640"/>
+    <path d="M820 530 C770 550 730 590 710 640"/>
+    <path d="M410 420 C460 430 500 460 520 500"/>
+    <path d="M790 420 C740 430 700 460 680 500"/>
+  </g>
+  <g stroke="#0f172a" stroke-width="10" opacity="0.25" stroke-linecap="round">
+    <path d="M520 740 C560 760 640 760 680 740"/>
+  </g>
+</svg>

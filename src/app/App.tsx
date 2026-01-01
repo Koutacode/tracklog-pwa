@@ -8,7 +8,7 @@ import HomeScreen from '../ui/screens/HomeScreen';
 import TripDetail from '../ui/screens/TripDetail';
 import HistoryScreen from '../ui/screens/HistoryScreen';
 
-// Ensure routing works under GitHub Pages subpath (/runlog-pwa/).
+// Ensure routing works under GitHub Pages subpath (/tracklog-pwa/).
 const routerBase = import.meta.env.BASE_URL;
 
 /**

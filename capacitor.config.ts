@@ -1,8 +1,8 @@
 import { CapacitorConfig } from '@capacitor/cli';
 
 const config: CapacitorConfig = {
-  appId: 'com.runlog.pwa',
-  appName: 'RunLog',
+  appId: 'com.tracklog.pwa',
+  appName: 'TrackLog',
   webDir: 'dist',
   bundledWebRuntime: false,
   server: {

@@ -17,8 +17,8 @@ export default defineConfig({
       registerType: 'prompt',
       includeAssets: ['favicon.svg', 'favicon.ico', 'robots.txt', 'apple-touch-icon.png'],
       manifest: {
-        name: 'RunLog',
-        short_name: 'RunLog',
+        name: 'TrackLog',
+        short_name: 'TrackLog',
         id: basePath,
         start_url: basePath,
         scope: basePath,

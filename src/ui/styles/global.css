@@ -59,3 +59,182 @@ a:hover {
   border-color: rgba(255, 255, 255, 0.25);
   color: #fff;
 }
+
+.start-hero {
+  --tiger-amber: #f59e0b;
+  --tiger-ember: #fb923c;
+  --tiger-gold: #fbbf24;
+  --tiger-night: #0b0d14;
+  --tiger-ink: rgba(7, 12, 18, 0.72);
+  --tiger-edge: rgba(255, 255, 255, 0.14);
+  --tiger-glow: rgba(245, 158, 11, 0.45);
+  position: relative;
+  min-height: 100vh;
+  padding: 20px 16px 32px;
+  background:
+    radial-gradient(circle at 8% 5%, rgba(245, 158, 11, 0.32), transparent 55%),
+    radial-gradient(circle at 85% 5%, rgba(251, 146, 60, 0.25), transparent 50%),
+    linear-gradient(135deg, #0b0d14 0%, #121a28 45%, #0a0f1c 100%);
+  overflow: hidden;
+}
+
+.start-hero::before {
+  content: '';
+  position: absolute;
+  right: -6%;
+  top: -6%;
+  width: min(78vw, 540px);
+  height: min(78vw, 540px);
+  background: url('/tiger-hero.svg') no-repeat center/contain;
+  opacity: 0.55;
+  filter: drop-shadow(0 32px 60px rgba(0, 0, 0, 0.55));
+  pointer-events: none;
+}
+
+.start-hero::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-image: repeating-linear-gradient(
+    125deg,
+    rgba(251, 146, 60, 0.12) 0 6px,
+    rgba(15, 23, 42, 0) 6px 24px
+  );
+  opacity: 0.35;
+  mix-blend-mode: screen;
+  pointer-events: none;
+}
+
+.start-hero__frame {
+  position: relative;
+  z-index: 1;
+  max-width: 900px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.start-hero__nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  animation: tiger-rise 0.5s ease-out both;
+}
+
+.start-hero__brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.start-hero__brand-mark {
+  width: 42px;
+  height: 42px;
+  border-radius: 14px;
+  background: linear-gradient(135deg, rgba(251, 146, 60, 0.95), rgba(245, 158, 11, 0.8));
+  color: #111827;
+  display: grid;
+  place-items: center;
+  font-weight: 900;
+  box-shadow: 0 14px 32px rgba(0, 0, 0, 0.35);
+}
+
+.start-hero__brand-name {
+  font-size: 18px;
+  line-height: 1;
+}
+
+.start-hero__brand-sub {
+  margin-top: 4px;
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  color: rgba(255, 255, 255, 0.65);
+}
+
+.start-hero__nav-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.start-hero__panel {
+  padding: 18px;
+  border-radius: 22px;
+  background: var(--tiger-ink);
+  border: 1px solid var(--tiger-edge);
+  box-shadow: 0 24px 50px rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(8px);
+  animation: tiger-rise 0.6s ease-out both;
+}
+
+.start-hero__title {
+  font-size: clamp(28px, 6vw, 42px);
+  font-weight: 900;
+  margin: 4px 0 8px;
+  text-shadow: 0 10px 30px rgba(0, 0, 0, 0.55);
+}
+
+.start-hero__subtitle {
+  font-size: 14px;
+  color: rgba(255, 255, 255, 0.75);
+  margin: 0 0 14px;
+}
+
+.start-hero__actions {
+  display: grid;
+  gap: 10px;
+}
+
+.start-hero__actions > * {
+  animation: tiger-rise 0.6s ease-out both;
+}
+
+.start-hero__actions > *:nth-child(1) {
+  animation-delay: 0.06s;
+}
+
+.start-hero__actions > *:nth-child(2) {
+  animation-delay: 0.14s;
+}
+
+.start-hero__prompt {
+  padding: 12px;
+  border-radius: 16px;
+  border: 1px solid rgba(251, 146, 60, 0.28);
+  background: rgba(15, 23, 42, 0.8);
+}
+
+@keyframes tiger-rise {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (max-width: 540px) {
+  .start-hero {
+    padding: 16px 12px 28px;
+  }
+
+  .start-hero__brand {
+    letter-spacing: 0.04em;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .start-hero__nav,
+  .start-hero__panel,
+  .start-hero__actions > * {
+    animation: none;
+  }
+}

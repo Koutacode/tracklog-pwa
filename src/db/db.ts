@@ -8,18 +8,18 @@ export type MetaRow = {
 };
 
 /**
- * RunLogDB encapsulates the IndexedDB schema using Dexie. It defines two
+ * TrackLogDB encapsulates the IndexedDB schema using Dexie. It defines two
  * tables: events and meta. The events table stores all operation events
  * keyed by id with indexes on tripId, type and timestamp combinations for
  * efficient queries. The meta table stores key/value metadata such as the
  * currently active trip.
  */
-export class RunLogDB extends Dexie {
+export class TrackLogDB extends Dexie {
   events!: Table<AppEvent, string>;
   meta!: Table<MetaRow, string>;
 
   constructor() {
-    super('runlog_db');
+    super('tracklog_db');
     this.version(1).stores({
       events: 'id, tripId, type, ts, [tripId+ts], [tripId+type], [tripId+type+ts]',
       meta: 'key, updatedAt',
@@ -27,4 +27,4 @@ export class RunLogDB extends Dexie {
   }
 }
 
-export const db = new RunLogDB();
+export const db = new TrackLogDB();

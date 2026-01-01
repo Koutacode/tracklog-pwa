@@ -347,7 +347,7 @@ export default function HomeScreen() {
       body: '休憩開始から30分経ちました',
       vibrate: [200, 100, 200],
       requireInteraction: true,
-      tag: 'runlog-break-30min',
+      tag: 'tracklog-break-30min',
       renotify: true,
     };
 
@@ -380,104 +380,116 @@ export default function HomeScreen() {
   // Render when no trip is active
   if (!tripId) {
     return (
-      <div style={{ padding: 16, maxWidth: 720, margin: '0 auto' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, gap: 10, flexWrap: 'wrap' }}>
-        <div style={{ fontSize: 20, fontWeight: 900 }}>RunLog</div>
-        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-          {fullscreenSupported && (
-            <button
-              className="pill-link"
-              style={{ background: fullscreenOn ? '#22c55e' : undefined, color: fullscreenOn ? '#fff' : undefined }}
-              onClick={() => {
-                if (fullscreenOn) {
-                  void exitFullscreen();
-                } else {
-                  void enterFullscreen();
-                }
-              }}
-            >
-              全画面
-            </button>
-          )}
-          <Link to="/history" className="pill-link">
-            履歴
-          </Link>
-        </div>
-      </div>
-      {highSpeedPrompt && (
-        <div className="card" style={{ marginTop: 8, padding: 12, color: '#fff', borderRadius: 14, border: '1px solid #1e293b', background: '#0f172a' }}>
-          <div style={{ fontWeight: 900, marginBottom: 6 }}>速度 {highSpeedPrompt}km/h 超</div>
-          <div style={{ fontSize: 13, opacity: 0.9, marginBottom: 10 }}>高速道路開始を記録しますか？</div>
-          <div style={{ display: 'flex', gap: 8 }}>
-            <button
-              style={{ flex: 1, padding: '10px 12px', borderRadius: 10 }}
-              onClick={() => setHighSpeedPrompt(null)}
-            >
-              閉じる
-            </button>
-            <button
-              style={{ flex: 1, padding: '10px 12px', borderRadius: 10, background: '#0ea5e9', color: '#fff', fontWeight: 800 }}
-              onClick={async () => {
-                setHighSpeedPrompt(null);
-                try {
-                  ensureFullscreen();
-                  const geo = await getGeo();
-                  const { eventId } = await startExpressway({ tripId: tripId ?? '', geo });
-                  if (navigator.onLine && geo) {
-                    const result = await resolveNearestIC(geo.lat, geo.lng);
-                    if (result) {
-                      await updateExpresswayResolved({
-                        eventId,
-                        status: 'resolved',
-                        icName: result.icName,
-                        icDistanceM: result.distanceM,
-                      });
+      <div className="start-hero">
+        <div className="start-hero__frame">
+          <div className="start-hero__nav">
+            <div className="start-hero__brand">
+              <div className="start-hero__brand-mark">TL</div>
+              <div>
+                <div className="start-hero__brand-name">TrackLog</div>
+                <div className="start-hero__brand-sub">運行ログ</div>
+              </div>
+            </div>
+            <div className="start-hero__nav-actions">
+              {fullscreenSupported && (
+                <button
+                  className="pill-link"
+                  style={{ background: fullscreenOn ? '#22c55e' : undefined, color: fullscreenOn ? '#fff' : undefined }}
+                  onClick={() => {
+                    if (fullscreenOn) {
+                      void exitFullscreen();
+                    } else {
+                      void enterFullscreen();
                     }
-                  }
-                  await refresh();
-                } catch (e: any) {
-                  alert(e?.message ?? '高速道路の記録に失敗しました');
-                }
-              }}
-            >
-              高速開始を記録
-            </button>
+                  }}
+                >
+                  全画面
+                </button>
+              )}
+              <Link to="/history" className="pill-link">
+                履歴
+              </Link>
+            </div>
           </div>
+          {highSpeedPrompt && (
+            <div className="card start-hero__prompt">
+              <div style={{ fontWeight: 900, marginBottom: 6 }}>速度 {highSpeedPrompt}km/h 超</div>
+              <div style={{ fontSize: 13, opacity: 0.9, marginBottom: 10 }}>高速道路開始を記録しますか？</div>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button
+                  style={{ flex: 1, padding: '10px 12px', borderRadius: 10 }}
+                  onClick={() => setHighSpeedPrompt(null)}
+                >
+                  閉じる
+                </button>
+                <button
+                  style={{ flex: 1, padding: '10px 12px', borderRadius: 10, background: '#0ea5e9', color: '#fff', fontWeight: 800 }}
+                  onClick={async () => {
+                    setHighSpeedPrompt(null);
+                    try {
+                      ensureFullscreen();
+                      const geo = await getGeo();
+                      const { eventId } = await startExpressway({ tripId: tripId ?? '', geo });
+                      if (navigator.onLine && geo) {
+                        const result = await resolveNearestIC(geo.lat, geo.lng);
+                        if (result) {
+                          await updateExpresswayResolved({
+                            eventId,
+                            status: 'resolved',
+                            icName: result.icName,
+                            icDistanceM: result.distanceM,
+                          });
+                        }
+                      }
+                      await refresh();
+                    } catch (e: any) {
+                      alert(e?.message ?? '高速道路の記録に失敗しました');
+                    }
+                  }}
+                >
+                  高速開始を記録
+                </button>
+              </div>
+            </div>
+          )}
+          <div className="start-hero__panel">
+            <div className="start-hero__title">運行開始</div>
+            <div className="start-hero__subtitle">虎のように鋭く、今日の運行を記録します。</div>
+            <div className="start-hero__actions">
+              <BigButton
+                label={loading ? '読み込み中…' : '運行開始'}
+                disabled={loading}
+                onClick={() => {
+                  ensureFullscreen();
+                  setOdoDialog({ kind: 'trip_start' });
+                }}
+              />
+              <InstallButton />
+            </div>
+          </div>
+          <OdoDialog
+            open={odoDialog?.kind === 'trip_start'}
+            title="運行開始"
+            description="運行開始時のオドメーター（km）を入力してください"
+            onCancel={() => setOdoDialog(null)}
+            onConfirm={async odoKm => {
+              setOdoDialog(null);
+              setLoading(true);
+              try {
+                ensureFullscreen();
+                const geo = await getGeo();
+                const { tripId: newTripId } = await startTrip({ odoKm, geo });
+                setTripId(newTripId);
+                const ev = await getEventsByTripId(newTripId);
+                setEvents(ev);
+              } catch (e: any) {
+                alert(e?.message ?? '運行開始に失敗しました');
+              } finally {
+                setLoading(false);
+              }
+            }}
+          />
         </div>
-      )}
-      <div style={{ display: 'grid', gap: 10 }}>
-        <BigButton
-          label={loading ? '読み込み中…' : '運行開始'}
-          disabled={loading}
-          onClick={() => {
-            ensureFullscreen();
-            setOdoDialog({ kind: 'trip_start' });
-          }}
-        />
-        <InstallButton />
-      </div>
-      <OdoDialog
-       open={odoDialog?.kind === 'trip_start'}
-        title="運行開始"
-        description="運行開始時のオドメーター（km）を入力してください"
-        onCancel={() => setOdoDialog(null)}
-        onConfirm={async odoKm => {
-          setOdoDialog(null);
-          setLoading(true);
-          try {
-            ensureFullscreen();
-            const geo = await getGeo();
-            const { tripId: newTripId } = await startTrip({ odoKm, geo });
-            setTripId(newTripId);
-            const ev = await getEventsByTripId(newTripId);
-            setEvents(ev);
-          } catch (e: any) {
-            alert(e?.message ?? '運行開始に失敗しました');
-          } finally {
-            setLoading(false);
-          }
-        }}
-      />
       </div>
     );
   }

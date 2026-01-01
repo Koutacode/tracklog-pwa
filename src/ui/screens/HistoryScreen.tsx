@@ -86,7 +86,7 @@ export default function HistoryScreen() {
     setErr(null);
     try {
       const events = await getAllEvents();
-      downloadBlob(`runlog-events-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify(events, null, 2), 'application/json');
+      downloadBlob(`tracklog-events-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify(events, null, 2), 'application/json');
     } catch (e: any) {
       setErr(e?.message ?? 'エクスポートに失敗しました');
     } finally {
@@ -117,7 +117,7 @@ export default function HistoryScreen() {
         ].join(',');
       });
       const csv = [header.join(','), ...rowsCsv].join('\r\n');
-      downloadBlob(`runlog-events-${new Date().toISOString().slice(0, 10)}.csv`, csv, 'text/csv');
+      downloadBlob(`tracklog-events-${new Date().toISOString().slice(0, 10)}.csv`, csv, 'text/csv');
     } catch (e: any) {
       setErr(e?.message ?? 'CSVエクスポートに失敗しました');
     } finally {
