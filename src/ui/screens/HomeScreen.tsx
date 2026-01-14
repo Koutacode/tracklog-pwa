@@ -2,12 +2,10 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import BigButton from '../components/BigButton';
 import OdoDialog from '../components/OdoDialog';
-import ConfirmDialog from '../components/ConfirmDialog';
 import FuelDialog from '../components/FuelDialog';
 import InstallButton from '../components/InstallButton';
 import { getGeo, getGeoWithAddress } from '../../services/geo';
 import { isWakeLockSupported, requestWakeLock, releaseWakeLock } from '../../services/wakeLock';
-import { DAY_MS, getJstDateInfo } from '../../domain/jst';
 import {
   getActiveTripId,
   getEventsByTripId,
@@ -77,21 +75,12 @@ function getOpenToggle(events: AppEvent[], startType: string, endType: string, k
   return null;
 }
 
-function getNextDayIndex(events: AppEvent[], nowTs: string): number {
-  const tripStart = events.find(e => e.type === 'trip_start');
-  if (!tripStart) return 1;
-  const startInfo = getJstDateInfo(tripStart.ts);
-  const nowInfo = getJstDateInfo(nowTs);
-  if (!Number.isFinite(startInfo.dayStamp) || !Number.isFinite(nowInfo.dayStamp)) return 1;
-  return Math.floor((nowInfo.dayStamp - startInfo.dayStamp) / DAY_MS) + 1;
-}
 
 export default function HomeScreen() {
   const [tripId, setTripId] = useState<string | null>(null);
   const [events, setEvents] = useState<AppEvent[]>([]);
   const [loading, setLoading] = useState(false);
   const [odoDialog, setOdoDialog] = useState<null | { kind: 'trip_start' | 'rest_start' | 'trip_end' }>(null);
-  const [confirmDayCloseOpen, setConfirmDayCloseOpen] = useState(false);
   const [fuelOpen, setFuelOpen] = useState(false);
   const [now, setNow] = useState(() => Date.now());
   const [geoStatus, setGeoStatus] = useState<{ lat: number; lng: number; accuracy?: number; at: string; address?: string } | null>(null);
@@ -138,7 +127,6 @@ export default function HomeScreen() {
   const canStartLoad = !restActive && !breakActive && !loadActive && !unloadActive;
   const canStartUnload = !restActive && !breakActive && !unloadActive && !loadActive;
   const canStartBreak = !restActive && !loadActive && !breakActive && !unloadActive;
-  const nextDayIndex = useMemo(() => getNextDayIndex(events, new Date(now).toISOString()), [events, now]);
   const expresswayStart = openExpresswaySessionId
     ? (events.find(e => e.type === 'expressway_start' && (e as any).extras?.expresswaySessionId === openExpresswaySessionId) as any)
     : null;
@@ -921,7 +909,24 @@ export default function HomeScreen() {
           )}
           {/* Rest (休息) */}
           {restActive ? (
-            <BigButton label="休息終了" variant="neutral" onClick={() => setConfirmDayCloseOpen(true)} />
+            <BigButton
+              label="休息終了"
+              variant="neutral"
+              onClick={async () => {
+                if (!openRestSessionId) return;
+                setLoading(true);
+                try {
+                  ensureFullscreen();
+                  const geo = await getGeo();
+                  await endRest({ tripId, restSessionId: openRestSessionId, dayClose: false, geo });
+                  await refresh();
+                } catch (e: any) {
+                  alert(e?.message ?? '休息終了に失敗しました');
+                } finally {
+                  setLoading(false);
+                }
+              }}
+            />
           ) : (
             <BigButton
               label="休息開始（オド入力）"
@@ -1043,44 +1048,6 @@ export default function HomeScreen() {
             await refresh();
           } catch (e: any) {
             alert(e?.message ?? '休息開始に失敗しました');
-          } finally {
-            setLoading(false);
-          }
-        }}
-      />
-      {/* Rest end confirm */}
-      <ConfirmDialog
-        open={confirmDayCloseOpen}
-        title="日次確定"
-        message={`${nextDayIndex}日目の運行は終了でよろしいですか？（分割休息の場合は「いいえ」）`}
-        yesText="はい（締める）"
-        noText="いいえ（分割休息）"
-        onYes={async () => {
-          setConfirmDayCloseOpen(false);
-          if (!openRestSessionId) return;
-          setLoading(true);
-          try {
-            ensureFullscreen();
-            const geo = await getGeo();
-            await endRest({ tripId, restSessionId: openRestSessionId, dayClose: true, geo });
-            await refresh();
-          } catch (e: any) {
-            alert(e?.message ?? '休息終了に失敗しました');
-          } finally {
-            setLoading(false);
-          }
-        }}
-        onNo={async () => {
-          setConfirmDayCloseOpen(false);
-          if (!openRestSessionId) return;
-          setLoading(true);
-          try {
-            ensureFullscreen();
-            const geo = await getGeo();
-            await endRest({ tripId, restSessionId: openRestSessionId, dayClose: false, geo });
-            await refresh();
-          } catch (e: any) {
-            alert(e?.message ?? '休息終了に失敗しました');
           } finally {
             setLoading(false);
           }

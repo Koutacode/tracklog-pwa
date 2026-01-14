@@ -234,8 +234,6 @@ export function buildTimeline(events: AppEvent[]): TimelineItem[] {
         const info = getJstDateInfo(e.ts);
         const di = Math.floor((info.dayStamp - tripStartDayStamp) / DAY_MS) + 1;
         detail = `${di}日目を締める`;
-      } else {
-        detail = '分割休息';
       }
     }
     const loc = formatGeo(e);

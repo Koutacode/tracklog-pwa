@@ -290,7 +290,7 @@ function buildGrouped(events: AppEvent[]): GroupedItem[] {
     } else if (ev.type === 'rest_end') {
       const dc = (ev as any).extras?.dayClose;
       const di = dc ? getDayIndex(ev.ts) : undefined;
-      detail = dc ? `${di ?? ''}日目を締める` : '分割休息';
+      if (dc) detail = `${di ?? ''}日目を締める`;
     }
 
     out.push({
