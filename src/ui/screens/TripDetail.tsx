@@ -539,35 +539,34 @@ export default function TripDetail() {
   const tripStartTs = tripStartEvent?.ts ?? events[0]?.ts;
   const groupedByDay = tripStartTs ? groupItemsByDay(grouped, tripStartTs) : [];
   return (
-    <div className="page-shell" style={{ fontSize: 17, lineHeight: 1.6 }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, flexWrap: 'wrap', gap: 12 }}>
+    <div className="page-shell trip-detail">
+      <div className="trip-detail__header">
         <div>
-          <div style={{ fontSize: 24, fontWeight: 900 }}>運行詳細</div>
-          <div style={{ opacity: 0.8, fontSize: 15 }}>tripId: {tripId}</div>
+          <div className="trip-detail__title">運行詳細</div>
+          <div className="trip-detail__meta">tripId: {tripId}</div>
         </div>
-        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-          <Link to="/" className="pill-link">ホーム</Link>
-          <Link to="/history" className="pill-link">履歴</Link>
+        <div className="trip-detail__actions">
+          <Link to="/" className="trip-detail__button">ホーム</Link>
+          <Link to="/history" className="trip-detail__button">履歴</Link>
           <button
             onClick={handleShareAi}
             disabled={sharing || !vm}
-            className="pill-link"
-            style={{ borderColor: '#334155', background: '#0f172a' }}
+            className="trip-detail__button trip-detail__button--accent"
           >
             {sharing ? 'AI共有中…' : 'AI共有'}
           </button>
-          <button onClick={load} style={{ padding: '12px 14px', borderRadius: 12, fontWeight: 800, fontSize: 15 }}>再読込</button>
+          <button onClick={load} className="trip-detail__button">再読込</button>
         </div>
       </div>
       {err && (
-        <div style={{ background: '#7f1d1d', color: '#fff', padding: 12, borderRadius: 12 }}>{err}</div>
+        <div className="trip-detail__alert">{err}</div>
       )}
       {!vm && !err && <div>読み込み中…</div>}
       {vm && (
         <>
-          <div style={{ marginBottom: 16 }}>
+          <div className="trip-detail__toolbar">
             <button
-              style={{ padding: '12px 16px', borderRadius: 16, background: '#7f1d1d', color: '#fff', fontWeight: 850, fontSize: 16 }}
+              className="trip-detail__button trip-detail__button--danger"
               onClick={async () => {
                 if (!tripId) return;
                 const ok = window.confirm('この運行の履歴をすべて削除します。よろしいですか？');
@@ -587,232 +586,250 @@ export default function TripDetail() {
               {deleting ? '削除中…' : 'この運行を削除'}
             </button>
           </div>
-          <div style={{ display: 'grid', gap: 14, marginBottom: 18 }}>
-            <div className="card" style={{ color: '#fff', padding: 18, borderRadius: 20 }}>
-              <div style={{ fontWeight: 900, marginBottom: 10, fontSize: 18 }}>距離サマリー</div>
-              <div style={{ opacity: 0.92, fontSize: 16 }}>
-                開始ODO: {vm.odoStart} km / 終了ODO: {vm.odoEnd ?? '-'} km
-              </div>
-              <div style={{ marginTop: 10, display: 'grid', gap: 8, fontSize: 16 }}>
-                <div>総距離: {vm.totalKm ?? '-'} km</div>
-                <div>最終区間: {vm.lastLegKm ?? '-'} km</div>
-              </div>
-            </div>
-            {!vm.validation.ok && (
-              <div style={{ background: '#7c2d12', color: '#fff', padding: 14, borderRadius: 16, fontSize: 15 }}>
-                <div style={{ fontWeight: 900, marginBottom: 8 }}>整合性チェック</div>
-                <ul style={{ margin: 0, paddingLeft: 20 }}>
-                  {vm.validation.errors.map((e, i) => (
-                    <li key={i}>{e}</li>
-                  ))}
-                </ul>
-              </div>
-            )}
-          </div>
-          <div style={{ display: 'grid', gap: 14 }}>
-            <div className="card" style={{ color: '#fff', padding: 18, borderRadius: 20 }}>
-              <div style={{ fontWeight: 900, marginBottom: 12, fontSize: 18 }}>区間距離一覧（分割休息も含む）</div>
-              <div style={{ display: 'grid', gap: 10 }}>
-                {vm.segments.map(seg => (
-                  <div key={seg.index} style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 12, padding: '12px 14px', borderRadius: 16, background: '#0b0b0b' }}>
-                    <div style={{ opacity: 0.95 }}>
-                      <div style={{ fontWeight: 850, fontSize: 17 }}>{seg.fromLabel} → {seg.toLabel}</div>
-                      <div style={{ opacity: 0.85, fontSize: 14 }}>{fmtLocal(seg.fromTs)} → {fmtLocal(seg.toTs)}</div>
-                    </div>
-                    <div style={{ fontSize: 21, fontWeight: 900, color: seg.valid ? '#fff' : '#fecaca' }}>{seg.km} km</div>
+          <div className="trip-detail__layout">
+            <div className="trip-detail__column">
+              <div className="card trip-section">
+                <div className="trip-section__title">距離サマリー</div>
+                <div className="trip-list">
+                  <div className="trip-item trip-item--split">
+                    <div className="trip-item__title">開始ODO</div>
+                    <div className="trip-item__value">{vm.odoStart} km</div>
                   </div>
-                ))}
-              </div>
-            </div>
-            <div className="card" style={{ color: '#fff', padding: 18, borderRadius: 20 }}>
-              <div style={{ fontWeight: 900, marginBottom: 12, fontSize: 18 }}>日別運行（日本時間24時で日付切替）</div>
-              <div style={{ display: 'grid', gap: 10 }}>
-                {vm.dayRuns.map(day => (
-                  <div key={day.dayIndex} style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 12, padding: '12px 14px', borderRadius: 16, background: '#0b0b0b' }}>
-                    <div>
-                      <div style={{ fontWeight: 900, fontSize: 17 }}>{day.dayIndex}日目 {day.status === 'pending' ? '（運行中）' : ''}</div>
-                      <div style={{ opacity: 0.85, fontSize: 14 }}>{day.dateLabel}</div>
-                      {day.closeOdo != null && (
-                        <div style={{ opacity: 0.85, fontSize: 14 }}>{day.closeLabel ?? '休息開始'}: {day.closeOdo} km</div>
-                      )}
-                    </div>
-                    <div style={{ fontSize: 21, fontWeight: 900 }}>{day.km} km</div>
+                  <div className="trip-item trip-item--split">
+                    <div className="trip-item__title">終了ODO</div>
+                    <div className="trip-item__value">{vm.odoEnd != null ? `${vm.odoEnd} km` : '-'}</div>
                   </div>
-                ))}
+                  <div className="trip-item trip-item--split">
+                    <div className="trip-item__title">総距離</div>
+                    <div className="trip-item__value">{vm.totalKm != null ? `${vm.totalKm} km` : '-'}</div>
+                  </div>
+                  <div className="trip-item trip-item--split">
+                    <div className="trip-item__title">最終区間</div>
+                    <div className="trip-item__value">{vm.lastLegKm != null ? `${vm.lastLegKm} km` : '-'}</div>
+                  </div>
+                </div>
               </div>
-            </div>
-            <div className="card" style={{ color: '#fff', padding: 18, borderRadius: 20 }}>
-              <div style={{ fontWeight: 900, marginBottom: 12, fontSize: 18 }}>イベント一覧（日別）</div>
-              <div style={{ display: 'grid', gap: 16 }}>
-                {(groupedByDay.length > 0 ? groupedByDay : [{ dayIndex: 1, dateLabel: '', items: grouped }]).map(day => (
-                  <div key={`${day.dayIndex}-${day.dateLabel}`} style={{ display: 'grid', gap: 10 }}>
-                    <div style={{ fontWeight: 900, fontSize: 17 }}>
-                      {day.dayIndex}日目 {day.dateLabel ? `(${day.dateLabel})` : ''}
-                    </div>
-                    {day.items.map(item => (
-                      <div key={item.id} style={{ padding: '14px 14px', borderRadius: 16, background: '#0b0b0b', display: 'grid', gap: 10 }}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', alignItems: 'baseline' }}>
-                          <div style={{ fontWeight: 900, fontSize: 18 }}>{item.title}</div>
-                          {item.range && <div style={{ fontSize: 16, opacity: 0.92 }}>{item.range}</div>}
-                        </div>
-                        {item.duration && (
-                          <div style={{ fontSize: 16, fontWeight: 700, opacity: 0.9 }}>所要時間: {item.duration}</div>
-                        )}
-                        {item.detail && <div style={{ opacity: 0.92, fontSize: 15 }}>{item.detail}</div>}
-                        {item.addresses && item.addresses.length > 0 && (
-                          <div style={{ display: 'grid', gap: 4, fontSize: 15, opacity: 0.92 }}>
-                            {item.addresses.map((a, i) => (
-                              <div key={i}>住所: {a}</div>
-                            ))}
-                          </div>
-                        )}
-                        {item.places && item.places.length > 0 && (
-                          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                            {item.places.map((p, i) => {
-                              const query = p.lat != null && p.lng != null
-                                ? `${p.lat},${p.lng}`
-                                : encodeURIComponent(p.address ?? '');
-                              const mapUrl = p.lat != null && p.lng != null
-                                ? `https://www.google.com/maps?q=${query}`
-                                : `https://www.google.com/maps/search/?api=1&query=${query}`;
-                              const navUrl = `https://www.google.com/maps/dir/?api=1&destination=${query}`;
-                              const label = p.label ? `${p.label}地点` : '地点';
-                              return (
-                                <div key={i} style={{ display: 'flex', gap: 6 }}>
-                                  <a
-                                    href={mapUrl}
-                                    target="_blank"
-                                    rel="noreferrer"
-                                    className="pill-link"
-                                    style={{ fontSize: 13 }}
-                                  >
-                                    {label}を地図で開く
-                                  </a>
-                                  <a
-                                    href={navUrl}
-                                    target="_blank"
-                                    rel="noreferrer"
-                                    className="pill-link"
-                                    style={{ fontSize: 13 }}
-                                  >
-                                    ナビで開く
-                                  </a>
-                                </div>
-                              );
-                            })}
-                          </div>
-                        )}
-                      </div>
+              {!vm.validation.ok && (
+                <div className="trip-detail__warning">
+                  <div style={{ fontWeight: 900, marginBottom: 8 }}>整合性チェック</div>
+                  <ul style={{ margin: 0, paddingLeft: 20 }}>
+                    {vm.validation.errors.map((e, i) => (
+                      <li key={i}>{e}</li>
                     ))}
-                  </div>
-                ))}
-              </div>
-            </div>
-            <div className="card" style={{ color: '#fff', padding: 18, borderRadius: 20 }}>
-              <div style={{ fontWeight: 900, marginBottom: 12, fontSize: 18 }}>イベント編集（時間/数値）</div>
-              <div style={{ display: 'grid', gap: 12 }}>
-                {events.map(ev => {
-                  const numDef = getNumericEditDef(ev);
-                  const timeEditing = editing?.id === ev.id;
-                  const numberEditingActive =
-                    !!numDef && numberEditing?.id === ev.id && numberEditing.field === numDef.field;
-                  return (
-                    <div key={ev.id} style={{ padding: '14px 14px', borderRadius: 16, background: '#0b0b0b', display: 'grid', gap: 12 }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', alignItems: 'baseline' }}>
-                        <div style={{ fontWeight: 900, fontSize: 17 }}>{label(ev)}</div>
-                        <div style={{ fontSize: 12, opacity: 0.7 }}>{ev.id.slice(0, 8)}</div>
+                  </ul>
+                </div>
+              )}
+              <div className="card trip-section">
+                <div className="trip-section__title">区間距離一覧（分割休息も含む）</div>
+                <div className="trip-list">
+                  {vm.segments.map(seg => (
+                    <div key={seg.index} className="trip-item trip-item--split">
+                      <div>
+                        <div className="trip-item__title">{seg.fromLabel} → {seg.toLabel}</div>
+                        <div className="trip-item__meta">{fmtLocal(seg.fromTs)} → {fmtLocal(seg.toTs)}</div>
                       </div>
-                      <div style={{ display: 'grid', gap: 8 }}>
-                        <div style={{ fontSize: 14, fontWeight: 800, opacity: 0.9 }}>時間</div>
-                        {timeEditing ? (
-                          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                            <input
-                              type="datetime-local"
-                              value={editing.value}
-                              onChange={e => setEditing({ id: ev.id, value: e.target.value })}
-                              disabled={saving}
-                              style={{ height: 40, borderRadius: 10, border: '1px solid #374151', background: '#111827', color: '#fff', padding: '0 10px' }}
-                            />
-                            <button
-                              onClick={handleSaveTime}
-                              disabled={saving}
-                              style={{ padding: '8px 12px', borderRadius: 10, fontWeight: 800 }}
-                            >
-                              保存
-                            </button>
-                            <button
-                              onClick={() => setEditing(null)}
-                              disabled={saving}
-                              style={{ padding: '8px 12px', borderRadius: 10 }}
-                            >
-                              取消
-                            </button>
-                          </div>
-                        ) : (
-                          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'center' }}>
-                            <div>{fmtLocal(ev.ts)}</div>
-                            <button
-                              onClick={() => setEditing({ id: ev.id, value: toLocalInputValue(ev.ts) })}
-                              disabled={saving}
-                              style={{ padding: '8px 12px', borderRadius: 10, fontWeight: 800 }}
-                            >
-                              編集
-                            </button>
-                          </div>
+                      <div className={`trip-item__value${seg.valid ? '' : ' trip-item__value--bad'}`}>{seg.km} km</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+              <div className="card trip-section">
+                <div className="trip-section__title">日別運行</div>
+                <div className="trip-section__note">日本時間24時で日付切替</div>
+                <div className="trip-list">
+                  {vm.dayRuns.map(day => (
+                    <div key={day.dayIndex} className="trip-item trip-item--split">
+                      <div>
+                        <div className="trip-item__title">
+                          {day.dayIndex}日目 {day.status === 'pending' ? '（運行中）' : ''}
+                        </div>
+                        <div className="trip-item__meta">{day.dateLabel}</div>
+                        {day.closeOdo != null && (
+                          <div className="trip-item__meta">{day.closeLabel ?? '休息開始'}: {day.closeOdo} km</div>
                         )}
                       </div>
-                      {numDef && (
-                        <div style={{ display: 'grid', gap: 8 }}>
-                          <div style={{ fontSize: 14, fontWeight: 800, opacity: 0.9 }}>{numDef.label}</div>
-                          {numberEditingActive ? (
-                            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                              <input
-                                type="number"
-                                value={numberEditing?.value ?? ''}
-                                min={numDef.min}
-                                step={numDef.step}
-                                onChange={e => setNumberEditing({ id: ev.id, field: numDef.field, value: e.target.value })}
-                                disabled={saving}
-                                style={{ height: 40, borderRadius: 10, border: '1px solid #374151', background: '#111827', color: '#fff', padding: '0 10px' }}
-                              />
-                              <button
-                                onClick={handleSaveNumber}
-                                disabled={saving}
-                                style={{ padding: '8px 12px', borderRadius: 10, fontWeight: 800 }}
-                              >
-                                保存
-                              </button>
-                              <button
-                                onClick={() => setNumberEditing(null)}
-                                disabled={saving}
-                                style={{ padding: '8px 12px', borderRadius: 10 }}
-                              >
-                                取消
-                              </button>
+                      <div className="trip-item__value">{day.km} km</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+            <div className="trip-detail__column">
+              <div className="card trip-section">
+                <div className="trip-section__title">イベント一覧（日別）</div>
+                <div className="trip-list">
+                  {(groupedByDay.length > 0 ? groupedByDay : [{ dayIndex: 1, dateLabel: '', items: grouped }]).map(day => (
+                    <div key={`${day.dayIndex}-${day.dateLabel}`} className="trip-day">
+                      <div className="trip-day__title">
+                        {day.dayIndex}日目 {day.dateLabel ? `(${day.dateLabel})` : ''}
+                      </div>
+                      <div className="trip-list">
+                        {day.items.map(item => (
+                          <div key={item.id} className="trip-item trip-event">
+                            <div className="trip-event__header">
+                              <div className="trip-event__title">{item.title}</div>
+                              {item.range && <div className="trip-event__range">{item.range}</div>}
                             </div>
-                          ) : (
-                            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'center' }}>
-                              <div>{numDef.value ?? '-'}</div>
-                              <button
-                                onClick={() =>
-                                  setNumberEditing({
-                                    id: ev.id,
-                                    field: numDef.field,
-                                    value: numDef.value != null ? String(numDef.value) : '',
-                                  })
-                                }
-                                disabled={saving}
-                                style={{ padding: '8px 12px', borderRadius: 10, fontWeight: 800 }}
-                              >
-                                編集
-                              </button>
+                            {item.duration && (
+                              <div className="trip-event__detail">所要時間: {item.duration}</div>
+                            )}
+                            {item.detail && <div className="trip-event__detail">{item.detail}</div>}
+                            {item.addresses && item.addresses.length > 0 && (
+                              <div className="trip-event__address">
+                                {item.addresses.map((a, i) => (
+                                  <div key={i}>住所: {a}</div>
+                                ))}
+                              </div>
+                            )}
+                            {item.places && item.places.length > 0 && (
+                              <div className="trip-event__actions">
+                                {item.places.map((p, i) => {
+                                  const query = p.lat != null && p.lng != null
+                                    ? `${p.lat},${p.lng}`
+                                    : encodeURIComponent(p.address ?? '');
+                                  const mapUrl = p.lat != null && p.lng != null
+                                    ? `https://www.google.com/maps?q=${query}`
+                                    : `https://www.google.com/maps/search/?api=1&query=${query}`;
+                                  const navUrl = `https://www.google.com/maps/dir/?api=1&destination=${query}`;
+                                  const label = p.label ? `${p.label}地点` : '地点';
+                                  return (
+                                    <div key={i} className="trip-event__action-pair">
+                                      <a
+                                        href={mapUrl}
+                                        target="_blank"
+                                        rel="noreferrer"
+                                        className="trip-detail__button trip-detail__button--small"
+                                      >
+                                        {label}を地図で開く
+                                      </a>
+                                      <a
+                                        href={navUrl}
+                                        target="_blank"
+                                        rel="noreferrer"
+                                        className="trip-detail__button trip-detail__button--small"
+                                      >
+                                        ナビで開く
+                                      </a>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+              <div className="card trip-section">
+                <div className="trip-section__title">イベント編集（時間/数値）</div>
+                <div className="trip-list">
+                  {events.map(ev => {
+                    const numDef = getNumericEditDef(ev);
+                    const timeEditing = editing?.id === ev.id;
+                    const numberEditingActive =
+                      !!numDef && numberEditing?.id === ev.id && numberEditing.field === numDef.field;
+                    return (
+                      <div key={ev.id} className="trip-item trip-edit">
+                        <div className="trip-edit__header">
+                          <div className="trip-item__title">{label(ev)}</div>
+                          <div className="trip-edit__id">{ev.id.slice(0, 8)}</div>
+                        </div>
+                        <div className="trip-list">
+                          <div style={{ display: 'grid', gap: 8 }}>
+                            <div className="trip-edit__label">時間</div>
+                            {timeEditing ? (
+                              <div className="trip-edit__row">
+                                <input
+                                  type="datetime-local"
+                                  value={editing.value}
+                                  onChange={e => setEditing({ id: ev.id, value: e.target.value })}
+                                  disabled={saving}
+                                  className="trip-input"
+                                />
+                                <button
+                                  onClick={handleSaveTime}
+                                  disabled={saving}
+                                  className="trip-btn"
+                                >
+                                  保存
+                                </button>
+                                <button
+                                  onClick={() => setEditing(null)}
+                                  disabled={saving}
+                                  className="trip-btn trip-btn--ghost"
+                                >
+                                  取消
+                                </button>
+                              </div>
+                            ) : (
+                              <div className="trip-edit__row trip-edit__row--between">
+                                <div>{fmtLocal(ev.ts)}</div>
+                                <button
+                                  onClick={() => setEditing({ id: ev.id, value: toLocalInputValue(ev.ts) })}
+                                  disabled={saving}
+                                  className="trip-btn"
+                                >
+                                  編集
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                          {numDef && (
+                            <div style={{ display: 'grid', gap: 8 }}>
+                              <div className="trip-edit__label">{numDef.label}</div>
+                              {numberEditingActive ? (
+                                <div className="trip-edit__row">
+                                  <input
+                                    type="number"
+                                    value={numberEditing?.value ?? ''}
+                                    min={numDef.min}
+                                    step={numDef.step}
+                                    onChange={e => setNumberEditing({ id: ev.id, field: numDef.field, value: e.target.value })}
+                                    disabled={saving}
+                                    className="trip-input"
+                                  />
+                                  <button
+                                    onClick={handleSaveNumber}
+                                    disabled={saving}
+                                    className="trip-btn"
+                                  >
+                                    保存
+                                  </button>
+                                  <button
+                                    onClick={() => setNumberEditing(null)}
+                                    disabled={saving}
+                                    className="trip-btn trip-btn--ghost"
+                                  >
+                                    取消
+                                  </button>
+                                </div>
+                              ) : (
+                                <div className="trip-edit__row trip-edit__row--between">
+                                  <div>{numDef.value ?? '-'}</div>
+                                  <button
+                                    onClick={() =>
+                                      setNumberEditing({
+                                        id: ev.id,
+                                        field: numDef.field,
+                                        value: numDef.value != null ? String(numDef.value) : '',
+                                      })
+                                    }
+                                    disabled={saving}
+                                    className="trip-btn"
+                                  >
+                                    編集
+                                  </button>
+                                </div>
+                              )}
                             </div>
                           )}
                         </div>
-                      )}
-                    </div>
-                  );
-                })}
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
             </div>
           </div>
