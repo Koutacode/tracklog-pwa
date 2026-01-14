@@ -730,11 +730,23 @@ export default function TripDetail() {
                     const timeEditing = editing?.id === ev.id;
                     const numberEditingActive =
                       !!numDef && numberEditing?.id === ev.id && numberEditing.field === numDef.field;
+                    const canDelete = ev.type !== 'trip_start';
                     return (
                       <div key={ev.id} className="trip-item trip-edit">
                         <div className="trip-edit__header">
                           <div className="trip-item__title">{label(ev)}</div>
-                          <div className="trip-edit__id">{ev.id.slice(0, 8)}</div>
+                          <div className="trip-edit__actions">
+                            <div className="trip-edit__id">{ev.id.slice(0, 8)}</div>
+                            {canDelete && (
+                              <button
+                                onClick={() => handleDeleteEvent(ev.id)}
+                                disabled={saving || workingId === ev.id}
+                                className="trip-btn trip-btn--danger"
+                              >
+                                削除
+                              </button>
+                            )}
+                          </div>
                         </div>
                         <div className="trip-list">
                           <div style={{ display: 'grid', gap: 8 }}>

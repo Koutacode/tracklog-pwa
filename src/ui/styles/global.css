@@ -313,6 +313,7 @@ a:hover {
   color: #fff;
   font-weight: 800;
   font-size: 14px;
+  cursor: pointer;
 }
 
 .trip-detail__button--accent {
@@ -482,6 +483,12 @@ a:hover {
   align-items: baseline;
 }
 
+.trip-edit__actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .trip-edit__id {
   font-size: 12px;
   color: var(--muted);
@@ -521,10 +528,16 @@ a:hover {
   border: 1px solid #374151;
   background: #1f2937;
   color: #fff;
+  cursor: pointer;
 }
 
 .trip-btn--ghost {
   background: transparent;
+}
+
+.trip-btn--danger {
+  border-color: #b91c1c;
+  background: #7f1d1d;
 }
 
 @media (min-width: 960px) {

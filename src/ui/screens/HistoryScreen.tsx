@@ -177,7 +177,7 @@ export default function HistoryScreen() {
                     e.stopPropagation();
                     void handleDelete(r.tripId);
                   }}
-                  style={{ padding: '4px 6px', borderRadius: 8, fontSize: 12 }}
+                  className="trip-detail__button trip-detail__button--danger trip-detail__button--small"
                 >
                   削除
                 </button>
