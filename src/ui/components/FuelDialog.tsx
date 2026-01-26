@@ -15,8 +15,8 @@ export default function FuelDialog({ open, onCancel, onConfirm }: FuelDialogProp
   return (
     <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.6)', display: 'grid', placeItems: 'center', zIndex: 9999 }}>
       <div style={{ width: 'min(520px, 92vw)', background: '#111', color: '#fff', borderRadius: 16, padding: 16 }}>
-        <div style={{ fontSize: 18, fontWeight: 800, marginBottom: 8 }}>給油</div>
-        <div style={{ opacity: 0.85, marginBottom: 12 }}>給油量（L）を入力してください</div>
+        <div style={{ fontSize: 18, fontWeight: 800, marginBottom: 8 }}>給油記録</div>
+        <div style={{ opacity: 0.85, marginBottom: 12 }}>給油量を入力してください</div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
           <input
             inputMode="decimal"
@@ -39,7 +39,7 @@ export default function FuelDialog({ open, onCancel, onConfirm }: FuelDialogProp
         </div>
         <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 16 }}>
           <button onClick={onCancel} style={{ padding: '10px 14px', borderRadius: 12 }}>
-            キャンセル
+            戻る
           </button>
           <button
             onClick={() => {
@@ -49,7 +49,7 @@ export default function FuelDialog({ open, onCancel, onConfirm }: FuelDialogProp
             }}
             style={{ padding: '10px 14px', borderRadius: 12, fontWeight: 800 }}
           >
-            保存
+            記録
           </button>
         </div>
       </div>

@@ -71,7 +71,7 @@ export default function HistoryScreen() {
     load();
   }, []);
   async function handleDelete(tripId: string) {
-    const ok = window.confirm('この運行の履歴を削除します。よろしいですか？');
+    const ok = window.confirm('この運行を削除します。よろしいですか？');
     if (!ok) return;
     try {
       await deleteTrip(tripId);
@@ -88,7 +88,7 @@ export default function HistoryScreen() {
       const events = await getAllEvents();
       downloadBlob(`tracklog-events-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify(events, null, 2), 'application/json');
     } catch (e: any) {
-      setErr(e?.message ?? 'エクスポートに失敗しました');
+      setErr(e?.message ?? 'JSON出力に失敗しました');
     } finally {
       setExporting(false);
     }
@@ -119,7 +119,7 @@ export default function HistoryScreen() {
       const csv = [header.join(','), ...rowsCsv].join('\r\n');
       downloadBlob(`tracklog-events-${new Date().toISOString().slice(0, 10)}.csv`, csv, 'text/csv');
     } catch (e: any) {
-      setErr(e?.message ?? 'CSVエクスポートに失敗しました');
+      setErr(e?.message ?? 'CSV出力に失敗しました');
     } finally {
       setExporting(false);
     }
@@ -127,7 +127,7 @@ export default function HistoryScreen() {
   return (
     <div className="page-shell">
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, gap: 12, flexWrap: 'wrap' }}>
-        <div style={{ fontSize: 20, fontWeight: 900 }}>履歴</div>
+        <div style={{ fontSize: 20, fontWeight: 900 }}>運行履歴</div>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
           <button
             onClick={handleExportJSON}
@@ -135,7 +135,7 @@ export default function HistoryScreen() {
             className="pill-link"
             style={{ borderColor: '#334155', background: '#0f172a' }}
           >
-            {exporting ? '出力中…' : 'JSONエクスポート'}
+            {exporting ? '出力中…' : 'JSON出力'}
           </button>
           <button
             onClick={handleExportCSV}
@@ -143,7 +143,7 @@ export default function HistoryScreen() {
             className="pill-link"
             style={{ borderColor: '#334155', background: '#0f172a' }}
           >
-            {exporting ? '出力中…' : 'CSVエクスポート'}
+            {exporting ? '出力中…' : 'CSV出力'}
           </button>
           <Link to="/" className="pill-link">ホーム</Link>
         </div>

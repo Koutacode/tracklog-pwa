@@ -195,7 +195,7 @@ export default function HomeScreen() {
       await deleteEvent(eventId);
       await refresh();
     } catch (e: any) {
-      alert(e?.message ?? '自動記録の取り消しに失敗しました');
+      alert(e?.message ?? '自動開始の取り消しに失敗しました');
     }
   }
 
@@ -212,11 +212,11 @@ export default function HomeScreen() {
     const speed = Number(autoExpresswayDraft.speedKmh);
     const duration = Number(autoExpresswayDraft.durationSec);
     if (!Number.isFinite(speed) || speed < 30 || speed > 160) {
-      setAutoExpresswaySettingsError('開始速度は30〜160km/hで入力してください');
+      setAutoExpresswaySettingsError('開始速度は30〜160km/hの範囲で入力してください。');
       return;
     }
     if (!Number.isFinite(duration) || duration < 1 || duration > 60) {
-      setAutoExpresswaySettingsError('継続秒数は1〜60秒で入力してください');
+      setAutoExpresswaySettingsError('継続時間は1〜60秒の範囲で入力してください。');
       return;
     }
     const saved = await setAutoExpresswayConfig({ speedKmh: Math.round(speed), durationSec: Math.round(duration) });
@@ -407,7 +407,7 @@ export default function HomeScreen() {
           setGeoStatus(prev => (prev ? { ...prev, address } : null));
         }
       } else {
-        setGeoError('位置情報が取得できませんでした（ブラウザ設定を確認してください）');
+        setGeoError('位置情報が取得できませんでした。位置情報の許可を確認してください。');
       }
     } catch (e: any) {
       setGeoError(e?.message ?? '位置情報の取得に失敗しました');
@@ -453,7 +453,7 @@ export default function HomeScreen() {
     if (Notification.permission !== 'granted') return;
 
     const options: NotificationOptions = {
-      body: '休憩開始から30分経ちました',
+      body: '休憩開始から30分経過しました',
       vibrate: [200, 100, 200],
       requireInteraction: true,
       tag: 'tracklog-break-30min',
@@ -463,9 +463,9 @@ export default function HomeScreen() {
     try {
       const reg = await navigator.serviceWorker?.ready;
       if (reg?.showNotification) {
-        await reg.showNotification('30分経過', options);
+        await reg.showNotification('休憩30分経過', options);
       } else {
-        new Notification('30分経過', options);
+        new Notification('休憩30分経過', options);
       }
     } catch {
       // ignore
@@ -487,36 +487,22 @@ export default function HomeScreen() {
   }
 
   const autoExpresswayToastView = autoExpresswayToast ? (
-    <div
-      className="card"
-      style={{
-        position: 'fixed',
-        left: '50%',
-        bottom: 16,
-        transform: 'translateX(-50%)',
-        zIndex: 10000,
-        padding: '12px 14px',
-        minWidth: 260,
-        background: 'rgba(15, 23, 42, 0.92)',
-        borderColor: 'rgba(251, 146, 60, 0.35)',
-      }}
-    >
-      <div style={{ fontWeight: 800, marginBottom: 6 }}>
-        高速道路を自動で開始しました（{autoExpresswayToast.speedKmh}km/h）
-      </div>
-      <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-        <button
-          style={{ padding: '8px 12px', borderRadius: 10 }}
-          onClick={() => cancelAutoExpressway(autoExpresswayToast.eventId)}
-        >
-          取り消し
-        </button>
-        <button
-          style={{ padding: '8px 12px', borderRadius: 10, fontWeight: 800 }}
-          onClick={dismissAutoExpresswayToast}
-        >
-          閉じる
-        </button>
+    <div className="auto-expressway-overlay" onClick={dismissAutoExpresswayToast}>
+      <div className="auto-expressway-card" onClick={e => e.stopPropagation()}>
+        <div className="auto-expressway-title">高速道路を自動で開始しました</div>
+        <div className="auto-expressway-speed">{autoExpresswayToast.speedKmh} km/h</div>
+        <div className="auto-expressway-note">誤検知のときは取り消してください。</div>
+        <div className="auto-expressway-actions">
+          <button
+            className="trip-detail__button trip-detail__button--danger"
+            onClick={() => cancelAutoExpressway(autoExpresswayToast.eventId)}
+          >
+            取り消す
+          </button>
+          <button className="trip-detail__button" onClick={dismissAutoExpresswayToast}>
+            閉じる
+          </button>
+        </div>
       </div>
     </div>
   ) : null;
@@ -533,10 +519,13 @@ export default function HomeScreen() {
       }}
     >
       <div style={{ width: 'min(520px, 92vw)', background: '#111', color: '#fff', borderRadius: 16, padding: 16 }}>
-        <div style={{ fontSize: 18, fontWeight: 800, marginBottom: 8 }}>自動高速開始の設定</div>
+        <div style={{ fontSize: 18, fontWeight: 800, marginBottom: 6 }}>高速自動開始設定</div>
+        <div style={{ opacity: 0.8, fontSize: 13, marginBottom: 12 }}>
+          指定速度が指定秒数続いたら、自動で高速道路の開始を記録します。
+        </div>
         <div style={{ display: 'grid', gap: 12 }}>
           <label style={{ display: 'grid', gap: 6 }}>
-            開始速度 (km/h)
+            開始速度（km/h）
             <input
               type="number"
               min={30}
@@ -547,7 +536,7 @@ export default function HomeScreen() {
             />
           </label>
           <label style={{ display: 'grid', gap: 6 }}>
-            継続秒数 (秒)
+            継続時間（秒）
             <input
               type="number"
               min={1}
@@ -566,7 +555,7 @@ export default function HomeScreen() {
             onClick={() => setAutoExpresswaySettingsOpen(false)}
             style={{ padding: '10px 14px', borderRadius: 12 }}
           >
-            キャンセル
+            閉じる
           </button>
           <button onClick={saveAutoExpresswaySettings} style={{ padding: '10px 14px', borderRadius: 12, fontWeight: 800 }}>
             保存
@@ -586,7 +575,7 @@ export default function HomeScreen() {
               <div className="start-hero__brand-mark">TL</div>
               <div>
                 <div className="start-hero__brand-name">TrackLog</div>
-                <div className="start-hero__brand-sub">運行ログ</div>
+                <div className="start-hero__brand-sub">運行記録</div>
               </div>
             </div>
             <div className="start-hero__nav-actions">
@@ -602,20 +591,20 @@ export default function HomeScreen() {
                     }
                   }}
                 >
-                  全画面
+                  全画面表示
                 </button>
               )}
               <button className="pill-link" onClick={openAutoExpresswaySettings}>
-                自動高速設定
+                高速自動開始
               </button>
               <Link to="/history" className="pill-link">
-                履歴
+                運行履歴
               </Link>
             </div>
           </div>
           <div className="start-hero__panel">
             <div className="start-hero__title">運行開始</div>
-            <div className="start-hero__subtitle">虎のように鋭く、今日の運行を記録します。</div>
+            <div className="start-hero__subtitle">出発前にODOを入力して運行を開始します。</div>
             <div className="start-hero__actions">
               <BigButton
                 label={loading ? '読み込み中…' : '運行開始'}
@@ -631,7 +620,8 @@ export default function HomeScreen() {
           <OdoDialog
             open={odoDialog?.kind === 'trip_start'}
             title="運行開始"
-            description="運行開始時のオドメーター（km）を入力してください"
+            description="開始ODO（km）を入力してください"
+            confirmText="運行開始"
             onCancel={() => setOdoDialog(null)}
             onConfirm={async odoKm => {
               setOdoDialog(null);
@@ -680,22 +670,22 @@ export default function HomeScreen() {
         <div>
           <div style={{ fontSize: 20, fontWeight: 900 }}>運行中</div>
           <div style={{ opacity: 0.85, fontSize: 13 }}>
-            開始: {tripStart?.ts ? new Intl.DateTimeFormat('ja-JP', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).format(new Date(tripStart.ts)) : '-'} / 開始ODO: {tripStartOdo ?? '-'} km
+            開始時刻: {tripStart?.ts ? new Intl.DateTimeFormat('ja-JP', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).format(new Date(tripStart.ts)) : '-'} / 開始ODO: {tripStartOdo ?? '-'} km
           </div>
         </div>
         <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
           <Link to={`/trip/${tripId}`} className="pill-link">
-            詳細
+            運行詳細
           </Link>
           <button className="pill-link" onClick={openAutoExpresswaySettings}>
-            自動高速設定
+            高速自動開始
           </button>
           <Link to="/history" className="pill-link">
-            履歴
+            運行履歴
           </Link>
           {expresswayActive && expresswayStart && (
             <div style={{ padding: '8px 10px', borderRadius: 10, background: '#0ea5e9', color: '#fff', fontWeight: 800, fontSize: 12 }}>
-              高速中 {fmtDuration(now - new Date(expresswayStart.ts).getTime())}
+              高速走行中 {fmtDuration(now - new Date(expresswayStart.ts).getTime())}
             </div>
           )}
           {fullscreenSupported && (
@@ -710,7 +700,7 @@ export default function HomeScreen() {
                 }
               }}
             >
-              全画面
+              全画面表示
             </button>
           )}
           {wakeLockAvailable && (
@@ -728,7 +718,7 @@ export default function HomeScreen() {
                 if (ok) {
                   setWakeLockOn(true);
                 } else {
-                  setWakeLockError('画面スリープ防止を有効にできませんでした（ブラウザを確認）');
+                  setWakeLockError('画面スリープ防止を有効にできませんでした。ブラウザの許可を確認してください。');
                 }
               }}
             >
@@ -772,22 +762,22 @@ export default function HomeScreen() {
                 </div>
               )}
               {!restStart && !loadStart && !unloadStart && !breakStart && (
-                <div style={{ opacity: 0.8 }}>他の進行中イベントはありません</div>
+                <div style={{ opacity: 0.8 }}>進行中のイベントはありません</div>
               )}
             </div>
           </div>
           <div className="card" style={{ color: '#fff', padding: 12, borderRadius: 14 }}>
-            <div style={{ fontWeight: 900, marginBottom: 6 }}>位置情報</div>
+            <div style={{ fontWeight: 900, marginBottom: 6 }}>現在地</div>
             {geoStatus ? (
               <div style={{ display: 'grid', gap: 4, fontSize: 14 }}>
                 <div>緯度: {geoStatus.lat.toFixed(5)}</div>
                 <div>経度: {geoStatus.lng.toFixed(5)}</div>
                 {geoStatus.accuracy != null && <div>精度: ±{Math.round(geoStatus.accuracy)}m</div>}
-                {geoStatus.address && <div>地点: {geoStatus.address}</div>}
+                {geoStatus.address && <div>住所: {geoStatus.address}</div>}
                 <div style={{ opacity: 0.8 }}>取得時刻: {new Date(geoStatus.at).toLocaleString('ja-JP')}</div>
               </div>
             ) : (
-              <div style={{ opacity: 0.8, marginBottom: 4 }}>まだ取得できていません</div>
+              <div style={{ opacity: 0.8, marginBottom: 4 }}>未取得</div>
             )}
             {geoError && <div style={{ color: '#fca5a5', marginTop: 6 }}>{geoError}</div>}
             <button
@@ -803,7 +793,7 @@ export default function HomeScreen() {
                 fontWeight: 800,
               }}
             >
-              位置情報を再取得
+              位置情報を更新
             </button>
           </div>
         </div>
@@ -929,7 +919,7 @@ export default function HomeScreen() {
             />
           ) : (
             <BigButton
-              label="休息開始（オド入力）"
+              label="休息開始（ODO）"
               disabled={!canStartRest}
               onClick={() => {
                 ensureFullscreen();
@@ -939,7 +929,7 @@ export default function HomeScreen() {
           )}
           {/* Fuel (給油) */}
           <BigButton
-            label="給油（数量入力）"
+            label="給油（数量）"
             onClick={() => {
               ensureFullscreen();
               setFuelOpen(true);
@@ -990,7 +980,7 @@ export default function HomeScreen() {
           )}
           {/* Boarding (乗船) */}
           <BigButton
-            label="乗船"
+            label="乗船記録"
             onClick={async () => {
               try {
                 ensureFullscreen();
@@ -1015,7 +1005,7 @@ export default function HomeScreen() {
             await addRefuel({ tripId, liters, geo });
             await refresh();
           } catch (e: any) {
-            alert(e?.message ?? '給油の保存に失敗しました');
+            alert(e?.message ?? '給油の記録に失敗しました');
           }
         }}
       />
@@ -1023,7 +1013,8 @@ export default function HomeScreen() {
       <OdoDialog
         open={odoDialog?.kind === 'rest_start'}
         title="休息開始"
-        description="休息開始時のオドメーター（km）を入力してください（分割休息も毎回入力）"
+        description="休息開始ODO（km）を入力してください"
+        confirmText="休息開始"
         onCancel={() => setOdoDialog(null)}
         onConfirm={async odoKm => {
           setOdoDialog(null);
@@ -1057,7 +1048,8 @@ export default function HomeScreen() {
       <OdoDialog
         open={odoDialog?.kind === 'trip_end'}
         title="運行終了"
-        description="運行終了時のオドメーター（km）を入力してください（総距離と最終区間距離を計算します）"
+        description="終了ODO（km）を入力してください。総距離と最終区間距離を計算します。"
+        confirmText="運行終了"
         onCancel={() => setOdoDialog(null)}
           onConfirm={async odoEndKm => {
             setOdoDialog(null);

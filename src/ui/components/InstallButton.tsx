@@ -42,16 +42,16 @@ export default function InstallButton() {
   const canPrompt = !!promptEvent;
   const label = canPrompt
     ? installing
-      ? 'インストール中…'
-      : 'PWAをインストール'
-    : 'インストール方法を表示';
+      ? '追加中…'
+      : 'アプリを追加'
+    : '追加方法を表示';
 
   return (
     <button
       onClick={async () => {
         if (!promptEvent) {
           alert(
-            'インストールが表示されない場合は、ブラウザのメニューから「アプリをインストール」を選択してください（Chrome/Edgeはアドレスバーのインストールボタン、Safariは共有メニュー→ホーム画面に追加）。\n準備ができたら自動でインストールボタンが有効になります。',
+            'インストールが見つからない場合は、ブラウザのメニューから「アプリをインストール」または「ホーム画面に追加」を選択してください。\n準備ができ次第、このボタンが有効になります。',
           );
           return;
         }

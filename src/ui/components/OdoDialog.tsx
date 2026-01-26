@@ -11,7 +11,7 @@ interface OdoDialogProps {
 }
 
 export default function OdoDialog(props: OdoDialogProps) {
-  const { open, title, description, initialValue, confirmText = '保存', onCancel, onConfirm } = props;
+  const { open, title, description, initialValue, confirmText = '確定', onCancel, onConfirm } = props;
   const [value, setValue] = useState('');
 
   const handleSubmit = (e?: React.FormEvent) => {
@@ -75,7 +75,7 @@ export default function OdoDialog(props: OdoDialogProps) {
               inputMode="none"
               readOnly
               onFocus={e => e.currentTarget.blur()}
-              placeholder="オドメーター（km）"
+              placeholder="ODO（km）"
               value={value}
               style={{
                 flex: 1,
@@ -176,7 +176,7 @@ export default function OdoDialog(props: OdoDialogProps) {
             }}
           >
             <button type="button" onClick={onCancel} style={{ padding: '10px 14px', borderRadius: 12 }}>
-              キャンセル
+              戻る
             </button>
             <button
               type="submit"

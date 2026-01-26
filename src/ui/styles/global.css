@@ -60,6 +60,58 @@ a:hover {
   color: #fff;
 }
 
+.auto-expressway-overlay {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 20px 16px;
+  background: rgba(2, 6, 23, 0.72);
+  z-index: 10000;
+}
+
+.auto-expressway-card {
+  width: min(560px, 92vw);
+  border-radius: 20px;
+  padding: 18px;
+  background: linear-gradient(160deg, rgba(30, 41, 59, 0.96), rgba(15, 23, 42, 0.92));
+  border: 1px solid rgba(251, 146, 60, 0.35);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.5);
+  text-align: center;
+}
+
+.auto-expressway-title {
+  font-size: 20px;
+  font-weight: 900;
+  margin-bottom: 6px;
+}
+
+.auto-expressway-speed {
+  font-size: 34px;
+  font-weight: 900;
+  color: #fbbf24;
+  letter-spacing: 0.02em;
+}
+
+.auto-expressway-note {
+  margin-top: 6px;
+  font-size: 14px;
+  color: rgba(255, 255, 255, 0.78);
+}
+
+.auto-expressway-actions {
+  display: flex;
+  justify-content: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 16px;
+}
+
+.auto-expressway-actions .trip-detail__button {
+  font-size: 16px;
+  padding: 12px 16px;
+}
+
 .start-hero {
   --tiger-amber: #f59e0b;
   --tiger-ember: #fb923c;

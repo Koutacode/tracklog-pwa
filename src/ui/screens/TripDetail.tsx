@@ -135,16 +135,16 @@ type AiSharePayload = {
 function getNumericEditDef(ev: AppEvent): NumericEditDef | null {
   const extras = (ev as any).extras ?? {};
   if (ev.type === 'trip_start') {
-    return { field: 'odoKm', label: '運行開始ODO (km)', value: extras.odoKm, min: 0, step: 1 };
+    return { field: 'odoKm', label: '開始ODO（km）', value: extras.odoKm, min: 0, step: 1 };
   }
   if (ev.type === 'rest_start') {
-    return { field: 'odoKm', label: '休息開始ODO (km)', value: extras.odoKm, min: 0, step: 1 };
+    return { field: 'odoKm', label: '休息開始ODO（km）', value: extras.odoKm, min: 0, step: 1 };
   }
   if (ev.type === 'trip_end') {
-    return { field: 'odoKm', label: '運行終了ODO (km)', value: extras.odoKm, min: 0, step: 1 };
+    return { field: 'odoKm', label: '終了ODO（km）', value: extras.odoKm, min: 0, step: 1 };
   }
   if (ev.type === 'refuel') {
-    return { field: 'liters', label: '給油量 (L)', value: extras.liters, min: 0, step: 0.1 };
+    return { field: 'liters', label: '給油量（L）', value: extras.liters, min: 0, step: 0.1 };
   }
   return null;
 }
@@ -336,6 +336,7 @@ function buildAiPayload(tripId: string, vm: TripViewModel, events: AppEvent[]): 
 function buildAiShareText(payload: AiSharePayload) {
   return [
     '以下の運行履歴を要約してください。',
+    '出力は日本語で、重要事項は箇条書きにしてください。',
     '',
     '---',
     JSON.stringify(payload, null, 2),
@@ -452,7 +453,7 @@ export default function TripDetail() {
       return;
     }
     if (numberEditing.field === 'odoKm' && parsed <= 0) {
-      alert('オドメーターが不正です');
+      alert('ODOが不正です');
       return;
     }
     if (numberEditing.field === 'liters' && parsed <= 0) {
@@ -516,16 +517,16 @@ export default function TripDetail() {
       const text = buildAiShareText(payload);
       if (navigator.share) {
         try {
-          await navigator.share({ title: '運行ログ', text });
+          await navigator.share({ title: '運行記録', text });
           return;
         } catch (e: any) {
           if (e?.name === 'AbortError') return;
         }
       }
       await copyText(text);
-      alert('AI送信用テキストをコピーしました。ChatGPT/Geminiに貼り付けてください。');
+      alert('AI要約用テキストをコピーしました。ChatGPT/Geminiに貼り付けてください。');
     } catch (e: any) {
-      setErr(e?.message ?? 'AI共有に失敗しました');
+      setErr(e?.message ?? 'AI要約の準備に失敗しました');
     } finally {
       setSharing(false);
     }
@@ -542,20 +543,20 @@ export default function TripDetail() {
     <div className="page-shell trip-detail">
       <div className="trip-detail__header">
         <div>
-          <div className="trip-detail__title">運行詳細</div>
-          <div className="trip-detail__meta">tripId: {tripId}</div>
+          <div className="trip-detail__title">運行詳細・編集</div>
+          <div className="trip-detail__meta">運行ID: {tripId}</div>
         </div>
         <div className="trip-detail__actions">
           <Link to="/" className="trip-detail__button">ホーム</Link>
-          <Link to="/history" className="trip-detail__button">履歴</Link>
+          <Link to="/history" className="trip-detail__button">運行履歴</Link>
           <button
             onClick={handleShareAi}
             disabled={sharing || !vm}
             className="trip-detail__button trip-detail__button--accent"
           >
-            {sharing ? 'AI共有中…' : 'AI共有'}
+            {sharing ? '作成中…' : 'AI要約'}
           </button>
-          <button onClick={load} className="trip-detail__button">再読込</button>
+          <button onClick={load} className="trip-detail__button">再読み込み</button>
         </div>
       </div>
       {err && (
@@ -569,7 +570,7 @@ export default function TripDetail() {
               className="trip-detail__button trip-detail__button--danger"
               onClick={async () => {
                 if (!tripId) return;
-                const ok = window.confirm('この運行の履歴をすべて削除します。よろしいですか？');
+                const ok = window.confirm('この運行を削除します。よろしいですか？');
                 if (!ok) return;
                 setDeleting(true);
                 try {
@@ -583,7 +584,7 @@ export default function TripDetail() {
               }}
               disabled={deleting}
             >
-              {deleting ? '削除中…' : 'この運行を削除'}
+              {deleting ? '削除中…' : '運行を削除'}
             </button>
           </div>
           <div className="trip-detail__layout">
@@ -620,9 +621,10 @@ export default function TripDetail() {
                 </div>
               )}
               <div className="card trip-section">
-                <div className="trip-section__title">区間距離一覧（分割休息も含む）</div>
-                <div className="trip-list">
-                  {vm.segments.map(seg => (
+              <div className="trip-section__title">区間距離一覧</div>
+              <div className="trip-section__note">休息開始ODOを区切りとして計算します。</div>
+              <div className="trip-list">
+                {vm.segments.map(seg => (
                     <div key={seg.index} className="trip-item trip-item--split">
                       <div>
                         <div className="trip-item__title">{seg.fromLabel} → {seg.toLabel}</div>
@@ -656,8 +658,8 @@ export default function TripDetail() {
             </div>
             <div className="trip-detail__column">
               <div className="card trip-section">
-                <div className="trip-section__title">イベント一覧（日別）</div>
-                <div className="trip-list">
+              <div className="trip-section__title">イベント一覧</div>
+              <div className="trip-list">
                   {(groupedByDay.length > 0 ? groupedByDay : [{ dayIndex: 1, dateLabel: '', items: grouped }]).map(day => (
                     <div key={`${day.dayIndex}-${day.dateLabel}`} className="trip-day">
                       <div className="trip-day__title">
@@ -723,8 +725,9 @@ export default function TripDetail() {
                 </div>
               </div>
               <div className="card trip-section">
-                <div className="trip-section__title">イベント編集（時間/数値）</div>
-                <div className="trip-list">
+              <div className="trip-section__title">イベント編集</div>
+              <div className="trip-section__note">時間・ODO・給油量を編集できます。</div>
+              <div className="trip-list">
                   {events.map(ev => {
                     const numDef = getNumericEditDef(ev);
                     const timeEditing = editing?.id === ev.id;
