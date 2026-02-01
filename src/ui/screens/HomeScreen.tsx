@@ -176,9 +176,8 @@ export default function HomeScreen() {
     }
     setAutoExpresswayToast({ eventId, speedKmh });
     autoExpresswayToastTimer.current = window.setTimeout(() => {
-      setAutoExpresswayToast(null);
-      autoExpresswayToastTimer.current = null;
-    }, 12000);
+      dismissAutoExpresswayToast();
+    }, 3000);
   }
 
   function dismissAutoExpresswayToast() {
