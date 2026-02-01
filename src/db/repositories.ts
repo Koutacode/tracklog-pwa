@@ -6,6 +6,7 @@ import type {
   RestStartEvent,
   RestEndEvent,
   Geo,
+  EventType,
 } from '../domain/types';
 import { computeTotals } from '../domain/metrics';
 import { reverseGeocode } from '../services/geo';
@@ -125,6 +126,88 @@ export async function updateEventTimestamp(eventId: string, ts: string) {
   if (!ev) throw new Error('イベントが見つかりません');
   await db.events.update(eventId, { ts, syncStatus: 'pending' });
   await rebalanceDayCloseIndices(ev.tripId);
+}
+
+const SESSION_KEYS = [
+  'restSessionId',
+  'breakSessionId',
+  'loadSessionId',
+  'unloadSessionId',
+  'expresswaySessionId',
+] as const;
+
+type SessionKey = (typeof SESSION_KEYS)[number];
+
+const SESSION_KEY_BY_TYPE: Partial<Record<EventType, SessionKey>> = {
+  rest_start: 'restSessionId',
+  rest_end: 'restSessionId',
+  break_start: 'breakSessionId',
+  break_end: 'breakSessionId',
+  load_start: 'loadSessionId',
+  load_end: 'loadSessionId',
+  unload_start: 'unloadSessionId',
+  unload_end: 'unloadSessionId',
+  expressway_start: 'expresswaySessionId',
+  expressway_end: 'expresswaySessionId',
+};
+
+function pickExistingSessionId(extras: Record<string, unknown>): string | null {
+  for (const key of SESSION_KEYS) {
+    const val = extras[key];
+    if (typeof val === 'string' && val.trim()) return val;
+  }
+  return null;
+}
+
+export async function updateEventType(eventId: string, nextType: EventType) {
+  const ev = await db.events.get(eventId);
+  if (!ev) throw new Error('イベントが見つかりません');
+  if (ev.type === nextType) return;
+  if (ev.type === 'trip_start' || ev.type === 'trip_end') {
+    throw new Error('運行開始/終了の項目は変更できません');
+  }
+  if (nextType === 'trip_start' || nextType === 'trip_end') {
+    throw new Error('運行開始/終了には変更できません');
+  }
+
+  const extras = { ...(ev as any).extras } as Record<string, unknown>;
+
+  if (nextType === 'rest_start') {
+    const odo = Number((extras as any).odoKm);
+    if (!Number.isFinite(odo) || odo <= 0) {
+      throw new Error('休息開始に変更するにはODOが必要です。先にODOを入力してください。');
+    }
+  }
+
+  const targetSessionKey = SESSION_KEY_BY_TYPE[nextType];
+  if (targetSessionKey) {
+    let sid = extras[targetSessionKey];
+    if (typeof sid !== 'string' || !sid.trim()) {
+      sid = pickExistingSessionId(extras) ?? uuid();
+      extras[targetSessionKey] = sid;
+    }
+  }
+
+  if (nextType === 'rest_end') {
+    if (typeof (extras as any).dayClose !== 'boolean') {
+      (extras as any).dayClose = false;
+    }
+  }
+
+  if (nextType === 'expressway' || nextType === 'expressway_start' || nextType === 'expressway_end') {
+    if ((extras as any).icResolveStatus == null) {
+      (extras as any).icResolveStatus = 'pending';
+    }
+  }
+
+  await db.events.update(eventId, { type: nextType, extras, syncStatus: 'pending' });
+
+  if (ev.type === 'rest_end' || nextType === 'rest_end') {
+    await rebalanceDayCloseIndices(ev.tripId);
+  }
+  if (ev.type === 'rest_start' || nextType === 'rest_start') {
+    await recomputeTripEndTotals(ev.tripId);
+  }
 }
 
 async function recomputeTripEndTotals(tripId: string) {

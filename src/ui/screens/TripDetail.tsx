@@ -9,8 +9,9 @@ import {
   updateEventLiters,
   updateEventOdo,
   updateEventTimestamp,
+  updateEventType,
 } from '../../db/repositories';
-import type { AppEvent } from '../../domain/types';
+import type { AppEvent, EventType } from '../../domain/types';
 import { buildTripViewModel, TripViewModel } from '../../state/selectors';
 import { DAY_MS, getJstDateInfo } from '../../domain/jst';
 
@@ -104,6 +105,22 @@ type NumericEditDef = {
   min?: number;
   step?: number;
 };
+
+const EDITABLE_EVENT_TYPES: EventType[] = [
+  'rest_start',
+  'rest_end',
+  'break_start',
+  'break_end',
+  'load_start',
+  'load_end',
+  'unload_start',
+  'unload_end',
+  'expressway_start',
+  'expressway_end',
+  'expressway',
+  'refuel',
+  'boarding',
+];
 
 type DayGroup<T> = {
   dayIndex: number;
@@ -369,6 +386,7 @@ export default function TripDetail() {
   const [events, setEvents] = useState<AppEvent[]>([]);
   const [err, setErr] = useState<string | null>(null);
   const [editing, setEditing] = useState<{ id: string; value: string } | null>(null);
+  const [typeEditing, setTypeEditing] = useState<{ id: string; value: EventType } | null>(null);
   const [addressEditing, setAddressEditing] = useState<{ id: string; value: string } | null>(null);
   const [numberEditing, setNumberEditing] = useState<{ id: string; field: NumericEditField; value: string } | null>(null);
   const [saving, setSaving] = useState(false);
@@ -415,6 +433,22 @@ export default function TripDetail() {
     try {
       await updateEventTimestamp(editing.id, iso);
       setEditing(null);
+      await load();
+    } catch (e: any) {
+      setErr(e?.message ?? '更新に失敗しました');
+    } finally {
+      setSaving(false);
+      setWorkingId(null);
+    }
+  }
+
+  async function handleSaveType() {
+    if (!typeEditing) return;
+    setSaving(true);
+    setWorkingId(typeEditing.id);
+    try {
+      await updateEventType(typeEditing.id, typeEditing.value);
+      setTypeEditing(null);
       await load();
     } catch (e: any) {
       setErr(e?.message ?? '更新に失敗しました');
@@ -726,14 +760,19 @@ export default function TripDetail() {
               </div>
               <div className="card trip-section">
               <div className="trip-section__title">イベント編集</div>
-              <div className="trip-section__note">時間・ODO・給油量を編集できます。</div>
+              <div className="trip-section__note">時間・ODO・給油量・項目を編集できます。開始/終了の項目変更はペアも合わせて変更してください。</div>
               <div className="trip-list">
                   {events.map(ev => {
                     const numDef = getNumericEditDef(ev);
                     const timeEditing = editing?.id === ev.id;
+                    const typeEditingActive = typeEditing?.id === ev.id;
                     const numberEditingActive =
                       !!numDef && numberEditing?.id === ev.id && numberEditing.field === numDef.field;
                     const canDelete = ev.type !== 'trip_start';
+                    const canEditType = ev.type !== 'trip_start' && ev.type !== 'trip_end';
+                    const typeOptions = EDITABLE_EVENT_TYPES.includes(ev.type)
+                      ? EDITABLE_EVENT_TYPES
+                      : [ev.type, ...EDITABLE_EVENT_TYPES];
                     return (
                       <div key={ev.id} className="trip-item trip-edit">
                         <div className="trip-edit__header">
@@ -753,6 +792,55 @@ export default function TripDetail() {
                         </div>
                         <div className="trip-list">
                           <div style={{ display: 'grid', gap: 8 }}>
+                            <div className="trip-edit__label">項目</div>
+                            {canEditType ? (
+                              typeEditingActive ? (
+                                <div className="trip-edit__row">
+                                  <select
+                                    value={typeEditing?.value ?? ev.type}
+                                    onChange={e => setTypeEditing({ id: ev.id, value: e.target.value as EventType })}
+                                    disabled={saving}
+                                    className="trip-input"
+                                  >
+                                    {typeOptions.map(t => (
+                                      <option key={t} value={t}>
+                                        {label({ type: t } as AppEvent)}
+                                      </option>
+                                    ))}
+                                  </select>
+                                  <button
+                                    onClick={handleSaveType}
+                                    disabled={saving}
+                                    className="trip-btn"
+                                  >
+                                    保存
+                                  </button>
+                                  <button
+                                    onClick={() => setTypeEditing(null)}
+                                    disabled={saving}
+                                    className="trip-btn trip-btn--ghost"
+                                  >
+                                    取消
+                                  </button>
+                                </div>
+                              ) : (
+                                <div className="trip-edit__row trip-edit__row--between">
+                                  <div>{label(ev)}</div>
+                                  <button
+                                    onClick={() => setTypeEditing({ id: ev.id, value: ev.type })}
+                                    disabled={saving}
+                                    className="trip-btn"
+                                  >
+                                    編集
+                                  </button>
+                                </div>
+                              )
+                            ) : (
+                              <div className="trip-edit__row trip-edit__row--between">
+                                <div>{label(ev)}</div>
+                                <div style={{ opacity: 0.7, fontSize: 12 }}>変更不可</div>
+                              </div>
+                            )}
                             <div className="trip-edit__label">時間</div>
                             {timeEditing ? (
                               <div className="trip-edit__row">
