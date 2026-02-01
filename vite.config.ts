@@ -6,8 +6,7 @@ import { VitePWA } from 'vite-plugin-pwa';
 // automatically replaced with the version from package.json via define.
 const pkg = require('./package.json');
 
-const repoName = 'tracklog-pwa';
-const basePath = `/${repoName}/`;
+const basePath = '/';
 
 export default defineConfig({
   base: basePath,
