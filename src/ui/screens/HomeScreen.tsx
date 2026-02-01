@@ -605,47 +605,6 @@ export default function HomeScreen() {
             <div className="start-hero__title">運行開始</div>
             <div className="start-hero__subtitle">出発前にODOを入力して運行を開始します。</div>
           </div>
-          {highSpeedPrompt && (
-            <div className="card start-hero__prompt">
-              <div style={{ fontWeight: 900, marginBottom: 6 }}>速度 {highSpeedPrompt}km/h 超</div>
-              <div style={{ fontSize: 13, opacity: 0.9, marginBottom: 10 }}>高速道路開始を記録しますか？</div>
-              <div style={{ display: 'flex', gap: 8 }}>
-                <button
-                  style={{ flex: 1, padding: '10px 12px', borderRadius: 10 }}
-                  onClick={() => setHighSpeedPrompt(null)}
-                >
-                  閉じる
-                </button>
-                <button
-                  style={{ flex: 1, padding: '10px 12px', borderRadius: 10, background: '#0ea5e9', color: '#fff', fontWeight: 800 }}
-                  onClick={async () => {
-                    setHighSpeedPrompt(null);
-                    try {
-                      ensureFullscreen();
-                      const geo = await getGeo();
-                      const { eventId } = await startExpressway({ tripId: tripId ?? '', geo });
-                      if (navigator.onLine && geo) {
-                        const result = await resolveNearestIC(geo.lat, geo.lng);
-                        if (result) {
-                          await updateExpresswayResolved({
-                            eventId,
-                            status: 'resolved',
-                            icName: result.icName,
-                            icDistanceM: result.distanceM,
-                          });
-                        }
-                      }
-                      await refresh();
-                    } catch (e: any) {
-                      alert(e?.message ?? '高速道路の記録に失敗しました');
-                    }
-                  }}
-                >
-                  高速開始を記録
-                </button>
-              </div>
-            </div>
-          )}
           <div className="start-hero__panel">
             <div className="start-hero__title">運行開始</div>
             <div className="start-hero__subtitle">虎のように鋭く、今日の運行を記録します。</div>
