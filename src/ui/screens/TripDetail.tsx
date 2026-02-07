@@ -428,6 +428,22 @@ export default function TripDetail() {
       alert('日時の形式が不正です');
       return;
     }
+    const sorted = [...events].sort((a, b) => a.ts.localeCompare(b.ts));
+    const idx = sorted.findIndex(e => e.id === editing.id);
+    const prev = idx > 0 ? sorted[idx - 1] : null;
+    const next = idx >= 0 && idx < sorted.length - 1 ? sorted[idx + 1] : null;
+    if (prev && iso <= prev.ts) {
+      const ok = window.confirm(
+        `この時刻は直前のイベント（${label(prev)} ${fmtLocal(prev.ts)}）より前です。順序が崩れますが保存しますか？`,
+      );
+      if (!ok) return;
+    }
+    if (next && iso >= next.ts) {
+      const ok = window.confirm(
+        `この時刻は次のイベント（${label(next)} ${fmtLocal(next.ts)}）より後です。順序が崩れますが保存しますか？`,
+      );
+      if (!ok) return;
+    }
     setSaving(true);
     setWorkingId(editing.id);
     try {
@@ -760,7 +776,9 @@ export default function TripDetail() {
               </div>
               <div className="card trip-section">
               <div className="trip-section__title">イベント編集</div>
-              <div className="trip-section__note">時間・ODO・給油量・項目を編集できます。開始/終了の項目変更はペアも合わせて変更してください。</div>
+              <div className="trip-section__note">
+                時間・ODO・給油量・項目を編集できます。開始/終了の項目変更は対応するイベントも自動で変更されます。
+              </div>
               <div className="trip-list">
                   {events.map(ev => {
                     const numDef = getNumericEditDef(ev);

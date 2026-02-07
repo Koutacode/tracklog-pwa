@@ -151,12 +151,85 @@ const SESSION_KEY_BY_TYPE: Partial<Record<EventType, SessionKey>> = {
   expressway_end: 'expresswaySessionId',
 };
 
+const TOGGLE_GROUPS = [
+  { start: 'rest_start', end: 'rest_end', key: 'restSessionId', label: '休息' },
+  { start: 'break_start', end: 'break_end', key: 'breakSessionId', label: '休憩' },
+  { start: 'load_start', end: 'load_end', key: 'loadSessionId', label: '積込' },
+  { start: 'unload_start', end: 'unload_end', key: 'unloadSessionId', label: '荷卸' },
+  { start: 'expressway_start', end: 'expressway_end', key: 'expresswaySessionId', label: '高速道路' },
+] as const;
+
+type ToggleGroup = (typeof TOGGLE_GROUPS)[number];
+
+function getToggleGroupByType(type: EventType): ToggleGroup | null {
+  return TOGGLE_GROUPS.find(g => g.start === type || g.end === type) ?? null;
+}
+
 function pickExistingSessionId(extras: Record<string, unknown>): string | null {
   for (const key of SESSION_KEYS) {
     const val = extras[key];
     if (typeof val === 'string' && val.trim()) return val;
   }
   return null;
+}
+
+function findPairedToggleEvent(
+  events: AppEvent[],
+  ev: AppEvent,
+  group: ToggleGroup,
+  typeOverride?: EventType,
+): AppEvent | undefined {
+  const type = typeOverride ?? ev.type;
+  const pairType = type === group.start ? group.end : group.start;
+  const candidates = events.filter(e => e.type === pairType);
+  const sid = (ev as any).extras?.[group.key] as string | undefined;
+  if (sid) {
+    const match = candidates.find(e => (e as any).extras?.[group.key] === sid);
+    if (match) return match;
+  }
+  if (type === group.start) {
+    return candidates.filter(e => e.ts >= ev.ts).sort((a, b) => a.ts.localeCompare(b.ts))[0];
+  }
+  return candidates.filter(e => e.ts <= ev.ts).sort((a, b) => a.ts.localeCompare(b.ts)).slice(-1)[0];
+}
+
+function applyTypeExtras(
+  type: EventType,
+  extras: Record<string, unknown>,
+  sessionId?: string,
+): Record<string, unknown> {
+  const targetSessionKey = SESSION_KEY_BY_TYPE[type];
+  if (targetSessionKey) {
+    const sid =
+      (typeof sessionId === 'string' && sessionId.trim() ? sessionId : null) ??
+      (typeof extras[targetSessionKey] === 'string' && String(extras[targetSessionKey]).trim()
+        ? (extras[targetSessionKey] as string)
+        : null) ??
+      pickExistingSessionId(extras) ??
+      uuid();
+    extras[targetSessionKey] = sid;
+    for (const key of SESSION_KEYS) {
+      if (key !== targetSessionKey) {
+        delete (extras as any)[key];
+      }
+    }
+  } else {
+    for (const key of SESSION_KEYS) {
+      delete (extras as any)[key];
+    }
+  }
+
+  if (type === 'rest_end') {
+    if (typeof (extras as any).dayClose !== 'boolean') {
+      (extras as any).dayClose = false;
+    }
+  }
+  if (type === 'expressway' || type === 'expressway_start' || type === 'expressway_end') {
+    if ((extras as any).icResolveStatus == null) {
+      (extras as any).icResolveStatus = 'pending';
+    }
+  }
+  return extras;
 }
 
 export async function updateEventType(eventId: string, nextType: EventType) {
@@ -170,6 +243,25 @@ export async function updateEventType(eventId: string, nextType: EventType) {
     throw new Error('運行開始/終了には変更できません');
   }
 
+  const events = await getEventsByTripId(ev.tripId);
+  const oldGroup = getToggleGroupByType(ev.type);
+  const newGroup = getToggleGroupByType(nextType);
+  let pairedEvent: AppEvent | undefined;
+
+  if (oldGroup && !newGroup) {
+    throw new Error('開始/終了のイベントは単独イベントに変更できません。ペアで変更してください。');
+  }
+
+  if (newGroup) {
+    pairedEvent = oldGroup ? findPairedToggleEvent(events, ev, oldGroup) : undefined;
+    if (!pairedEvent) {
+      pairedEvent = findPairedToggleEvent(events, ev, newGroup, nextType);
+    }
+    if (!pairedEvent) {
+      throw new Error('開始/終了の対になるイベントが見つかりません。ペアになるイベントを先に用意してください。');
+    }
+  }
+
   const extras = { ...(ev as any).extras } as Record<string, unknown>;
 
   if (nextType === 'rest_start') {
@@ -179,33 +271,52 @@ export async function updateEventType(eventId: string, nextType: EventType) {
     }
   }
 
-  const targetSessionKey = SESSION_KEY_BY_TYPE[nextType];
-  if (targetSessionKey) {
-    let sid = extras[targetSessionKey];
-    if (typeof sid !== 'string' || !sid.trim()) {
-      sid = pickExistingSessionId(extras) ?? uuid();
-      extras[targetSessionKey] = sid;
-    }
+  const sessionKey = SESSION_KEY_BY_TYPE[nextType];
+  const pairedExtras = pairedEvent ? ({ ...(pairedEvent as any).extras } as Record<string, unknown>) : null;
+  const sessionId =
+    (sessionKey && typeof extras[sessionKey] === 'string' && String(extras[sessionKey]).trim()
+      ? (extras[sessionKey] as string)
+      : null) ??
+    (sessionKey && pairedExtras && typeof pairedExtras[sessionKey] === 'string' && String(pairedExtras[sessionKey]).trim()
+      ? (pairedExtras[sessionKey] as string)
+      : null) ??
+    pickExistingSessionId(extras) ??
+    (pairedExtras ? pickExistingSessionId(pairedExtras) : null) ??
+    (sessionKey ? uuid() : null) ??
+    undefined;
+
+  const nextExtras = applyTypeExtras(nextType, extras, sessionId);
+  const updates: Array<{ id: string; type: EventType; extras: Record<string, unknown> }> = [
+    { id: ev.id, type: nextType, extras: nextExtras },
+  ];
+
+  let pairType: EventType | null = null;
+  if (newGroup && pairedEvent) {
+    pairType = nextType === newGroup.start ? newGroup.end : newGroup.start;
+    const updatedPairExtras = applyTypeExtras(pairType, pairedExtras ?? {}, sessionId);
+    updates.push({ id: pairedEvent.id, type: pairType, extras: updatedPairExtras });
   }
 
-  if (nextType === 'rest_end') {
-    if (typeof (extras as any).dayClose !== 'boolean') {
-      (extras as any).dayClose = false;
+  await db.transaction('rw', db.events, async () => {
+    for (const u of updates) {
+      await db.events.update(u.id, { type: u.type, extras: u.extras, syncStatus: 'pending' });
     }
-  }
+  });
 
-  if (nextType === 'expressway' || nextType === 'expressway_start' || nextType === 'expressway_end') {
-    if ((extras as any).icResolveStatus == null) {
-      (extras as any).icResolveStatus = 'pending';
-    }
-  }
-
-  await db.events.update(eventId, { type: nextType, extras, syncStatus: 'pending' });
-
-  if (ev.type === 'rest_end' || nextType === 'rest_end') {
+  const needsRebalance =
+    ev.type === 'rest_end' ||
+    nextType === 'rest_end' ||
+    (pairedEvent?.type === 'rest_end') ||
+    pairType === 'rest_end';
+  if (needsRebalance) {
     await rebalanceDayCloseIndices(ev.tripId);
   }
-  if (ev.type === 'rest_start' || nextType === 'rest_start') {
+  const needsTotals =
+    ev.type === 'rest_start' ||
+    nextType === 'rest_start' ||
+    (pairedEvent?.type === 'rest_start') ||
+    pairType === 'rest_start';
+  if (needsTotals) {
     await recomputeTripEndTotals(ev.tripId);
   }
 }
