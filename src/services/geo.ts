@@ -1,5 +1,67 @@
 import type { Geo } from '../domain/types';
 
+type OrderedAddressParts = {
+  postalCode?: string;
+  country?: string;
+  prefecture?: string;
+  city?: string;
+  ward?: string;
+  locality?: string;
+  street?: string;
+  houseNumber?: string;
+  building?: string;
+};
+
+function cleanPart(value?: string | null): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const v = value.trim();
+  return v ? v : undefined;
+}
+
+function normalizePostalCode(value?: string | null): string | undefined {
+  const v = cleanPart(value);
+  if (!v) return undefined;
+  const digits = v.replace(/\D/g, '');
+  if (digits.length === 7) {
+    return `${digits.slice(0, 3)}-${digits.slice(3)}`;
+  }
+  return v;
+}
+
+function appendUnique(parts: string[], value?: string | null) {
+  const v = cleanPart(value);
+  if (!v) return;
+  if (parts.includes(v)) return;
+  if (parts.some(p => p.includes(v))) return;
+  const parentIdx = parts.findIndex(p => v.includes(p));
+  if (parentIdx >= 0) {
+    parts[parentIdx] = v;
+    return;
+  }
+  parts.push(v);
+}
+
+function concatCompact(parts: Array<string | undefined>) {
+  const out: string[] = [];
+  for (const p of parts) appendUnique(out, p);
+  return out.join('');
+}
+
+function concatSpaced(parts: Array<string | undefined>) {
+  const out: string[] = [];
+  for (const p of parts) appendUnique(out, p);
+  return out.join(' ').trim();
+}
+
+function formatOrderedAddress(parts: OrderedAddressParts): string | undefined {
+  const cityLine = concatCompact([parts.prefecture, parts.city, parts.ward, parts.locality]);
+  const streetLine = concatCompact([parts.street, parts.houseNumber]);
+  const tail = concatSpaced([cityLine, streetLine, cleanPart(parts.building)]);
+  const head = concatSpaced([normalizePostalCode(parts.postalCode), cleanPart(parts.country)]);
+  const merged = concatSpaced([head, tail]);
+  return merged || undefined;
+}
+
 /**
  * getGeo returns the current position from the browser's geolocation API. If
  * geolocation is unavailable or fails it resolves to undefined. The
@@ -54,40 +116,18 @@ export async function reverseGeocode(geo: Geo): Promise<string | undefined> {
     const data = await res.json();
     const rawDisplayName: string | undefined = typeof data?.display_name === 'string' ? data.display_name : undefined;
     const addr = data?.address ?? {};
-    const prefecture = addr.state;
-    const city = addr.city || addr.town || addr.village || addr.hamlet || addr.municipality;
-    const county = addr.county || addr.city_district;
-    const area = addr.suburb || addr.quarter || addr.neighbourhood;
-    const block = addr.road || addr.residential;
-    const house = addr.house_number || addr.building || addr.house;
-    const detail = block && house ? `${block} ${house}` : block || house;
-
-    // 北海道札幌市…のように左から読める順番を優先し、重複は除去
-    const seen = new Set<string>();
-    const parts = [prefecture, city, county, area, detail, addr.postcode]
-      .filter((p): p is string => !!p)
-      .filter(p => {
-        if (seen.has(p)) return false;
-        seen.add(p);
-        return true;
-      });
-
-    // display_name からも補完（元のカンマ区切りを保持して順序を崩さない）
-    if (rawDisplayName) {
-      const displayParts = rawDisplayName
-        .split(',')
-        .map((p: string) => p.trim())
-        .filter(Boolean)
-        .filter(p => {
-          if (seen.has(p)) return false;
-          seen.add(p);
-          return true;
-        });
-      parts.push(...displayParts);
-    }
-
-    const text = parts.join(' ').trim();
-    return text || rawDisplayName;
+    const ordered = formatOrderedAddress({
+      postalCode: addr.postcode,
+      country: addr.country,
+      prefecture: addr.state || addr.province,
+      city: addr.city || addr.town || addr.village || addr.municipality,
+      ward: addr.city_district || addr.county,
+      locality: addr.suburb || addr.quarter || addr.neighbourhood || addr.hamlet,
+      street: addr.road || addr.residential || addr.pedestrian,
+      houseNumber: addr.house_number,
+      building: addr.building || addr.house,
+    });
+    return ordered || rawDisplayName;
   } catch {
     return undefined;
   } finally {

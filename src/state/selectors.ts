@@ -166,8 +166,10 @@ export function buildTimeline(events: AppEvent[]): TimelineItem[] {
         return '高速終了';
       case 'boarding':
         return '乗船';
+      case 'point_mark':
+        return '地点マーク';
       default:
-        return e.type;
+        return 'イベント';
     }
   };
 

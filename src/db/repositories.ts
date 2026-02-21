@@ -7,6 +7,7 @@ import type {
   RestEndEvent,
   Geo,
   EventType,
+  RoutePoint,
 } from '../domain/types';
 import { computeTotals } from '../domain/metrics';
 import { reverseGeocode } from '../services/geo';
@@ -44,25 +45,111 @@ async function getMeta(key: string): Promise<string | null> {
 
 const META_ACTIVE_TRIP_ID = 'activeTripId';
 const META_AUTO_EXPRESSWAY_CONFIG = 'autoExpresswayConfig';
+const META_ROUTE_TRACKING_ENABLED = 'routeTrackingEnabled';
+const META_ROUTE_TRACKING_MODE = 'routeTrackingMode';
+const META_PENDING_EXPRESSWAY_END_PROMPT = 'pendingExpresswayEndPrompt';
+const META_PENDING_EXPRESSWAY_END_DECISION = 'pendingExpresswayEndDecision';
 
 export type AutoExpresswayConfig = {
   speedKmh: number;
   durationSec: number;
+  endSpeedKmh: number;
+  endDurationSec: number;
 };
 
+export type PendingExpresswayEndPrompt = {
+  tripId: string;
+  speedKmh: number;
+  detectedAt: string;
+  geo: Geo;
+};
+
+export type PendingExpresswayEndDecision = {
+  tripId: string;
+  action: 'end' | 'keep';
+  decidedAt: string;
+  speedKmh?: number;
+  geo?: Geo;
+};
+
+function normalizePendingExpresswayEndPrompt(raw: unknown): PendingExpresswayEndPrompt | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const row = raw as Record<string, unknown>;
+  const tripId = typeof row.tripId === 'string' ? row.tripId.trim() : '';
+  const speedRaw = Number(row.speedKmh);
+  const detectedAt = typeof row.detectedAt === 'string' ? row.detectedAt : '';
+  const geoRaw = (row.geo ?? null) as Record<string, unknown> | null;
+  if (!tripId || !Number.isFinite(speedRaw) || !detectedAt || !geoRaw) return null;
+  const lat = Number(geoRaw.lat);
+  const lng = Number(geoRaw.lng);
+  const accuracy = Number(geoRaw.accuracy);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  return {
+    tripId,
+    speedKmh: Math.max(0, Math.min(200, Math.round(speedRaw))),
+    detectedAt,
+    geo: {
+      lat,
+      lng,
+      ...(Number.isFinite(accuracy) ? { accuracy } : {}),
+    },
+  };
+}
+
+function normalizePendingExpresswayEndDecision(raw: unknown): PendingExpresswayEndDecision | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const row = raw as Record<string, unknown>;
+  const tripId = typeof row.tripId === 'string' ? row.tripId.trim() : '';
+  const action = row.action === 'end' || row.action === 'keep' ? row.action : null;
+  const decidedAt = typeof row.decidedAt === 'string' ? row.decidedAt : '';
+  if (!tripId || !action || !decidedAt) return null;
+  const speedRaw = Number(row.speedKmh);
+  const geoRaw = (row.geo ?? null) as Record<string, unknown> | null;
+  let geo: Geo | undefined;
+  if (geoRaw) {
+    const lat = Number(geoRaw.lat);
+    const lng = Number(geoRaw.lng);
+    const accuracy = Number(geoRaw.accuracy);
+    if (Number.isFinite(lat) && Number.isFinite(lng)) {
+      geo = {
+        lat,
+        lng,
+        ...(Number.isFinite(accuracy) ? { accuracy } : {}),
+      };
+    }
+  }
+  return {
+    tripId,
+    action,
+    decidedAt,
+    ...(Number.isFinite(speedRaw) ? { speedKmh: Math.max(0, Math.min(200, Math.round(speedRaw))) } : {}),
+    ...(geo ? { geo } : {}),
+  };
+}
+
 export const DEFAULT_AUTO_EXPRESSWAY_CONFIG: AutoExpresswayConfig = {
-  speedKmh: 72,
-  durationSec: 5,
+  speedKmh: 78,
+  durationSec: 6,
+  endSpeedKmh: 34,
+  endDurationSec: 24,
 };
 
 function normalizeAutoExpresswayConfig(raw: Partial<AutoExpresswayConfig> | null): AutoExpresswayConfig {
   const speed = Number(raw?.speedKmh);
   const duration = Number(raw?.durationSec);
+  const endSpeed = Number(raw?.endSpeedKmh);
+  const endDuration = Number(raw?.endDurationSec);
   const speedKmh = Number.isFinite(speed) ? Math.min(Math.max(Math.round(speed), 30), 160) : DEFAULT_AUTO_EXPRESSWAY_CONFIG.speedKmh;
   const durationSec = Number.isFinite(duration)
     ? Math.min(Math.max(Math.round(duration), 1), 60)
     : DEFAULT_AUTO_EXPRESSWAY_CONFIG.durationSec;
-  return { speedKmh, durationSec };
+  const endSpeedKmh = Number.isFinite(endSpeed)
+    ? Math.min(Math.max(Math.round(endSpeed), 10), 120)
+    : DEFAULT_AUTO_EXPRESSWAY_CONFIG.endSpeedKmh;
+  const endDurationSec = Number.isFinite(endDuration)
+    ? Math.min(Math.max(Math.round(endDuration), 5), 300)
+    : DEFAULT_AUTO_EXPRESSWAY_CONFIG.endDurationSec;
+  return { speedKmh, durationSec, endSpeedKmh, endDurationSec };
 }
 
 export async function getAutoExpresswayConfig(): Promise<AutoExpresswayConfig> {
@@ -80,6 +167,92 @@ export async function setAutoExpresswayConfig(config: AutoExpresswayConfig): Pro
   const normalized = normalizeAutoExpresswayConfig(config);
   await setMeta(META_AUTO_EXPRESSWAY_CONFIG, JSON.stringify(normalized));
   return normalized;
+}
+
+export async function getRouteTrackingEnabled(): Promise<boolean> {
+  const raw = await getMeta(META_ROUTE_TRACKING_ENABLED);
+  return raw === '1';
+}
+
+export async function setRouteTrackingEnabled(enabled: boolean): Promise<void> {
+  await setMeta(META_ROUTE_TRACKING_ENABLED, enabled ? '1' : null);
+}
+
+export type RouteTrackingMode = 'precision' | 'battery';
+
+export const DEFAULT_ROUTE_TRACKING_MODE: RouteTrackingMode = 'precision';
+
+function normalizeRouteTrackingMode(raw: string | null): RouteTrackingMode {
+  if (raw === 'battery' || raw === 'precision') return raw;
+  return DEFAULT_ROUTE_TRACKING_MODE;
+}
+
+export async function getRouteTrackingMode(): Promise<RouteTrackingMode> {
+  const raw = await getMeta(META_ROUTE_TRACKING_MODE);
+  return normalizeRouteTrackingMode(raw);
+}
+
+export async function setRouteTrackingMode(mode: RouteTrackingMode): Promise<RouteTrackingMode> {
+  const normalized = normalizeRouteTrackingMode(mode);
+  await setMeta(META_ROUTE_TRACKING_MODE, normalized);
+  return normalized;
+}
+
+export async function getPendingExpresswayEndPrompt(): Promise<PendingExpresswayEndPrompt | null> {
+  const raw = await getMeta(META_PENDING_EXPRESSWAY_END_PROMPT);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return normalizePendingExpresswayEndPrompt(parsed);
+  } catch {
+    return null;
+  }
+}
+
+export async function setPendingExpresswayEndPrompt(prompt: PendingExpresswayEndPrompt): Promise<void> {
+  const normalized = normalizePendingExpresswayEndPrompt(prompt);
+  if (!normalized) {
+    throw new Error('高速終了確認データが不正です');
+  }
+  await setMeta(META_PENDING_EXPRESSWAY_END_PROMPT, JSON.stringify(normalized));
+}
+
+export async function clearPendingExpresswayEndPrompt(tripId?: string): Promise<void> {
+  if (!tripId) {
+    await setMeta(META_PENDING_EXPRESSWAY_END_PROMPT, null);
+    return;
+  }
+  const current = await getPendingExpresswayEndPrompt();
+  if (current?.tripId === tripId) {
+    await setMeta(META_PENDING_EXPRESSWAY_END_PROMPT, null);
+  }
+}
+
+export async function getPendingExpresswayEndDecision(): Promise<PendingExpresswayEndDecision | null> {
+  const raw = await getMeta(META_PENDING_EXPRESSWAY_END_DECISION);
+  if (!raw) return null;
+  try {
+    return normalizePendingExpresswayEndDecision(JSON.parse(raw) as unknown);
+  } catch {
+    return null;
+  }
+}
+
+export async function setPendingExpresswayEndDecision(decision: PendingExpresswayEndDecision): Promise<void> {
+  const normalized = normalizePendingExpresswayEndDecision(decision);
+  if (!normalized) throw new Error('高速終了アクションが不正です');
+  await setMeta(META_PENDING_EXPRESSWAY_END_DECISION, JSON.stringify(normalized));
+}
+
+export async function clearPendingExpresswayEndDecision(tripId?: string): Promise<void> {
+  if (!tripId) {
+    await setMeta(META_PENDING_EXPRESSWAY_END_DECISION, null);
+    return;
+  }
+  const current = await getPendingExpresswayEndDecision();
+  if (current?.tripId === tripId) {
+    await setMeta(META_PENDING_EXPRESSWAY_END_DECISION, null);
+  }
 }
 
 // Trip active handling
@@ -365,6 +538,35 @@ export async function addEvent(event: AppEvent) {
   await db.events.put(event);
 }
 
+export async function addRoutePoint(point: Omit<RoutePoint, 'id'> & { id?: string }): Promise<RoutePoint> {
+  const id = point.id ?? uuid();
+  const row: RoutePoint = {
+    id,
+    tripId: point.tripId,
+    ts: point.ts,
+    lat: point.lat,
+    lng: point.lng,
+    accuracy: point.accuracy,
+    speed: point.speed ?? null,
+    heading: point.heading ?? null,
+    source: point.source,
+  };
+  await db.routePoints.put(row);
+  return row;
+}
+
+export async function listRoutePointsByTripId(tripId: string): Promise<RoutePoint[]> {
+  const arr = await db.routePoints.where('tripId').equals(tripId).toArray();
+  arr.sort((a, b) => a.ts.localeCompare(b.ts));
+  return arr;
+}
+
+export async function getAllRoutePoints(): Promise<RoutePoint[]> {
+  const arr = await db.routePoints.toArray();
+  arr.sort((a, b) => a.ts.localeCompare(b.ts));
+  return arr;
+}
+
 export async function getEventsByTripId(tripId: string): Promise<AppEvent[]> {
   const arr = await db.events.where('tripId').equals(tripId).toArray();
   arr.sort((a, b) => a.ts.localeCompare(b.ts));
@@ -398,6 +600,8 @@ export async function startTrip(params: {
   await db.transaction('rw', db.events, db.meta, async () => {
     await db.events.put(e);
     await setMeta(META_ACTIVE_TRIP_ID, tripId);
+    await setMeta(META_PENDING_EXPRESSWAY_END_PROMPT, null);
+    await setMeta(META_PENDING_EXPRESSWAY_END_DECISION, null);
   });
   return { tripId, event: e };
 }
@@ -442,6 +646,8 @@ export async function endTrip(params: {
   await db.transaction('rw', db.events, db.meta, async () => {
     await db.events.put(e);
     await clearActiveTripId();
+    await clearPendingExpresswayEndPrompt(params.tripId);
+    await clearPendingExpresswayEndDecision(params.tripId);
   });
   return { event: e };
 }
@@ -702,6 +908,23 @@ export async function addBoarding(params: { tripId: string; geo?: Geo; address?:
   await addEvent(e);
 }
 
+// Point mark (地点マーク)
+export async function addPointMark(params: {
+  tripId: string;
+  geo?: Geo;
+  address?: string;
+  label?: string;
+}) {
+  const e = baseEvent({
+    tripId: params.tripId,
+    type: 'point_mark',
+    geo: params.geo,
+    address: params.address,
+    extras: params.label ? { label: params.label } : undefined,
+  });
+  await addEvent(e);
+}
+
 // Expressway (高速道路)
 export async function startExpressway(params: { tripId: string; geo?: Geo; address?: string }) {
   const events = await getTripEventsCached(params.tripId);
@@ -716,6 +939,8 @@ export async function startExpressway(params: { tripId: string; geo?: Geo; addre
     extras: { expresswaySessionId, icResolveStatus: 'pending' },
   });
   await addEvent(e);
+  await clearPendingExpresswayEndPrompt(params.tripId);
+  await clearPendingExpresswayEndDecision(params.tripId);
   return { expresswaySessionId, eventId: e.id };
 }
 
@@ -731,6 +956,8 @@ export async function endExpressway(params: { tripId: string; geo?: Geo; address
     extras: open === '__legacy__' ? { icResolveStatus: 'pending' } : { expresswaySessionId: open, icResolveStatus: 'pending' },
   });
   await addEvent(e);
+  await clearPendingExpresswayEndPrompt(params.tripId);
+  await clearPendingExpresswayEndDecision(params.tripId);
   return { eventId: e.id };
 }
 

@@ -2,32 +2,16 @@
  * Screen Wake Lock helper for keeping the display on while the app is in use.
  * Browsers may reject the request; callers should handle false returns.
  */
-let sentinel: any = null;
-
-// Type augmentation for TS
-type WakeLockType = 'screen';
-interface WakeLockSentinel {
-  release: () => Promise<void>;
-  released: boolean;
-  type: WakeLockType;
-}
-interface WakeLock {
-  request: (type: WakeLockType) => Promise<WakeLockSentinel>;
-}
-declare global {
-  interface Navigator {
-    wakeLock?: WakeLock;
-  }
-}
+let sentinel: { release: () => Promise<void> } | null = null;
 
 export function isWakeLockSupported() {
-  return typeof navigator !== 'undefined' && !!navigator.wakeLock;
+  return typeof navigator !== 'undefined' && !!(navigator as any).wakeLock;
 }
 
 export async function requestWakeLock(): Promise<boolean> {
   if (!isWakeLockSupported()) return false;
   try {
-    sentinel = await navigator.wakeLock!.request('screen');
+    sentinel = await (navigator as any).wakeLock.request('screen');
     return true;
   } catch {
     sentinel = null;

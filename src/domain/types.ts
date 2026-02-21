@@ -13,7 +13,8 @@ export type EventType =
   | 'boarding'
   | 'expressway'
   | 'expressway_start'
-  | 'expressway_end';
+  | 'expressway_end'
+  | 'point_mark';
 
 export type Geo = {
   lat: number;
@@ -30,6 +31,18 @@ export type BaseEvent = {
   address?: string;
   syncStatus: 'pending' | 'synced' | 'error';
   extras?: Record<string, unknown>;
+};
+
+export type RoutePoint = {
+  id: string;
+  tripId: string;
+  ts: string; // ISO timestamp
+  lat: number;
+  lng: number;
+  accuracy?: number;
+  speed?: number | null;
+  heading?: number | null;
+  source?: 'foreground' | 'background';
 };
 
 export type TripStartEvent = BaseEvent & {

@@ -1,5 +1,5 @@
 import Dexie, { Table } from 'dexie';
-import type { AppEvent } from '../domain/types';
+import type { AppEvent, RoutePoint } from '../domain/types';
 
 export type MetaRow = {
   key: string;
@@ -17,12 +17,18 @@ export type MetaRow = {
 export class TrackLogDB extends Dexie {
   events!: Table<AppEvent, string>;
   meta!: Table<MetaRow, string>;
+  routePoints!: Table<RoutePoint, string>;
 
   constructor() {
     super('tracklog_db');
     this.version(1).stores({
       events: 'id, tripId, type, ts, [tripId+ts], [tripId+type], [tripId+type+ts]',
       meta: 'key, updatedAt',
+    });
+    this.version(2).stores({
+      events: 'id, tripId, type, ts, [tripId+ts], [tripId+type], [tripId+type+ts]',
+      meta: 'key, updatedAt',
+      routePoints: 'id, tripId, ts, [tripId+ts]',
     });
   }
 }

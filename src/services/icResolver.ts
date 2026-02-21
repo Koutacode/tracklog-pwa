@@ -1,33 +1,35 @@
 export type IcResult = { icName: string; distanceM: number };
 
+const OVERPASS_ENDPOINTS = [
+  'https://overpass-api.de/api/interpreter',
+  'https://overpass.kumi.systems/api/interpreter',
+];
+
+export type ExpresswaySignal = {
+  resolved: boolean;
+  provider: 'overpass' | 'none';
+  onExpresswayRoad: boolean;
+  nearIc: boolean;
+  nearEtcGate: boolean;
+  nearestIc: IcResult | null;
+};
+
 function haversineM(lat1: number, lon1: number, lat2: number, lon2: number) {
-  const R = 6371000;
+  const r = 6371000;
   const toRad = (d: number) => (d * Math.PI) / 180;
   const dLat = toRad(lat2 - lat1);
   const dLon = toRad(lon2 - lon1);
   const a =
     Math.sin(dLat / 2) ** 2 +
     Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
-  return 2 * R * Math.asin(Math.sqrt(a));
+  return 2 * r * Math.asin(Math.sqrt(a));
 }
 
-const OVERPASS_ENDPOINTS = [
-  'https://overpass-api.de/api/interpreter',
-  'https://overpass.kumi.systems/api/interpreter',
-];
-
-/**
- * resolveNearestIC queries the Overpass API for motorway junctions (IC) near
- * the given latitude and longitude. It returns the name and distance of
- * the nearest interchange if found within the specified radius. If all
- * endpoints fail or no junction is found it returns null.
- */
-export async function resolveNearestIC(
+async function resolveNearestIcOverpass(
   lat: number,
   lon: number,
-  radiusM = 5000,
+  radiusM: number,
 ): Promise<IcResult | null> {
-  if (typeof navigator !== 'undefined' && !navigator.onLine) return null;
   const query = `\n[out:json][timeout:8];\n(\n  node(around:${radiusM},${lat},${lon})['highway'='motorway_junction'];\n);\nout body;\n`.trim();
   for (const endpoint of OVERPASS_ENDPOINTS) {
     const controller = new AbortController();
@@ -54,10 +56,61 @@ export async function resolveNearestIC(
         return { icName: best.name, distanceM: Math.round(best.d) };
       }
     } catch {
-      // Continue to next endpoint on error
+      // continue to next endpoint
     } finally {
       clearTimeout(timer);
     }
   }
   return null;
+}
+
+/**
+ * resolveNearestIC resolves the nearest IC/ETC point around the location.
+ * Overpass-only implementation (Google/Cloud API not used).
+ */
+export async function resolveNearestIC(
+  lat: number,
+  lon: number,
+  radiusM = 5000,
+): Promise<IcResult | null> {
+  const signal = await detectExpresswaySignal(lat, lon, radiusM);
+  return signal.nearestIc;
+}
+
+export async function detectExpresswaySignal(
+  lat: number,
+  lon: number,
+  radiusM = 5000,
+): Promise<ExpresswaySignal> {
+  if (typeof navigator !== 'undefined' && !navigator.onLine) {
+    return {
+      resolved: false,
+      provider: 'none',
+      onExpresswayRoad: false,
+      nearIc: false,
+      nearEtcGate: false,
+      nearestIc: null,
+    };
+  }
+
+  const overpassIc = await resolveNearestIcOverpass(lat, lon, radiusM);
+  if (overpassIc) {
+    return {
+      resolved: true,
+      provider: 'overpass',
+      onExpresswayRoad: false,
+      nearIc: overpassIc.distanceM <= 1600,
+      nearEtcGate: false,
+      nearestIc: overpassIc,
+    };
+  }
+
+  return {
+    resolved: false,
+    provider: 'none',
+    onExpresswayRoad: false,
+    nearIc: false,
+    nearEtcGate: false,
+    nearestIc: null,
+  };
 }

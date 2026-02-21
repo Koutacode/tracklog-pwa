@@ -59,8 +59,10 @@ function label(ev: AppEvent) {
       return '高速終了';
     case 'boarding':
       return '乗船';
+    case 'point_mark':
+      return '地点マーク';
     default:
-      return ev.type;
+      return 'イベント';
   }
 }
 
@@ -120,6 +122,7 @@ const EDITABLE_EVENT_TYPES: EventType[] = [
   'expressway',
   'refuel',
   'boarding',
+  'point_mark',
 ];
 
 type DayGroup<T> = {
@@ -261,39 +264,6 @@ function buildGrouped(events: AppEvent[]): GroupedItem[] {
       }
     }
 
-    // Trip start/end grouping
-    if (ev.type === 'trip_start') {
-      const end = sorted.find(e => e.type === 'trip_end');
-      if (end) {
-        used.add(ev.id);
-        used.add(end.id);
-        out.push({
-          id: `${ev.id}-${end.id}`,
-          ts: ev.ts,
-          title: '運行',
-          range: fmtRange(ev.ts, end.ts),
-          duration: fmtDurationMs(new Date(end.ts).getTime() - new Date(ev.ts).getTime()),
-          addresses: [ev.address, end.address].filter((a): a is string => !!a),
-          places: [
-            ...(ev.geo ? [{ label: '開始', ...(ev.geo as any), address: ev.address }] : []),
-            ...(end.geo ? [{ label: '終了', ...(end.geo as any), address: end.address }] : []),
-          ].filter(Boolean),
-          detail: (() => {
-            const totalKm = (end as any).extras?.totalKm;
-            const lastLegKm = (end as any).extras?.lastLegKm;
-            if (totalKm != null && lastLegKm != null) return `総距離 ${totalKm}km / 最終区間 ${lastLegKm}km`;
-            return undefined;
-          })(),
-        });
-        continue;
-      }
-    }
-    if (ev.type === 'trip_end' && sorted.find(e => e.type === 'trip_start')) {
-      // trip_end は trip_start で処理済み
-      if (!used.has(ev.id)) used.add(ev.id);
-      continue;
-    }
-
     // Single events
     used.add(ev.id);
     let detail: string | undefined;
@@ -308,6 +278,14 @@ function buildGrouped(events: AppEvent[]): GroupedItem[] {
       const dc = (ev as any).extras?.dayClose;
       const di = dc ? getDayIndex(ev.ts) : undefined;
       if (dc) detail = `${di ?? ''}日目を締める`;
+    } else if (ev.type === 'point_mark') {
+      detail = ((ev as any).extras?.label as string | undefined) ?? '地点マーク';
+    } else if (ev.type === 'trip_end') {
+      const totalKm = (ev as any).extras?.totalKm;
+      const lastLegKm = (ev as any).extras?.lastLegKm;
+      if (totalKm != null && lastLegKm != null) {
+        detail = `総距離 ${totalKm}km / 最終区間 ${lastLegKm}km`;
+      }
     }
 
     out.push({
@@ -352,8 +330,7 @@ function buildAiPayload(tripId: string, vm: TripViewModel, events: AppEvent[]): 
 
 function buildAiShareText(payload: AiSharePayload) {
   return [
-    '以下の運行履歴を要約してください。',
-    '出力は日本語で、重要事項は箇条書きにしてください。',
+    '運行履歴データ:',
     '',
     '---',
     JSON.stringify(payload, null, 2),
@@ -599,6 +576,7 @@ export default function TripDetail() {
         <div className="trip-detail__actions">
           <Link to="/" className="trip-detail__button">ホーム</Link>
           <Link to="/history" className="trip-detail__button">運行履歴</Link>
+          <Link to={`/trip/${tripId}/route`} className="trip-detail__button">ルート表示</Link>
           <button
             onClick={handleShareAi}
             disabled={sharing || !vm}
@@ -736,13 +714,14 @@ export default function TripDetail() {
                             {item.places && item.places.length > 0 && (
                               <div className="trip-event__actions">
                                 {item.places.map((p, i) => {
-                                  const query = p.lat != null && p.lng != null
-                                    ? `${p.lat},${p.lng}`
-                                    : encodeURIComponent(p.address ?? '');
-                                  const mapUrl = p.lat != null && p.lng != null
-                                    ? `https://www.google.com/maps?q=${query}`
-                                    : `https://www.google.com/maps/search/?api=1&query=${query}`;
-                                  const navUrl = `https://www.google.com/maps/dir/?api=1&destination=${query}`;
+                                  const hasCoord = p.lat != null && p.lng != null;
+                                  const queryText = hasCoord ? `${p.lat},${p.lng}` : (p.address ?? '');
+                                  const mapUrl = hasCoord
+                                    ? `https://www.openstreetmap.org/?mlat=${p.lat}&mlon=${p.lng}#map=16/${p.lat}/${p.lng}`
+                                    : `https://www.openstreetmap.org/search?query=${encodeURIComponent(queryText)}`;
+                                  const navUrl = hasCoord
+                                    ? `geo:${p.lat},${p.lng}?q=${encodeURIComponent(queryText)}`
+                                    : `https://www.openstreetmap.org/search?query=${encodeURIComponent(queryText)}`;
                                   const label = p.label ? `${p.label}地点` : '地点';
                                   return (
                                     <div key={i} className="trip-event__action-pair">
@@ -760,7 +739,7 @@ export default function TripDetail() {
                                         rel="noreferrer"
                                         className="trip-detail__button trip-detail__button--small"
                                       >
-                                        ナビで開く
+                                        ナビアプリで開く
                                       </a>
                                     </div>
                                   );
@@ -775,7 +754,7 @@ export default function TripDetail() {
                 </div>
               </div>
               <div className="card trip-section">
-              <div className="trip-section__title">イベント編集</div>
+              <div className="trip-section__title">イベント一覧（編集）</div>
               <div className="trip-section__note">
                 時間・ODO・給油量・項目を編集できます。開始/終了の項目変更は対応するイベントも自動で変更されます。
               </div>

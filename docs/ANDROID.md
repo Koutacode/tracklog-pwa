@@ -46,7 +46,7 @@ PWA単体ではバックグラウンド動作が制限されるため、ネイ�
 4) 端末側で「常に許可」「電池最適化から除外」をユーザーに案内する。
 
 ## 5. アイコン・アプリID
-- 現在の `appId`: `com.tracklog.pwa`
+- 現在の `appId`: `com.tracklog.assist`
 - 変更する場合は `capacitor.config.ts` の `appId` を編集し、`npm run cap:sync` を再実行。
 - アイコンは `android/app/src/main/res/mipmap-*` に配置。Capacitorの公式ドキュメントの Asset Generator を使うと便利です。
 

@@ -1,0 +1,9 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">TrackLog運行アシスト</string>
+    <string name="title_activity_main">TrackLog運行アシスト</string>
+    <string name="package_name">com.tracklog.assist</string>
+    <string name="custom_url_scheme">com.tracklog.assist</string>
+    <string name="capacitor_background_geolocation_notification_channel_name">ルート記録</string>
+    <string name="capacitor_background_geolocation_notification_icon">mipmap/ic_launcher</string>
+</resources>
