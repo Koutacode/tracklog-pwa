@@ -5,6 +5,7 @@ on:
     branches: [ main ]
     paths-ignore:
       - 'docs/NOTION_SYNC_STATUS.md'
+  workflow_dispatch:
 
 permissions:
   contents: read
