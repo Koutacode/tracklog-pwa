@@ -54,3 +54,12 @@ PWA単体ではバックグラウンド動作が制限されるため、ネイ�
 - `npm run build` が失敗する → NodeがPATHにあるか確認。`node -v` で 18+ を確認。
 - `cap:sync` でプラットフォームがないと言われる → 先に `npm run cap:add:android`。
 - 住所が出ない → ネット接続後にアプリ再起動。バックフィルが動けば詳細住所が埋まります。
+
+## 7. 現在の確定配布情報（2026-02-27）
+- 現在保持している確定APK（端末と同一ハッシュ）:
+  - `output/tracklog-assist-debug-exact.apk`
+- SHA-256:
+  - `1BDFAE6F7F65A8854AABFBBE3EC00A9BA624091241CAD45331DBE32CE63EC681`
+- 補足:
+  - 再構築検証用APKは削除済み。
+  - 端末運用基準は `tracklog-assist-debug-exact.apk` のみ。
