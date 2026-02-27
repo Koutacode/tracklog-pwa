@@ -7,3 +7,6 @@ yarn-debug.log*
 yarn-error.log*
 android/local.properties
 .env.local
+output/*.apk
+output/*.aab
+recovery/

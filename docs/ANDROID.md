@@ -1,65 +1,46 @@
-# Android自家用インストール手順（Capacitorラップ）
+# Androidネイティブ運用手順（TrackLog）
 
-ブラウザPWAをネイティブラッパー化して、自分用にAPKをサイドロードする手順です。Google Play登録は不要です。
+TrackLogは **Androidネイティブ専用（Capacitor）** として運用する。PWA配布は行わない。
 
 ## 0. 事前準備
-- PC: Node.js 18+、Android Studio（SDK/エミュレータ付き）をインストール
-- リポジトリを最新に取得（`git pull`）
-- 依存をインストール:
-  ```bash
-  npm install
-  ```
+- PC: Node.js 20+、Android Studio（SDK含む）
+- リポジトリを最新に更新: `git pull`
+- 依存をインストール: `npm install`
 
-## 1. ビルドとCapacitor同期
+## 1. 標準ビルド手順
 ```bash
-npm run build              # dist を生成
-npm run cap:sync           # capacitor.config.ts を元にプラットフォームへ反映
+npm run build
+npm run cap:sync:android
+cd android
+.\gradlew.bat assembleDebug
 ```
 
-## 2. Android プラットフォーム追加（初回だけ）
+一括実行する場合:
 ```bash
-npm run cap:add:android
+npm run release:prepare
 ```
 
-## 3. Android Studioで開く
-```bash
-npm run cap:open:android
-```
-Android Studio が開くので、`app` モジュールを選択してビルド/インストール。
+## 2. 生成物の扱い
+- 通常の再ビルド成果物: `output/tracklog-assist-debug.apk`
+- 端末同一性を固定した保管物: `output/tracklog-assist-debug-exact.apk`
+- `output/*.apk` はGit管理しない（バイナリ混入防止）
 
-### サイドロード（自分用）
-- デバッグビルドでも構いません。`Run` ボタンでデバイスへインストール。
-- 端末で「提供元不明のアプリを許可」をオンにする必要があります。
-- 再インストール時は同じ署名キーが必要です。自分用ならデフォルトのデバッグキーでもOK、長期運用するなら `app/release.keystore` を作って署名設定してください。
+## 3. 実機インストール
+- Android Studioの `Run` か、APK直接インストールでサイドロード
+- 再インストール時は同一署名キーを使用
+- 長期運用時はリリース署名鍵を管理する
 
-## 4. 背景位置情報を使う場合（任意）
-PWA単体ではバックグラウンド動作が制限されるため、ネイティブ側で前景サービス＋通知を使う必要があります。
-1) 前景サービス対応の背景位置プラグインを追加（例）
-   ```bash
-   npm install capacitor-background-geolocation
-   ```
-   ※ 実際に使うプラグインに合わせて修正してください。
-2) Android Studio で `AndroidManifest.xml` に以下を追加（権限/前景サービス/通知チャネル）。  
-   - `ACCESS_FINE_LOCATION` / `ACCESS_COARSE_LOCATION` / `ACCESS_BACKGROUND_LOCATION`  
-   - `FOREGROUND_SERVICE_LOCATION`
-3) アプリ起動時に権限リクエストと前景サービス起動コードを呼ぶ（プラグインのREADMEに従う）。
-4) 端末側で「常に許可」「電池最適化から除外」をユーザーに案内する。
+## 4. ネイティブ権限・安定化
+- 位置情報: 常時許可（必要時）
+- 通知: 許可
+- 電池最適化: 除外推奨
+- Exact Alarm: 端末要件に応じて設定
 
-## 5. アイコン・アプリID
-- 現在の `appId`: `com.tracklog.assist`
-- 変更する場合は `capacitor.config.ts` の `appId` を編集し、`npm run cap:sync` を再実行。
-- アイコンは `android/app/src/main/res/mipmap-*` に配置。Capacitorの公式ドキュメントの Asset Generator を使うと便利です。
+## 5. アプリ基本情報
+- appId: `com.tracklog.assist`
+- appName: `TrackLog運行アシスト`
 
-## 6. トラブルシュート
-- `npm run build` が失敗する → NodeがPATHにあるか確認。`node -v` で 18+ を確認。
-- `cap:sync` でプラットフォームがないと言われる → 先に `npm run cap:add:android`。
-- 住所が出ない → ネット接続後にアプリ再起動。バックフィルが動けば詳細住所が埋まります。
-
-## 7. 現在の確定配布情報（2026-02-27）
-- 現在保持している確定APK（端末と同一ハッシュ）:
-  - `output/tracklog-assist-debug-exact.apk`
-- SHA-256:
-  - `1BDFAE6F7F65A8854AABFBBE3EC00A9BA624091241CAD45331DBE32CE63EC681`
-- 補足:
-  - 再構築検証用APKは削除済み。
-  - 端末運用基準は `tracklog-assist-debug-exact.apk` のみ。
+## 6. 現在の確定配布情報（2026-02-27）
+- 端末と同一ハッシュの確定APK: `output/tracklog-assist-debug-exact.apk`
+- SHA-256: `1BDFAE6F7F65A8854AABFBBE3EC00A9BA624091241CAD45331DBE32CE63EC681`
+- 補足: 再構築検証用APKは削除済み。運用基準は `tracklog-assist-debug-exact.apk` のみ。

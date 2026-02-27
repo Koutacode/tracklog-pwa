@@ -422,7 +422,10 @@ async function maybeHandleNativeAutoExpressway(params: LocationPayload, effectiv
     detectExpresswaySignal(geo.lat, geo.lng),
     accelGeoCandidate ? detectExpresswaySignal(accelGeoCandidate.lat, accelGeoCandidate.lng) : Promise.resolve(null),
   ]);
-  const signalCandidates = [{ signal: signalNow, source: 'now' as const }];
+  const signalCandidates: Array<{
+    signal: Awaited<ReturnType<typeof detectExpresswaySignal>>;
+    source: 'now' | 'accel';
+  }> = [{ signal: signalNow, source: 'now' }];
   if (signalAccel) signalCandidates.push({ signal: signalAccel, source: 'accel' as const });
   const allowStartBySignal = signalCandidates.some(
     item => !item.signal.resolved || item.signal.onExpresswayRoad || item.signal.nearIc || item.signal.nearEtcGate,

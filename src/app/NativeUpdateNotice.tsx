@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Capacitor } from '@capacitor/core';
 import { APP_VERSION, BUILD_DATE } from './version';
-
-const LATEST_RELEASE_API = 'https://api.github.com/repos/Koutacode/tracklog-pwa/releases/latest';
-const LATEST_APK_URL = 'https://github.com/Koutacode/tracklog-pwa/releases/latest/download/tracklog-debug.apk';
-const RELEASE_PAGE_URL = 'https://github.com/Koutacode/tracklog-pwa/releases/latest';
+import {
+  LATEST_RELEASE_API,
+  RELEASE_PAGE_URL,
+  pickPreferredApkAsset,
+  resolveApkDownloadUrl,
+} from './releaseInfo';
 const CHECK_INTERVAL_MS = 5 * 60 * 1000;
 const UPDATE_GRACE_MS = 2 * 60 * 1000;
 const DISMISS_KEY = 'tracklog-dismissed-release';
@@ -14,6 +16,7 @@ type ReleaseInfo = {
   publishedAt: string;
   assetUpdatedAt?: string | null;
   htmlUrl: string | null;
+  downloadUrl: string;
 };
 
 function isNewerRelease(release: ReleaseInfo) {
@@ -66,12 +69,13 @@ export default function NativeUpdateNotice() {
         if (!resp.ok) return;
         const data = await resp.json();
         const assets = Array.isArray(data?.assets) ? data.assets : [];
-        const apkAsset = assets.find((asset: any) => asset?.name === 'tracklog-debug.apk');
+        const apkAsset = pickPreferredApkAsset(assets);
         const info: ReleaseInfo = {
           tag: data?.tag_name ?? '',
           publishedAt: data?.published_at ?? '',
           assetUpdatedAt: apkAsset?.updated_at ?? apkAsset?.created_at ?? null,
           htmlUrl: data?.html_url ?? null,
+          downloadUrl: resolveApkDownloadUrl(apkAsset),
         };
         if (!info.tag || !info.publishedAt) return;
         if (!isNewerRelease(info)) return;
@@ -135,13 +139,13 @@ export default function NativeUpdateNotice() {
           現在: v{APP_VERSION} / 最新: {release.tag}（{publishedText}）
         </div>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 10 }}>
-          <button className="trip-btn" onClick={() => window.open(LATEST_APK_URL, '_blank', 'noopener')}>
+          <button className="trip-btn" onClick={() => window.open(release.downloadUrl, '_blank', 'noopener')}>
             ダウンロード
           </button>
           <button
             className="trip-btn"
             onClick={async () => {
-              const ok = await copyText(LATEST_APK_URL);
+              const ok = await copyText(release.downloadUrl);
               if (!ok) return;
               setCopied(true);
               if (copyTimer.current != null) window.clearTimeout(copyTimer.current);

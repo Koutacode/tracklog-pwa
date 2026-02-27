@@ -74,8 +74,8 @@ try {
 }
 
 $today = Get-Date -Format "yyyy-MM-dd"
-$releaseUrl = "https://github.com/Koutacode/tracklog-pwa/releases/latest/download/tracklog-debug.apk"
-$rawMainUrl = "https://raw.githubusercontent.com/Koutacode/tracklog-pwa/main/output/tracklog-assist-debug.apk"
+$releaseUrl = "https://github.com/Koutacode/tracklog-pwa/releases/latest/download/tracklog-assist-debug.apk"
+$releasePageUrl = "https://github.com/Koutacode/tracklog-pwa/releases/latest"
 
 $apkExists = Test-Path $outputApk
 $apkInfoText = "未生成"
@@ -96,7 +96,7 @@ $reportLines = @(
   "- APK: $apkInfoText",
   "- SHA-256: $shaText",
   "- Release URL: $releaseUrl",
-  "- main APK URL: $rawMainUrl"
+  "- Release page: $releasePageUrl"
 )
 $report = $reportLines -join [Environment]::NewLine
 

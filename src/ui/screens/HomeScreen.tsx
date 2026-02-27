@@ -46,6 +46,7 @@ import { openNativeSettings, startRouteTracking, stopRouteTracking } from '../..
 import { cancelNativeExpresswayEndPrompt } from '../../services/nativeExpresswayPrompt';
 import { runStartupDiagnostics, type StartupDiagnosticItem } from '../../services/startupDiagnostics';
 import { runNativeQuickSetup as runNativeSetupWizard } from '../../services/nativeSetup';
+import { DEFAULT_APK_DOWNLOAD_URL, RELEASE_PAGE_URL } from '../../app/releaseInfo';
 import {
   checkVoiceRecognitionAvailable,
   findVoiceCommand,
@@ -62,8 +63,7 @@ function fmtDuration(ms: number) {
   return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
 }
 
-const LATEST_APK_URL = 'https://github.com/Koutacode/tracklog-pwa/releases/latest/download/tracklog-debug.apk';
-const RELEASE_PAGE_URL = 'https://github.com/Koutacode/tracklog-pwa/releases/latest';
+const LATEST_APK_URL = DEFAULT_APK_DOWNLOAD_URL;
 const AUTO_EXPRESSWAY_ACCEL_PROFILE = {
   startAccelMs2: 0.18,
   startAccelWindowMs: 75 * 1000,
@@ -353,15 +353,6 @@ export default function HomeScreen() {
       renotify: true,
       vibrate: [250, 120, 250],
     };
-    try {
-      const reg = await navigator.serviceWorker?.ready;
-      if (reg?.showNotification) {
-        await reg.showNotification('TrackLog運行アシスト: 高速道路終了確認', options);
-        return;
-      }
-    } catch {
-      // fallback below
-    }
     try {
       new Notification('TrackLog運行アシスト: 高速道路終了確認', options);
     } catch {
@@ -1176,12 +1167,7 @@ export default function HomeScreen() {
     };
 
     try {
-      const reg = await navigator.serviceWorker?.ready;
-      if (reg?.showNotification) {
-        await reg.showNotification('休憩30分経過', options);
-      } else {
-        new Notification('休憩30分経過', options);
-      }
+      new Notification('休憩30分経過', options);
     } catch {
       // ignore
     }

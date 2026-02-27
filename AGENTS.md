@@ -1,6 +1,6 @@
 # TrackLog Local Agent Rules
 
-この `AGENTS.md` は、このフォルダ（`C:\Users\Public\Desktop\NativeApps\TrackLog`）配下でのみ有効。
+この `AGENTS.md` は、このフォルダ（`C:\Users\Public\Desktop\Codex専用\NativeApps\TrackLog`）配下でのみ有効。
 
 ## Project Scope
 - 本アプリは **Android Native専用**（Capacitor）として扱う。
@@ -10,7 +10,7 @@
 ## Build / Artifact
 - 基本ビルド手順:
   1. `npm run build`
-  2. `npx cap sync android`
+  2. `npm run cap:sync:android`
   3. `android\gradlew.bat assembleDebug`（`android` ディレクトリで実行）
 - 配布用デバッグAPKは `output/tracklog-assist-debug.apk` を最新化する。
 

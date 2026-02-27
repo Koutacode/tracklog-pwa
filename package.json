@@ -1,12 +1,15 @@
 {
-  "name": "tracklog-pwa",
+  "name": "tracklog-assist",
   "version": "0.1.2",
   "private": true,
   "description": "Truck operation log native app with offline support and day-based segment calculations.",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "cap:sync:android": "npx cap sync android",
+    "release:prepare": "powershell -ExecutionPolicy Bypass -File skills/tracklog-release-notion/scripts/prepare-tracklog-release.ps1 -Build -SyncAndroid -AssembleDebug"
   },
   "dependencies": {
     "@capacitor-community/background-geolocation": "^1.2.26",
