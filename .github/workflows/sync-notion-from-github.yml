@@ -18,12 +18,15 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+      - name: Skip when NOTION_TOKEN is missing
+        if: ${{ secrets.NOTION_TOKEN == '' }}
+        run: echo "NOTION_TOKEN is not configured; skip GitHub->Notion sync."
       - name: Sync Notion pages
+        if: ${{ secrets.NOTION_TOKEN != '' }}
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           NOTION_PAGE_TRACKLOG: ${{ secrets.NOTION_PAGE_TRACKLOG }}
           NOTION_PAGE_APPS: ${{ secrets.NOTION_PAGE_APPS }}
           NOTION_PAGE_IMPROVEMENTS: ${{ secrets.NOTION_PAGE_IMPROVEMENTS }}
-          REQUIRE_NOTION_TOKEN: "true"
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: node scripts/sync_notion_from_github.mjs

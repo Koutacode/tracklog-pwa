@@ -12,12 +12,15 @@ TrackLog は以下の2本で同期する。
 
 ## 必要な GitHub Secrets
 
-- `NOTION_TOKEN`
+- `NOTION_TOKEN`（任意）
 - `NOTION_PAGE_TRACKLOG`（未設定時は既定IDを利用）
 - `NOTION_PAGE_APPS`（未設定時は既定IDを利用）
 - `NOTION_PAGE_IMPROVEMENTS`（未設定時は既定IDを利用）
 
-`NOTION_TOKEN` が未設定の場合、同期ワークフローは失敗する（片側更新のまま進ませないため）。
+`NOTION_TOKEN` が未設定の場合:
+- GitHub -> Notion 同期は自動スキップ
+- Notion -> GitHub ミラーも自動スキップ
+- 運用は「GitHubを正本、Notionは必要時に手動更新」とする
 
 ## ローカル実行コマンド
 
