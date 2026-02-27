@@ -8,6 +8,10 @@ function getEnv(name, fallback = '') {
   return value && value.trim().length > 0 ? value.trim() : fallback;
 }
 
+function isStrictTokenRequired() {
+  return getEnv('REQUIRE_NOTION_TOKEN', '').toLowerCase() === 'true';
+}
+
 function notionHeaders(token) {
   return {
     Authorization: `Bearer ${token}`,
@@ -126,7 +130,11 @@ async function appendSyncEntry(token, page, payload) {
 async function main() {
   const notionToken = getEnv('NOTION_TOKEN');
   if (!notionToken) {
-    console.log('NOTION_TOKEN is not set; skip Notion sync.');
+    const message = 'NOTION_TOKEN is not set.';
+    if (isStrictTokenRequired()) {
+      throw new Error(message);
+    }
+    console.log(`${message} skip Notion sync.`);
     return;
   }
 

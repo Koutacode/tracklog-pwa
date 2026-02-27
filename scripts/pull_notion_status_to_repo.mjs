@@ -10,6 +10,10 @@ function getEnv(name, fallback = '') {
   return value && value.trim().length > 0 ? value.trim() : fallback;
 }
 
+function isStrictTokenRequired() {
+  return getEnv('REQUIRE_NOTION_TOKEN', '').toLowerCase() === 'true';
+}
+
 function notionHeaders(token) {
   return {
     Authorization: `Bearer ${token}`,
@@ -67,6 +71,9 @@ async function main() {
   await mkdir(dirname(OUTPUT_FILE), { recursive: true });
 
   if (!notionToken) {
+    if (isStrictTokenRequired()) {
+      throw new Error('NOTION_TOKEN is not set.');
+    }
     const markdown = renderMarkdown(
       pages.map(page => ({ label: page.label, lastEdited: 'N/A', url: 'N/A' })),
       'NOTION_TOKEN is not configured',

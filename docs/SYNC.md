@@ -17,6 +17,8 @@ TrackLog は以下の2本で同期する。
 - `NOTION_PAGE_APPS`（未設定時は既定IDを利用）
 - `NOTION_PAGE_IMPROVEMENTS`（未設定時は既定IDを利用）
 
+`NOTION_TOKEN` が未設定の場合、同期ワークフローは失敗する（片側更新のまま進ませないため）。
+
 ## ローカル実行コマンド
 
 ```bash

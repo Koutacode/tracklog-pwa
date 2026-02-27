@@ -22,6 +22,7 @@ jobs:
           NOTION_PAGE_TRACKLOG: ${{ secrets.NOTION_PAGE_TRACKLOG }}
           NOTION_PAGE_APPS: ${{ secrets.NOTION_PAGE_APPS }}
           NOTION_PAGE_IMPROVEMENTS: ${{ secrets.NOTION_PAGE_IMPROVEMENTS }}
+          REQUIRE_NOTION_TOKEN: "true"
         run: node scripts/pull_notion_status_to_repo.mjs
       - name: Commit mirror file
         run: |
