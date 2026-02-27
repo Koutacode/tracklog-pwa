@@ -11,24 +11,24 @@ permissions:
 jobs:
   mirror:
     runs-on: ubuntu-latest
+    env:
+      NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+      NOTION_PAGE_TRACKLOG: ${{ secrets.NOTION_PAGE_TRACKLOG }}
+      NOTION_PAGE_APPS: ${{ secrets.NOTION_PAGE_APPS }}
+      NOTION_PAGE_IMPROVEMENTS: ${{ secrets.NOTION_PAGE_IMPROVEMENTS }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 20
       - name: Skip when NOTION_TOKEN is missing
-        if: ${{ secrets.NOTION_TOKEN == '' }}
+        if: ${{ env.NOTION_TOKEN == '' }}
         run: echo "NOTION_TOKEN is not configured; skip Notion->GitHub mirror."
       - name: Pull Notion status
-        if: ${{ secrets.NOTION_TOKEN != '' }}
-        env:
-          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
-          NOTION_PAGE_TRACKLOG: ${{ secrets.NOTION_PAGE_TRACKLOG }}
-          NOTION_PAGE_APPS: ${{ secrets.NOTION_PAGE_APPS }}
-          NOTION_PAGE_IMPROVEMENTS: ${{ secrets.NOTION_PAGE_IMPROVEMENTS }}
+        if: ${{ env.NOTION_TOKEN != '' }}
         run: node scripts/pull_notion_status_to_repo.mjs
       - name: Commit mirror file
-        if: ${{ secrets.NOTION_TOKEN != '' }}
+        if: ${{ env.NOTION_TOKEN != '' }}
         run: |
           if git diff --quiet -- docs/NOTION_SYNC_STATUS.md; then
             echo "No mirror changes."
