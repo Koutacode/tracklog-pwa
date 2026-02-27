@@ -1,14 +1,13 @@
 export const GITHUB_OWNER = 'Koutacode';
 export const GITHUB_REPO = 'tracklog-pwa';
+export const RELEASE_APK_NAME = 'tracklog-assist-debug.apk';
 
 export const LATEST_RELEASE_API = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases/latest`;
 export const RELEASE_PAGE_URL = `https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/releases/latest`;
-export const DEFAULT_APK_DOWNLOAD_URL = `${RELEASE_PAGE_URL}/download/tracklog-assist-debug.apk`;
+export const DEFAULT_APK_DOWNLOAD_URL = `${RELEASE_PAGE_URL}/download/${RELEASE_APK_NAME}`;
 
 export const PREFERRED_APK_ASSET_NAMES = [
-  'tracklog-assist-debug.apk',
-  'tracklog-debug.apk',
-  'tracklog-assist-debug-exact.apk',
+  RELEASE_APK_NAME,
 ] as const;
 
 export type GithubReleaseAsset = {

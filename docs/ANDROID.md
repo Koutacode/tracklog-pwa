@@ -23,6 +23,7 @@ npm run release:prepare
 ## 2. 生成物の扱い
 - 通常の再ビルド成果物: `output/tracklog-assist-debug.apk`
 - 端末同一性を固定した保管物: `output/tracklog-assist-debug-exact.apk`
+- GitHub Release 添付名（固定）: `tracklog-assist-debug.apk`
 - `output/*.apk` はGit管理しない（バイナリ混入防止）
 
 ## 3. 実機インストール

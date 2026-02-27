@@ -12,6 +12,7 @@ $androidDir = Join-Path $projectRoot "android"
 $debugApk = Join-Path $androidDir "app\build\outputs\apk\debug\app-debug.apk"
 $outputDir = Join-Path $projectRoot "output"
 $outputApk = Join-Path $outputDir "tracklog-assist-debug.apk"
+$releaseAssetName = "tracklog-assist-debug.apk"
 
 function Invoke-Step {
   param(
@@ -74,7 +75,7 @@ try {
 }
 
 $today = Get-Date -Format "yyyy-MM-dd"
-$releaseUrl = "https://github.com/Koutacode/tracklog-pwa/releases/latest/download/tracklog-assist-debug.apk"
+$releaseUrl = "https://github.com/Koutacode/tracklog-pwa/releases/latest/download/$releaseAssetName"
 $releasePageUrl = "https://github.com/Koutacode/tracklog-pwa/releases/latest"
 
 $apkExists = Test-Path $outputApk
@@ -94,6 +95,7 @@ $reportLines = @(
   "- Commit: ``$shortCommit`` (``$commit``)",
   "- Subject: $subject",
   "- APK: $apkInfoText",
+  "- Release asset name: $releaseAssetName",
   "- SHA-256: $shaText",
   "- Release URL: $releaseUrl",
   "- Release page: $releasePageUrl"
