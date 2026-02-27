@@ -16,6 +16,9 @@ description: Prepare TrackLog native release updates and Notion update payloads 
    - `個人アプリ`
    - `TrackLog運行アシスト｜機能・アップデート・配布情報`
    - `改善点`（TrackLog配下）
+4. 自動同期を使う場合:
+   - `npm run sync:notion:push`（GitHub -> Notion）
+   - `npm run sync:notion:pull`（Notion -> GitHubミラー）
 
 ## Workflow
 1. `prepare-tracklog-release.ps1` を使って、配布情報を定型で作る。

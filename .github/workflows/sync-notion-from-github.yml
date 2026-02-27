@@ -1,0 +1,27 @@
+name: Sync Notion From GitHub
+
+on:
+  push:
+    branches: [ main ]
+    paths-ignore:
+      - 'docs/NOTION_SYNC_STATUS.md'
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Sync Notion pages
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_PAGE_TRACKLOG: ${{ secrets.NOTION_PAGE_TRACKLOG }}
+          NOTION_PAGE_APPS: ${{ secrets.NOTION_PAGE_APPS }}
+          NOTION_PAGE_IMPROVEMENTS: ${{ secrets.NOTION_PAGE_IMPROVEMENTS }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/sync_notion_from_github.mjs

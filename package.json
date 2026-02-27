@@ -9,7 +9,9 @@
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "cap:sync:android": "npx cap sync android",
-    "release:prepare": "powershell -ExecutionPolicy Bypass -File skills/tracklog-release-notion/scripts/prepare-tracklog-release.ps1 -Build -SyncAndroid -AssembleDebug"
+    "release:prepare": "powershell -ExecutionPolicy Bypass -File skills/tracklog-release-notion/scripts/prepare-tracklog-release.ps1 -Build -SyncAndroid -AssembleDebug",
+    "sync:notion:push": "node scripts/sync_notion_from_github.mjs",
+    "sync:notion:pull": "node scripts/pull_notion_status_to_repo.mjs"
   },
   "dependencies": {
     "@capacitor-community/background-geolocation": "^1.2.26",

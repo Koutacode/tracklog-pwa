@@ -45,3 +45,6 @@ npm run release:prepare
 - 端末と同一ハッシュの確定APK: `output/tracklog-assist-debug-exact.apk`
 - SHA-256: `1BDFAE6F7F65A8854AABFBBE3EC00A9BA624091241CAD45331DBE32CE63EC681`
 - 補足: 再構築検証用APKは削除済み。運用基準は `tracklog-assist-debug-exact.apk` のみ。
+
+## 7. GitHub / Notion 同期
+- 同期運用の詳細は `docs/SYNC.md` を参照。

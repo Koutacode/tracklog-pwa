@@ -33,6 +33,9 @@
   - `個人アプリ`
   - `TrackLog運行アシスト｜機能・アップデート・配布情報`
   - `改善点`（TrackLogページのサブページとして維持）
+- 自動同期:
+  - `sync-notion-from-github.yml`（`main` push時に GitHub -> Notion）
+  - `sync-github-from-notion.yml`（定期実行で Notion -> GitHub ミラー）
 
 ## Local Skill (Project Only)
 - リポジトリ内ローカルスキル:
