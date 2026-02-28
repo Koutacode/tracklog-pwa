@@ -26,7 +26,13 @@ let activeTripId: string | null = null;
 let lastPoint: { lat: number; lng: number; at: number } | null = null;
 let currentMode: RouteTrackingMode = 'precision';
 let recordQueue: Promise<void> = Promise.resolve();
+let pendingRecordCount = 0;
+let droppedRecordCount = 0;
+let lastDropWarningAt = 0;
 let routePointRetentionRunAt = 0;
+const MAX_PENDING_RECORDS = 120;
+const MAX_STALE_POINT_AGE_MS = 90 * 1000;
+const DROP_WARNING_INTERVAL_MS = 60 * 1000;
 
 type ModeConfig = {
   minTimeMs: number;
@@ -597,6 +603,9 @@ async function maybeHandleNativeAutoExpressway(params: LocationPayload, effectiv
 async function recordLocation(params: LocationPayload) {
   if (!activeTripId) return;
   const now = typeof params.time === 'number' ? params.time : Date.now();
+  if (Date.now() - now > MAX_STALE_POINT_AGE_MS) {
+    return;
+  }
   const accuracy = typeof params.accuracy === 'number' && Number.isFinite(params.accuracy) ? params.accuracy : null;
   if (accuracy != null && accuracy > modeConfig.maxAccuracyM) {
     return;
@@ -645,10 +654,26 @@ async function recordLocation(params: LocationPayload) {
 }
 
 function enqueueRecordLocation(params: LocationPayload): Promise<void> {
+  if (pendingRecordCount >= MAX_PENDING_RECORDS) {
+    droppedRecordCount += 1;
+    const now = Date.now();
+    if (now - lastDropWarningAt >= DROP_WARNING_INTERVAL_MS) {
+      console.warn(
+        `[routeTracking] queue saturated. Dropped ${droppedRecordCount} point(s) in the last minute.`,
+      );
+      lastDropWarningAt = now;
+      droppedRecordCount = 0;
+    }
+    return recordQueue;
+  }
+  pendingRecordCount += 1;
   recordQueue = recordQueue
     .then(() => recordLocation(params))
     .catch(() => {
       // keep the queue healthy for subsequent points
+    })
+    .finally(() => {
+      pendingRecordCount = Math.max(0, pendingRecordCount - 1);
     });
   return recordQueue;
 }
@@ -665,6 +690,9 @@ export async function startRouteTracking(tripId: string, mode: RouteTrackingMode
   activeTripId = tripId;
   lastPoint = null;
   recordQueue = Promise.resolve();
+  pendingRecordCount = 0;
+  droppedRecordCount = 0;
+  lastDropWarningAt = 0;
   resetAutoExpresswayRuntime();
   maybeRunRoutePointRetention();
 
@@ -723,6 +751,9 @@ export async function stopRouteTracking() {
   activeTripId = null;
   lastPoint = null;
   recordQueue = Promise.resolve();
+  pendingRecordCount = 0;
+  droppedRecordCount = 0;
+  lastDropWarningAt = 0;
   resetAutoExpresswayRuntime();
   if (bgWatcherId) {
     const id = bgWatcherId;

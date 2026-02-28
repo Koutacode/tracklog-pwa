@@ -3,6 +3,12 @@
   "version": "0.1.2",
   "private": true,
   "description": "Truck operation log native app with offline support and day-based segment calculations.",
+  "tracklogRelease": {
+    "githubOwner": "Koutacode",
+    "githubRepo": "tracklog-pwa",
+    "apkAssetName": "tracklog-assist-debug.apk",
+    "localApkPath": "output/tracklog-assist-debug.apk"
+  },
   "scripts": {
     "dev": "vite",
     "build": "vite build",

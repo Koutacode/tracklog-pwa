@@ -8,11 +8,31 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 $projectRoot = Resolve-Path (Join-Path $PSScriptRoot "..\..\..")
+$packageJsonPath = Join-Path $projectRoot "package.json"
+$defaultReleaseOwner = "Koutacode"
+$defaultReleaseRepo = "tracklog-pwa"
+$defaultAssetName = "tracklog-assist-debug.apk"
+$defaultLocalApkPath = "output/tracklog-assist-debug.apk"
+
+$releaseConfig = $null
+if (Test-Path $packageJsonPath) {
+  try {
+    $packageJson = Get-Content -Path $packageJsonPath -Raw | ConvertFrom-Json
+    $releaseConfig = $packageJson.tracklogRelease
+  } catch {
+    $releaseConfig = $null
+  }
+}
+
+$releaseOwner = if ($releaseConfig -and $releaseConfig.githubOwner) { [string]$releaseConfig.githubOwner } else { $defaultReleaseOwner }
+$releaseRepo = if ($releaseConfig -and $releaseConfig.githubRepo) { [string]$releaseConfig.githubRepo } else { $defaultReleaseRepo }
+$releaseAssetName = if ($releaseConfig -and $releaseConfig.apkAssetName) { [string]$releaseConfig.apkAssetName } else { $defaultAssetName }
+$localApkPath = if ($releaseConfig -and $releaseConfig.localApkPath) { [string]$releaseConfig.localApkPath } else { $defaultLocalApkPath }
+
 $androidDir = Join-Path $projectRoot "android"
 $debugApk = Join-Path $androidDir "app\build\outputs\apk\debug\app-debug.apk"
-$outputDir = Join-Path $projectRoot "output"
-$outputApk = Join-Path $outputDir "tracklog-assist-debug.apk"
-$releaseAssetName = "tracklog-assist-debug.apk"
+$outputApk = Join-Path $projectRoot $localApkPath
+$outputDir = Split-Path -Parent $outputApk
 
 function Invoke-Step {
   param(
@@ -75,8 +95,8 @@ try {
 }
 
 $today = Get-Date -Format "yyyy-MM-dd"
-$releaseUrl = "https://github.com/Koutacode/tracklog-pwa/releases/latest/download/$releaseAssetName"
-$releasePageUrl = "https://github.com/Koutacode/tracklog-pwa/releases/latest"
+$releaseUrl = "https://github.com/$releaseOwner/$releaseRepo/releases/latest/download/$releaseAssetName"
+$releasePageUrl = "https://github.com/$releaseOwner/$releaseRepo/releases/latest"
 
 $apkExists = Test-Path $outputApk
 $apkInfoText = "未生成"

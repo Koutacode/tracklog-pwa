@@ -49,6 +49,9 @@ const META_ROUTE_TRACKING_ENABLED = 'routeTrackingEnabled';
 const META_ROUTE_TRACKING_MODE = 'routeTrackingMode';
 const META_PENDING_EXPRESSWAY_END_PROMPT = 'pendingExpresswayEndPrompt';
 const META_PENDING_EXPRESSWAY_END_DECISION = 'pendingExpresswayEndDecision';
+const IC_RESOLVE_RETRY_LIMIT = 6;
+const IC_RESOLVE_BACKOFF_BASE_MS = 2 * 60 * 1000;
+const IC_RESOLVE_BACKOFF_CAP_MS = 60 * 60 * 1000;
 
 export type AutoExpresswayConfig = {
   speedKmh: number;
@@ -174,6 +177,39 @@ function normalizeAutoExpresswayDecisionReason(raw: unknown): AutoExpresswayDeci
     },
     ...(confirm ? { confirm } : {}),
   };
+}
+
+function parsePositiveInt(raw: unknown): number {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(0, Math.floor(n));
+}
+
+function getIcResolveRetryCount(ev: AppEvent): number {
+  return parsePositiveInt((ev as any).extras?.icResolveRetryCount);
+}
+
+function getIcResolveNextRetryAtMs(ev: AppEvent): number | null {
+  const nextRetryAt = (ev as any).extras?.icResolveNextRetryAt;
+  if (typeof nextRetryAt !== 'string' || !nextRetryAt.trim()) return null;
+  const ms = Date.parse(nextRetryAt);
+  return Number.isFinite(ms) ? ms : null;
+}
+
+function computeIcResolveBackoffMs(retryCount: number): number {
+  const exponent = Math.max(0, retryCount - 1);
+  return Math.min(IC_RESOLVE_BACKOFF_CAP_MS, IC_RESOLVE_BACKOFF_BASE_MS * 2 ** exponent);
+}
+
+function canRetryIcResolve(ev: AppEvent, nowMs: number): boolean {
+  const status = (ev as any).extras?.icResolveStatus;
+  if (status == null || status === 'pending') return true;
+  if (status !== 'failed') return false;
+  const retryCount = getIcResolveRetryCount(ev);
+  if (retryCount >= IC_RESOLVE_RETRY_LIMIT) return false;
+  const nextRetryMs = getIcResolveNextRetryAtMs(ev);
+  if (nextRetryMs == null) return true;
+  return nextRetryMs <= nowMs;
 }
 
 function normalizePendingExpresswayEndPrompt(raw: unknown): PendingExpresswayEndPrompt | null {
@@ -1095,6 +1131,7 @@ export async function startExpressway(params: {
     extras: {
       expresswaySessionId,
       icResolveStatus: 'pending',
+      icResolveRetryCount: 0,
       ...(autoDecision ? { autoDecision } : {}),
     },
   });
@@ -1132,11 +1169,13 @@ export async function endExpressway(params: {
         open === '__legacy__'
           ? {
               icResolveStatus: 'pending',
+              icResolveRetryCount: 0,
               ...(autoDecision ? { autoDecision } : {}),
             }
           : {
               expresswaySessionId: open,
               icResolveStatus: 'pending',
+              icResolveRetryCount: 0,
               ...(autoDecision ? { autoDecision } : {}),
             },
     });
@@ -1153,12 +1192,13 @@ export async function getPendingExpresswayEvents(tripId?: string) {
   const arr = tripId
     ? await db.events.where('[tripId+type]').anyOf(types.map(t => [tripId, t])).toArray()
     : await db.events.where('type').anyOf(types).toArray();
-  return arr.filter(e => (e as any).extras?.icResolveStatus === 'pending');
+  const nowMs = Date.now();
+  return arr.filter(e => canRetryIcResolve(e, nowMs));
 }
 
 export async function updateExpresswayResolved(params: {
   eventId: string;
-  status: 'resolved' | 'failed';
+  status: 'resolved' | 'failed' | 'pending';
   icName?: string;
   icDistanceM?: number;
 }) {
@@ -1166,9 +1206,56 @@ export async function updateExpresswayResolved(params: {
   if (!ev) return;
   const extras = { ...(ev as any).extras };
   extras.icResolveStatus = params.status;
-  if (params.icName) extras.icName = params.icName;
-  if (params.icDistanceM != null) extras.icDistanceM = params.icDistanceM;
+  if (params.status === 'resolved') {
+    if (params.icName) extras.icName = params.icName;
+    if (params.icDistanceM != null) extras.icDistanceM = params.icDistanceM;
+    extras.icResolveRetryCount = 0;
+    delete extras.icResolveNextRetryAt;
+    delete extras.icResolveLastAttemptAt;
+    delete extras.icResolveError;
+  }
+  if (params.status === 'pending') {
+    if (extras.icResolveRetryCount == null) extras.icResolveRetryCount = 0;
+    delete extras.icResolveNextRetryAt;
+  }
   await db.events.update(params.eventId, { extras });
+}
+
+export async function markExpresswayResolveFailure(params: {
+  eventId: string;
+  errorMessage?: string;
+  nextRetryAt?: string | null;
+}) {
+  const ev = await db.events.get(params.eventId);
+  if (!ev) {
+    return { retryCount: 0, exhausted: true, nextRetryAt: null as string | null };
+  }
+  const retryCount = getIcResolveRetryCount(ev) + 1;
+  const exhausted = retryCount >= IC_RESOLVE_RETRY_LIMIT;
+  const nowMs = Date.now();
+  const nextRetryAt =
+    exhausted
+      ? null
+      : params.nextRetryAt ??
+        new Date(nowMs + computeIcResolveBackoffMs(retryCount)).toISOString();
+
+  const extras = { ...(ev as any).extras };
+  extras.icResolveStatus = 'failed';
+  extras.icResolveRetryCount = retryCount;
+  extras.icResolveLastAttemptAt = new Date(nowMs).toISOString();
+  if (nextRetryAt) {
+    extras.icResolveNextRetryAt = nextRetryAt;
+  } else {
+    delete extras.icResolveNextRetryAt;
+  }
+  const message = params.errorMessage?.trim();
+  if (message) {
+    extras.icResolveError = message.slice(0, 180);
+  } else {
+    delete extras.icResolveError;
+  }
+  await db.events.update(params.eventId, { extras });
+  return { retryCount, exhausted, nextRetryAt };
 }
 
 // Trip summary

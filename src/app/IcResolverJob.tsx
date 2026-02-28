@@ -1,5 +1,9 @@
 import { useEffect } from 'react';
-import { getPendingExpresswayEvents, updateExpresswayResolved } from '../db/repositories';
+import {
+  getPendingExpresswayEvents,
+  markExpresswayResolveFailure,
+  updateExpresswayResolved,
+} from '../db/repositories';
 import { resolveNearestIC } from '../services/icResolver';
 
 /**
@@ -14,28 +18,40 @@ import { resolveNearestIC } from '../services/icResolver';
 export default function IcResolverJob() {
   useEffect(() => {
     let running = false;
+    const MAX_EVENTS_PER_TICK = 3;
     const runOnce = async () => {
       if (running || !navigator.onLine) return;
       running = true;
-      const pending = await getPendingExpresswayEvents();
       try {
-        const targets = pending.slice(0, 1);
+        const pending = await getPendingExpresswayEvents();
+        const targets = pending.slice(0, MAX_EVENTS_PER_TICK);
         for (const ev of targets) {
           const geo = ev.geo;
           if (!geo) {
-            await updateExpresswayResolved({ eventId: ev.id, status: 'failed' });
+            await markExpresswayResolveFailure({
+              eventId: ev.id,
+              errorMessage: '位置情報が未保存のためIC解決不可',
+            });
             continue;
           }
-          const result = await resolveNearestIC(geo.lat, geo.lng);
-          if (result) {
-            await updateExpresswayResolved({
-              eventId: ev.id,
-              status: 'resolved',
-              icName: result.icName,
-              icDistanceM: result.distanceM,
-            });
-          } else {
-            await updateExpresswayResolved({ eventId: ev.id, status: 'failed' });
+          try {
+            const result = await resolveNearestIC(geo.lat, geo.lng);
+            if (result) {
+              await updateExpresswayResolved({
+                eventId: ev.id,
+                status: 'resolved',
+                icName: result.icName,
+                icDistanceM: result.distanceM,
+              });
+            } else {
+              await markExpresswayResolveFailure({
+                eventId: ev.id,
+                errorMessage: '近傍ICを取得できませんでした',
+              });
+            }
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            await markExpresswayResolveFailure({ eventId: ev.id, errorMessage: message });
           }
         }
       } finally {
