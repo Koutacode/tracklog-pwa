@@ -927,9 +927,6 @@ export async function addPointMark(params: {
 
 // Expressway (高速道路)
 export async function startExpressway(params: { tripId: string; geo?: Geo; address?: string }) {
-  const events = await getTripEventsCached(params.tripId);
-  const open = findOpenToggleSessionId(events, 'expressway_start', 'expressway_end', 'expresswaySessionId');
-  if (open) throw new Error('高速道路が開始済みです（終了を押してください）');
   const expresswaySessionId = uuid();
   const e = baseEvent({
     tripId: params.tripId,
@@ -938,27 +935,38 @@ export async function startExpressway(params: { tripId: string; geo?: Geo; addre
     address: params.address,
     extras: { expresswaySessionId, icResolveStatus: 'pending' },
   });
-  await addEvent(e);
-  await clearPendingExpresswayEndPrompt(params.tripId);
-  await clearPendingExpresswayEndDecision(params.tripId);
+  await db.transaction('rw', db.events, db.meta, async () => {
+    const events = await db.events.where('tripId').equals(params.tripId).toArray();
+    events.sort((a, b) => a.ts.localeCompare(b.ts));
+    const open = findOpenToggleSessionId(events, 'expressway_start', 'expressway_end', 'expresswaySessionId');
+    if (open) throw new Error('高速道路が開始済みです（終了を押してください）');
+    await db.events.put(e);
+    await clearPendingExpresswayEndPrompt(params.tripId);
+    await clearPendingExpresswayEndDecision(params.tripId);
+  });
   return { expresswaySessionId, eventId: e.id };
 }
 
 export async function endExpressway(params: { tripId: string; geo?: Geo; address?: string }) {
-  const events = await getTripEventsCached(params.tripId);
-  const open = findOpenToggleSessionId(events, 'expressway_start', 'expressway_end', 'expresswaySessionId');
-  if (!open) throw new Error('高速道路が開始されていません');
-  const e = baseEvent({
-    tripId: params.tripId,
-    type: 'expressway_end',
-    geo: params.geo,
-    address: params.address,
-    extras: open === '__legacy__' ? { icResolveStatus: 'pending' } : { expresswaySessionId: open, icResolveStatus: 'pending' },
+  let eventId = '';
+  await db.transaction('rw', db.events, db.meta, async () => {
+    const events = await db.events.where('tripId').equals(params.tripId).toArray();
+    events.sort((a, b) => a.ts.localeCompare(b.ts));
+    const open = findOpenToggleSessionId(events, 'expressway_start', 'expressway_end', 'expresswaySessionId');
+    if (!open) throw new Error('高速道路が開始されていません');
+    const e = baseEvent({
+      tripId: params.tripId,
+      type: 'expressway_end',
+      geo: params.geo,
+      address: params.address,
+      extras: open === '__legacy__' ? { icResolveStatus: 'pending' } : { expresswaySessionId: open, icResolveStatus: 'pending' },
+    });
+    await db.events.put(e);
+    await clearPendingExpresswayEndPrompt(params.tripId);
+    await clearPendingExpresswayEndDecision(params.tripId);
+    eventId = e.id;
   });
-  await addEvent(e);
-  await clearPendingExpresswayEndPrompt(params.tripId);
-  await clearPendingExpresswayEndDecision(params.tripId);
-  return { eventId: e.id };
+  return { eventId };
 }
 
 export async function getPendingExpresswayEvents(tripId?: string) {

@@ -24,6 +24,7 @@ let webWatchId: number | null = null;
 let activeTripId: string | null = null;
 let lastPoint: { lat: number; lng: number; at: number } | null = null;
 let currentMode: RouteTrackingMode = 'precision';
+let recordQueue: Promise<void> = Promise.resolve();
 
 type ModeConfig = {
   minTimeMs: number;
@@ -95,6 +96,7 @@ const AUTO_EXPRESSWAY_ACCEL_PROFILE = {
   endPromptCooldownMs: 45 * 1000,
   endResetMarginKmh: 8,
   endResetHoldMs: 20 * 1000,
+  endNoDecelFallbackMs: 75 * 1000,
 };
 
 type LocationPayload = {
@@ -362,16 +364,19 @@ async function maybeHandleNativeAutoExpressway(params: LocationPayload, effectiv
       expresswayRuntime.lastStrongDecelAt != null &&
       now - expresswayRuntime.lastStrongDecelAt <= AUTO_EXPRESSWAY_ACCEL_PROFILE.endDecelWindowMs;
     const stopLikeSustained = lowSpeedSustained && speedKmh <= 20;
-    if (!lowSpeedSustained || (!strongDecelRecent && !stopLikeSustained)) return;
+    const noDecelFallbackReached =
+      now - expresswayRuntime.speedBelowSince >=
+      Math.max(config.endDurationSec * 1000, AUTO_EXPRESSWAY_ACCEL_PROFILE.endNoDecelFallbackMs);
+    if (!lowSpeedSustained || (!strongDecelRecent && !stopLikeSustained && !noDecelFallbackReached)) return;
     if (now - expresswayRuntime.lastEndPromptAt < AUTO_EXPRESSWAY_ACCEL_PROFILE.endPromptCooldownMs) return;
-    const signal = await detectExpresswaySignal(geo.lat, geo.lng);
-    const allowEndBySignal = !signal.resolved || signal.nearIc || signal.nearEtcGate || !signal.onExpresswayRoad;
-    if (!allowEndBySignal) {
-      expresswayRuntime.speedBelowSince = now;
-      return;
-    }
     expresswayRuntime.inFlight = true;
     try {
+      const signal = await detectExpresswaySignal(geo.lat, geo.lng);
+      const allowEndBySignal = !signal.resolved || signal.nearIc || signal.nearEtcGate || !signal.onExpresswayRoad;
+      if (!allowEndBySignal) {
+        expresswayRuntime.speedBelowSince = now;
+        return;
+      }
       const prompt = {
         tripId,
         speedKmh: Math.round(speedKmh),
@@ -379,12 +384,17 @@ async function maybeHandleNativeAutoExpressway(params: LocationPayload, effectiv
         geo,
       } as const;
       await setPendingExpresswayEndPrompt(prompt);
-      await showNativeExpresswayEndPrompt(prompt);
+      const shown = await showNativeExpresswayEndPrompt(prompt);
       expresswayRuntime.lastEndPromptAt = now;
-      expresswayRuntime.lastActionAt = now;
-      expresswayRuntime.endPromptOutstanding = true;
+      if (shown) {
+        expresswayRuntime.lastActionAt = now;
+        expresswayRuntime.endPromptOutstanding = true;
+      } else {
+        // Keep candidate warm so the app can retry after short sustained low-speed.
+        expresswayRuntime.endPromptOutstanding = false;
+      }
       setExpresswayOpenCache(tripId, true, now);
-      expresswayRuntime.speedBelowSince = null;
+      expresswayRuntime.speedBelowSince = shown ? null : now;
     } catch {
       setExpresswayOpenCache(tripId, true, 0);
     } finally {
@@ -418,25 +428,25 @@ async function maybeHandleNativeAutoExpressway(params: LocationPayload, effectiv
     now - expresswayRuntime.lastStrongAccelGeo.at <= AUTO_EXPRESSWAY_ACCEL_PROFILE.startAccelWindowMs
       ? expresswayRuntime.lastStrongAccelGeo
       : null;
-  const [signalNow, signalAccel] = await Promise.all([
-    detectExpresswaySignal(geo.lat, geo.lng),
-    accelGeoCandidate ? detectExpresswaySignal(accelGeoCandidate.lat, accelGeoCandidate.lng) : Promise.resolve(null),
-  ]);
-  const signalCandidates: Array<{
-    signal: Awaited<ReturnType<typeof detectExpresswaySignal>>;
-    source: 'now' | 'accel';
-  }> = [{ signal: signalNow, source: 'now' }];
-  if (signalAccel) signalCandidates.push({ signal: signalAccel, source: 'accel' as const });
-  const allowStartBySignal = signalCandidates.some(
-    item => !item.signal.resolved || item.signal.onExpresswayRoad || item.signal.nearIc || item.signal.nearEtcGate,
-  );
-  if (!allowStartBySignal) {
-    expresswayRuntime.speedAboveSince = now;
-    return;
-  }
   expresswayRuntime.inFlight = true;
-  expresswayRuntime.speedAboveSince = null;
   try {
+    const [signalNow, signalAccel] = await Promise.all([
+      detectExpresswaySignal(geo.lat, geo.lng),
+      accelGeoCandidate ? detectExpresswaySignal(accelGeoCandidate.lat, accelGeoCandidate.lng) : Promise.resolve(null),
+    ]);
+    const signalCandidates: Array<{
+      signal: Awaited<ReturnType<typeof detectExpresswaySignal>>;
+      source: 'now' | 'accel';
+    }> = [{ signal: signalNow, source: 'now' }];
+    if (signalAccel) signalCandidates.push({ signal: signalAccel, source: 'accel' as const });
+    const allowStartBySignal = signalCandidates.some(
+      item => !item.signal.resolved || item.signal.onExpresswayRoad || item.signal.nearIc || item.signal.nearEtcGate,
+    );
+    if (!allowStartBySignal) {
+      expresswayRuntime.speedAboveSince = now;
+      return;
+    }
+    expresswayRuntime.speedAboveSince = null;
     await clearPendingExpresswayEndPrompt(tripId);
     await clearPendingExpresswayEndDecision(tripId);
     await cancelNativeExpresswayEndPrompt(tripId);
@@ -452,8 +462,14 @@ async function maybeHandleNativeAutoExpressway(params: LocationPayload, effectiv
     }
     expresswayRuntime.lastActionAt = now;
     setExpresswayOpenCache(tripId, true, now);
-  } catch {
-    setExpresswayOpenCache(tripId, false, 0);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : '';
+    if (message.includes('開始済み')) {
+      setExpresswayOpenCache(tripId, true, now);
+      expresswayRuntime.lastActionAt = now;
+    } else {
+      setExpresswayOpenCache(tripId, false, 0);
+    }
   } finally {
     expresswayRuntime.inFlight = false;
   }
@@ -509,6 +525,15 @@ async function recordLocation(params: LocationPayload) {
   );
 }
 
+function enqueueRecordLocation(params: LocationPayload): Promise<void> {
+  recordQueue = recordQueue
+    .then(() => recordLocation(params))
+    .catch(() => {
+      // keep the queue healthy for subsequent points
+    });
+  return recordQueue;
+}
+
 export async function startRouteTracking(tripId: string, mode: RouteTrackingMode = 'precision') {
   const shouldRestart = (bgWatcherId || webWatchId != null) && (currentMode !== mode || activeTripId !== tripId);
   if (shouldRestart) {
@@ -520,6 +545,7 @@ export async function startRouteTracking(tripId: string, mode: RouteTrackingMode
   const config = applyMode(mode);
   activeTripId = tripId;
   lastPoint = null;
+  recordQueue = Promise.resolve();
   resetAutoExpresswayRuntime();
 
   if (Capacitor.isNativePlatform()) {
@@ -538,7 +564,7 @@ export async function startRouteTracking(tripId: string, mode: RouteTrackingMode
           return;
         }
         if (!location) return;
-        await recordLocation({
+        await enqueueRecordLocation({
           lat: location.latitude,
           lng: location.longitude,
           accuracy: location.accuracy ?? null,
@@ -556,7 +582,7 @@ export async function startRouteTracking(tripId: string, mode: RouteTrackingMode
   if (!navigator.geolocation) throw new Error('位置情報が利用できません');
   webWatchId = navigator.geolocation.watchPosition(
     async pos => {
-      await recordLocation({
+      await enqueueRecordLocation({
         lat: pos.coords.latitude,
         lng: pos.coords.longitude,
         accuracy: pos.coords.accuracy,
@@ -576,6 +602,7 @@ export async function startRouteTracking(tripId: string, mode: RouteTrackingMode
 export async function stopRouteTracking() {
   activeTripId = null;
   lastPoint = null;
+  recordQueue = Promise.resolve();
   resetAutoExpresswayRuntime();
   if (bgWatcherId) {
     const id = bgWatcherId;
