@@ -440,7 +440,7 @@ async function maybeHandleNativeAutoExpressway(params: LocationPayload, effectiv
     }> = [{ signal: signalNow, source: 'now' }];
     if (signalAccel) signalCandidates.push({ signal: signalAccel, source: 'accel' as const });
     const allowStartBySignal = signalCandidates.some(
-      item => !item.signal.resolved || item.signal.onExpresswayRoad || item.signal.nearIc || item.signal.nearEtcGate,
+      item => item.signal.onExpresswayRoad || item.signal.nearEtcGate,
     );
     if (!allowStartBySignal) {
       expresswayRuntime.speedAboveSince = now;

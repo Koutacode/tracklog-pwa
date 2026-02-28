@@ -25,12 +25,21 @@ function haversineM(lat1: number, lon1: number, lat2: number, lon2: number) {
   return 2 * r * Math.asin(Math.sqrt(a));
 }
 
-async function resolveNearestIcOverpass(
+async function queryExpresswayOverpass(
   lat: number,
   lon: number,
   radiusM: number,
-): Promise<IcResult | null> {
-  const query = `\n[out:json][timeout:8];\n(\n  node(around:${radiusM},${lat},${lon})['highway'='motorway_junction'];\n);\nout body;\n`.trim();
+): Promise<{ elements: any[] } | null> {
+  const query = `
+[out:json][timeout:8];
+(
+  node(around:${radiusM},${lat},${lon})['highway'='motorway_junction'];
+  way(around:90,${lat},${lon})['highway'~'^(motorway|motorway_link)$'];
+  node(around:220,${lat},${lon})['barrier'='toll_booth'];
+  node(around:220,${lat},${lon})['highway'='toll_gantry'];
+);
+out body;
+  `.trim();
   for (const endpoint of OVERPASS_ENDPOINTS) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 4000);
@@ -43,18 +52,8 @@ async function resolveNearestIcOverpass(
       });
       if (!res.ok) continue;
       const json = await res.json();
-      const nodes = (json.elements ?? []).filter((e: any) => e.type === 'node' && e.tags);
-      if (nodes.length === 0) continue;
-      let best: { name: string; d: number } | null = null;
-      for (const n of nodes) {
-        const name = n.tags.name ?? n.tags.ref;
-        if (!name) continue;
-        const d = haversineM(lat, lon, n.lat, n.lon);
-        if (!best || d < best.d) best = { name, d };
-      }
-      if (best) {
-        return { icName: best.name, distanceM: Math.round(best.d) };
-      }
+      const elements = Array.isArray(json.elements) ? json.elements : [];
+      return { elements };
     } catch {
       // continue to next endpoint
     } finally {
@@ -93,15 +92,37 @@ export async function detectExpresswaySignal(
     };
   }
 
-  const overpassIc = await resolveNearestIcOverpass(lat, lon, radiusM);
-  if (overpassIc) {
+  const overpass = await queryExpresswayOverpass(lat, lon, radiusM);
+  if (overpass) {
+    const nodes = overpass.elements.filter((e: any) => e?.type === 'node' && e?.tags);
+    const icNodes = nodes.filter((n: any) => n.tags.highway === 'motorway_junction');
+    let nearestIc: IcResult | null = null;
+    for (const n of icNodes) {
+      const name = n.tags.name ?? n.tags.ref;
+      if (!name || !Number.isFinite(n.lat) || !Number.isFinite(n.lon)) continue;
+      const d = haversineM(lat, lon, n.lat, n.lon);
+      if (!nearestIc || d < nearestIc.distanceM) {
+        nearestIc = { icName: name, distanceM: Math.round(d) };
+      }
+    }
+    const onExpresswayRoad = overpass.elements.some((e: any) => {
+      if (e?.type !== 'way' || !e?.tags) return false;
+      const hw = String(e.tags.highway ?? '');
+      return hw === 'motorway' || hw === 'motorway_link';
+    });
+    const nearEtcGate = nodes.some((n: any) => {
+      if (!Number.isFinite(n.lat) || !Number.isFinite(n.lon)) return false;
+      const isEtcNode = n.tags.barrier === 'toll_booth' || n.tags.highway === 'toll_gantry';
+      if (!isEtcNode) return false;
+      return haversineM(lat, lon, n.lat, n.lon) <= 220;
+    });
     return {
       resolved: true,
       provider: 'overpass',
-      onExpresswayRoad: false,
-      nearIc: overpassIc.distanceM <= 1600,
-      nearEtcGate: false,
-      nearestIc: overpassIc,
+      onExpresswayRoad,
+      nearIc: !!nearestIc && nearestIc.distanceM <= 1600,
+      nearEtcGate,
+      nearestIc,
     };
   }
 

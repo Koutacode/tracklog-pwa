@@ -918,11 +918,7 @@ export default function HomeScreen() {
         void (async () => {
           try {
             const signal = await detectExpresswaySignal(geo.lat, geo.lng);
-            const allowStart =
-              !signal.resolved ||
-              signal.onExpresswayRoad ||
-              signal.nearIc ||
-              signal.nearEtcGate;
+            const allowStart = signal.onExpresswayRoad || signal.nearEtcGate;
             if (!allowStart) {
               speedAboveSince.current = nowMs;
               return;
