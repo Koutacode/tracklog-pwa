@@ -25,6 +25,9 @@ export type NativeSetupStep = {
   detail: string;
 };
 
+const LOCATION_STATUS_CACHE_MS = 60000;
+let locationStatusCache: { value: SimplePermissionState; at: number } | null = null;
+
 function isNative() {
   return Capacitor.isNativePlatform();
 }
@@ -79,8 +82,72 @@ async function probeGeoPermissionByFix(): Promise<SimplePermissionState> {
   });
 }
 
+async function probeGeoPermissionByBackgroundWatcher(timeoutMs = 1500): Promise<SimplePermissionState> {
+  if (!isNative()) return 'unknown';
+  return new Promise(resolve => {
+    let watcherId: string | null = null;
+    let settled = false;
+    const timer = window.setTimeout(() => {
+      finish('unknown');
+    }, timeoutMs);
+
+    const finish = (state: SimplePermissionState) => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timer);
+      void (async () => {
+        if (watcherId) {
+          try {
+            await BackgroundGeolocation.removeWatcher({ id: watcherId });
+          } catch {
+            // ignore cleanup errors
+          }
+        }
+        resolve(state);
+      })();
+    };
+
+    void (async () => {
+      try {
+        watcherId = await BackgroundGeolocation.addWatcher(
+          {
+            requestPermissions: false,
+            stale: true,
+            distanceFilter: 1000,
+          },
+          (location, error) => {
+            if (error?.code === 'NOT_AUTHORIZED') {
+              finish('denied');
+              return;
+            }
+            if (location) {
+              finish('granted');
+            }
+          },
+        );
+      } catch (e: any) {
+        const text = String(e?.message ?? e ?? '');
+        if (text.includes('NOT_AUTHORIZED')) {
+          finish('denied');
+          return;
+        }
+        finish('unknown');
+      }
+    })();
+  });
+}
+
 export async function checkLocationPermissionStatus(): Promise<SimplePermissionState> {
-  return checkGeoPermissionByPermissionsApi();
+  const now = Date.now();
+  if (locationStatusCache && now - locationStatusCache.at < LOCATION_STATUS_CACHE_MS) {
+    return locationStatusCache.value;
+  }
+  let state = await checkGeoPermissionByPermissionsApi();
+  if (state === 'unknown' && isNative()) {
+    state = await probeGeoPermissionByBackgroundWatcher();
+  }
+  locationStatusCache = { value: state, at: now };
+  return state;
 }
 
 export async function requestLocationPermission(): Promise<SimplePermissionState> {
@@ -117,9 +184,17 @@ export async function requestLocationPermission(): Promise<SimplePermissionState
   }
 
   const apiState = await checkGeoPermissionByPermissionsApi();
-  if (apiState !== 'unknown') return apiState;
-  if (deniedByPlugin) return 'denied';
-  return probeGeoPermissionByFix();
+  if (apiState !== 'unknown') {
+    locationStatusCache = { value: apiState, at: Date.now() };
+    return apiState;
+  }
+  if (deniedByPlugin) {
+    locationStatusCache = { value: 'denied', at: Date.now() };
+    return 'denied';
+  }
+  const probed = await probeGeoPermissionByFix();
+  locationStatusCache = { value: probed, at: Date.now() };
+  return probed;
 }
 
 export async function checkNotificationPermissionStatus(): Promise<SimplePermissionState> {
