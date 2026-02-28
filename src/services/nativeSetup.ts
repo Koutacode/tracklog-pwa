@@ -12,6 +12,10 @@ type NativeSetupPlugin = {
     opened: boolean;
     fallback?: boolean;
   }>;
+  getPlatformInfo(): Promise<{
+    androidSdkInt?: number;
+    exactAlarmRelevant?: boolean;
+  }>;
 };
 
 const NativeSetup = registerPlugin<NativeSetupPlugin>('NativeSetup');
@@ -25,8 +29,14 @@ export type NativeSetupStep = {
   detail: string;
 };
 
+export type NativePlatformInfo = {
+  androidSdkInt: number | null;
+  exactAlarmRelevant: boolean | null;
+};
+
 const LOCATION_STATUS_CACHE_MS = 60000;
 let locationStatusCache: { value: SimplePermissionState; at: number } | null = null;
+let nativePlatformInfoCache: { value: NativePlatformInfo; at: number } | null = null;
 
 function isNative() {
   return Capacitor.isNativePlatform();
@@ -249,6 +259,28 @@ export async function checkExactAlarmStatus(): Promise<SimplePermissionState> {
   }
 }
 
+export async function getNativePlatformInfo(): Promise<NativePlatformInfo> {
+  if (!isNative()) return { androidSdkInt: null, exactAlarmRelevant: null };
+  const now = Date.now();
+  if (nativePlatformInfoCache && now - nativePlatformInfoCache.at < 5 * 60 * 1000) {
+    return nativePlatformInfoCache.value;
+  }
+  try {
+    const info = await NativeSetup.getPlatformInfo();
+    const parsed: NativePlatformInfo = {
+      androidSdkInt: Number.isFinite(Number(info.androidSdkInt)) ? Number(info.androidSdkInt) : null,
+      exactAlarmRelevant:
+        typeof info.exactAlarmRelevant === 'boolean' ? info.exactAlarmRelevant : null,
+    };
+    nativePlatformInfoCache = { value: parsed, at: now };
+    return parsed;
+  } catch {
+    const fallback = { androidSdkInt: null, exactAlarmRelevant: null };
+    nativePlatformInfoCache = { value: fallback, at: now };
+    return fallback;
+  }
+}
+
 export async function openExactAlarmSettings(): Promise<boolean> {
   if (!isNative()) return false;
   try {
@@ -349,26 +381,37 @@ export async function runNativeQuickSetup(): Promise<{
     });
   }
 
-  const exactBefore = await checkExactAlarmStatus();
-  if (exactBefore === 'granted') {
+  const platformInfo = await getNativePlatformInfo();
+  const exactRelevant = platformInfo.exactAlarmRelevant !== false;
+  if (!exactRelevant) {
     steps.push({
       id: 'exact-alarm',
       label: 'Exact Alarm',
       level: 'ok',
-      detail: '有効',
+      detail: '対象外（Android 12未満）',
     });
   } else {
-    const opened = await openExactAlarmSettings();
-    const exactAfter = await checkExactAlarmStatus();
-    steps.push({
-      id: 'exact-alarm',
-      label: 'Exact Alarm',
-      level: exactAfter === 'granted' ? 'ok' : 'warn',
-      detail:
-        exactAfter === 'granted'
-          ? '有効'
-          : `${opened ? '設定画面を開きました。' : ''}端末側で有効化してください。`,
-    });
+    const exactBefore = await checkExactAlarmStatus();
+    if (exactBefore === 'granted') {
+      steps.push({
+        id: 'exact-alarm',
+        label: 'Exact Alarm',
+        level: 'ok',
+        detail: '有効',
+      });
+    } else {
+      const opened = await openExactAlarmSettings();
+      const exactAfter = await checkExactAlarmStatus();
+      steps.push({
+        id: 'exact-alarm',
+        label: 'Exact Alarm',
+        level: exactAfter === 'granted' ? 'ok' : 'warn',
+        detail:
+          exactAfter === 'granted'
+            ? '有効'
+            : `${opened ? '設定画面を開きました。' : ''}端末側で有効化してください。`,
+      });
+    }
   }
 
   const requiresManualFollowUp = steps.some(step => step.level !== 'ok');

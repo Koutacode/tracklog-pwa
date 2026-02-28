@@ -85,4 +85,12 @@ public class NativeSetupPlugin extends Plugin {
             call.reject("電池最適化設定を開けませんでした。", ex);
         }
     }
+
+    @PluginMethod
+    public void getPlatformInfo(PluginCall call) {
+        JSObject ret = new JSObject();
+        ret.put("androidSdkInt", Build.VERSION.SDK_INT);
+        ret.put("exactAlarmRelevant", Build.VERSION.SDK_INT >= Build.VERSION_CODES.S);
+        call.resolve(ret);
+    }
 }

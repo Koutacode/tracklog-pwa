@@ -40,6 +40,7 @@ function parsePromptFromExtra(extra: any): PendingExpresswayEndPrompt | null {
   const lat = Number(extra.lat);
   const lng = Number(extra.lng);
   const accuracy = Number(extra.accuracy);
+  const reason = extra.reason && typeof extra.reason === 'object' ? extra.reason : undefined;
   if (!tripId || !Number.isFinite(speedKmh) || !detectedAt || !Number.isFinite(lat) || !Number.isFinite(lng)) {
     return null;
   }
@@ -52,6 +53,7 @@ function parsePromptFromExtra(extra: any): PendingExpresswayEndPrompt | null {
       lng,
       ...(Number.isFinite(accuracy) ? { accuracy } : {}),
     },
+    ...(reason ? { reason } : {}),
   };
 }
 
@@ -94,7 +96,7 @@ async function setupNativeActionBindings() {
     if (!prompt) return;
     if (event.actionId === ACTION_END) {
       try {
-        await endExpressway({ tripId: prompt.tripId, geo: prompt.geo });
+        await endExpressway({ tripId: prompt.tripId, geo: prompt.geo, autoDecision: prompt.reason });
         await clearPendingExpresswayEndPrompt(prompt.tripId);
         await clearPendingExpresswayEndDecision(prompt.tripId);
       } catch {
@@ -166,6 +168,7 @@ export async function showNativeExpresswayEndPrompt(prompt: PendingExpresswayEnd
           lat: prompt.geo.lat,
           lng: prompt.geo.lng,
           accuracy: prompt.geo.accuracy ?? null,
+          reason: prompt.reason ?? null,
         },
       },
     ],

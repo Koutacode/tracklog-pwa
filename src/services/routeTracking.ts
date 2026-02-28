@@ -8,12 +8,13 @@ import {
   getAutoExpresswayConfig,
   getEventsByTripId,
   getPendingExpresswayEndDecision,
+  pruneRoutePointsForRetention,
   setPendingExpresswayEndPrompt,
   startExpressway,
   updateExpresswayResolved,
 } from '../db/repositories';
 import type { AppEvent } from '../domain/types';
-import type { AutoExpresswayConfig, RouteTrackingMode } from '../db/repositories';
+import type { AutoExpresswayConfig, AutoExpresswayDecisionReason, RouteTrackingMode } from '../db/repositories';
 import { detectExpresswaySignal } from './icResolver';
 import { cancelNativeExpresswayEndPrompt, showNativeExpresswayEndPrompt } from './nativeExpresswayPrompt';
 
@@ -25,6 +26,7 @@ let activeTripId: string | null = null;
 let lastPoint: { lat: number; lng: number; at: number } | null = null;
 let currentMode: RouteTrackingMode = 'precision';
 let recordQueue: Promise<void> = Promise.resolve();
+let routePointRetentionRunAt = 0;
 
 type ModeConfig = {
   minTimeMs: number;
@@ -86,6 +88,9 @@ const expresswayRuntime = {
   endPromptOutstanding: false,
   inFlight: false,
   lastActionAt: 0,
+  startSignalFirstAt: null as number | null,
+  startSignalLastAt: null as number | null,
+  startSignalHits: 0,
 };
 
 const AUTO_EXPRESSWAY_ACCEL_PROFILE = {
@@ -97,6 +102,12 @@ const AUTO_EXPRESSWAY_ACCEL_PROFILE = {
   endResetMarginKmh: 8,
   endResetHoldMs: 20 * 1000,
   endNoDecelFallbackMs: 75 * 1000,
+};
+
+const AUTO_EXPRESSWAY_START_CONFIRM = {
+  minHits: 2,
+  minHoldMs: 12 * 1000,
+  maxGapMs: 25 * 1000,
 };
 
 type LocationPayload = {
@@ -131,7 +142,59 @@ function resetAutoExpresswayRuntime() {
   expresswayRuntime.endPromptOutstanding = false;
   expresswayRuntime.inFlight = false;
   expresswayRuntime.lastActionAt = 0;
+  expresswayRuntime.startSignalFirstAt = null;
+  expresswayRuntime.startSignalLastAt = null;
+  expresswayRuntime.startSignalHits = 0;
   expresswayOpenCache = { tripId: activeTripId, checkedAt: 0, isOpen: false };
+}
+
+function resetStartSignalCandidate() {
+  expresswayRuntime.startSignalFirstAt = null;
+  expresswayRuntime.startSignalLastAt = null;
+  expresswayRuntime.startSignalHits = 0;
+}
+
+function buildAutoDecisionReason(params: {
+  action: 'start' | 'end-prompt';
+  now: number;
+  speedKmh: number;
+  accelerationMs2: number | null;
+  accuracyM: number | null;
+  signal: Awaited<ReturnType<typeof detectExpresswaySignal>>;
+  config: AutoExpresswayConfig;
+  confirm?: AutoExpresswayDecisionReason['confirm'];
+}): AutoExpresswayDecisionReason {
+  const { action, now, speedKmh, accelerationMs2, accuracyM, signal, config, confirm } = params;
+  return {
+    source: 'native-auto',
+    action,
+    evaluatedAt: new Date(now).toISOString(),
+    speedKmh: Math.round(speedKmh),
+    ...(accelerationMs2 != null ? { accelerationMs2: Number(accelerationMs2.toFixed(3)) } : {}),
+    ...(accuracyM != null ? { accuracyM: Math.round(accuracyM) } : {}),
+    signalResolved: signal.resolved,
+    onExpresswayRoad: signal.onExpresswayRoad,
+    nearIc: signal.nearIc,
+    nearEtcGate: signal.nearEtcGate,
+    ...(signal.nearestIc?.icName ? { nearestIcName: signal.nearestIc.icName } : {}),
+    ...(signal.nearestIc?.distanceM != null ? { nearestIcDistanceM: Math.round(signal.nearestIc.distanceM) } : {}),
+    config: {
+      startSpeedKmh: config.speedKmh,
+      startDurationSec: config.durationSec,
+      endSpeedKmh: config.endSpeedKmh,
+      endDurationSec: config.endDurationSec,
+    },
+    ...(confirm ? { confirm } : {}),
+  };
+}
+
+function maybeRunRoutePointRetention() {
+  const now = Date.now();
+  if (now - routePointRetentionRunAt < 6 * 60 * 60 * 1000) return;
+  routePointRetentionRunAt = now;
+  void pruneRoutePointsForRetention().catch(() => {
+    // keep tracking unaffected on cleanup failures
+  });
 }
 
 function toIso(tsMs?: number | null): string {
@@ -316,6 +379,7 @@ async function maybeHandleNativeAutoExpressway(params: LocationPayload, effectiv
     expresswayRuntime.speedAboveSince = null;
     expresswayRuntime.speedBelowSince = null;
     expresswayRuntime.speedRecoveredSince = null;
+    resetStartSignalCandidate();
     return;
   }
   const tripId = activeTripId;
@@ -333,6 +397,7 @@ async function maybeHandleNativeAutoExpressway(params: LocationPayload, effectiv
   };
 
   if (isOpen) {
+    resetStartSignalCandidate();
     expresswayRuntime.speedAboveSince = null;
     const recoverThreshold = config.endSpeedKmh + AUTO_EXPRESSWAY_ACCEL_PROFILE.endResetMarginKmh;
     if (speedKmh >= recoverThreshold) {
@@ -377,11 +442,21 @@ async function maybeHandleNativeAutoExpressway(params: LocationPayload, effectiv
         expresswayRuntime.speedBelowSince = now;
         return;
       }
+      const reason = buildAutoDecisionReason({
+        action: 'end-prompt',
+        now,
+        speedKmh,
+        accelerationMs2: accelMs2,
+        accuracyM: geo.accuracy ?? null,
+        signal,
+        config,
+      });
       const prompt = {
         tripId,
         speedKmh: Math.round(speedKmh),
         detectedAt: new Date(now).toISOString(),
         geo,
+        reason,
       } as const;
       await setPendingExpresswayEndPrompt(prompt);
       const shown = await showNativeExpresswayEndPrompt(prompt);
@@ -408,6 +483,7 @@ async function maybeHandleNativeAutoExpressway(params: LocationPayload, effectiv
   expresswayRuntime.endPromptOutstanding = false;
   if (speedKmh < config.speedKmh) {
     expresswayRuntime.speedAboveSince = null;
+    resetStartSignalCandidate();
     if (speedKmh >= 0 && speedKmh < config.speedKmh * 0.8) {
       expresswayRuntime.lastStrongAccelAt = null;
       expresswayRuntime.lastStrongAccelGeo = null;
@@ -421,7 +497,10 @@ async function maybeHandleNativeAutoExpressway(params: LocationPayload, effectiv
   const strongAccelRecent =
     expresswayRuntime.lastStrongAccelAt != null &&
     now - expresswayRuntime.lastStrongAccelAt <= AUTO_EXPRESSWAY_ACCEL_PROFILE.startAccelWindowMs;
-  if (!strongAccelRecent) return;
+  if (!strongAccelRecent) {
+    resetStartSignalCandidate();
+    return;
+  }
   if (now - expresswayRuntime.speedAboveSince < config.durationSec * 1000) return;
   const accelGeoCandidate =
     expresswayRuntime.lastStrongAccelGeo &&
@@ -443,14 +522,51 @@ async function maybeHandleNativeAutoExpressway(params: LocationPayload, effectiv
       item => item.signal.onExpresswayRoad || item.signal.nearEtcGate,
     );
     if (!allowStartBySignal) {
+      resetStartSignalCandidate();
       expresswayRuntime.speedAboveSince = now;
+      return;
+    }
+    if (
+      expresswayRuntime.startSignalFirstAt == null ||
+      expresswayRuntime.startSignalLastAt == null ||
+      now - expresswayRuntime.startSignalLastAt > AUTO_EXPRESSWAY_START_CONFIRM.maxGapMs
+    ) {
+      expresswayRuntime.startSignalFirstAt = now;
+      expresswayRuntime.startSignalLastAt = now;
+      expresswayRuntime.startSignalHits = 1;
+      return;
+    }
+    expresswayRuntime.startSignalLastAt = now;
+    expresswayRuntime.startSignalHits += 1;
+    const confirmElapsedMs = Math.max(0, now - expresswayRuntime.startSignalFirstAt);
+    if (
+      expresswayRuntime.startSignalHits < AUTO_EXPRESSWAY_START_CONFIRM.minHits ||
+      confirmElapsedMs < AUTO_EXPRESSWAY_START_CONFIRM.minHoldMs
+    ) {
       return;
     }
     expresswayRuntime.speedAboveSince = null;
     await clearPendingExpresswayEndPrompt(tripId);
     await clearPendingExpresswayEndDecision(tripId);
     await cancelNativeExpresswayEndPrompt(tripId);
-    const { eventId } = await startExpressway({ tripId, geo });
+    const startSignal =
+      signalCandidates.find(item => item.signal.onExpresswayRoad || item.signal.nearEtcGate)?.signal ?? signalNow;
+    const reason = buildAutoDecisionReason({
+      action: 'start',
+      now,
+      speedKmh,
+      accelerationMs2: accelMs2,
+      accuracyM: geo.accuracy ?? null,
+      signal: startSignal,
+      config,
+      confirm: {
+        hits: expresswayRuntime.startSignalHits,
+        elapsedMs: confirmElapsedMs,
+        minHits: AUTO_EXPRESSWAY_START_CONFIRM.minHits,
+        minHoldMs: AUTO_EXPRESSWAY_START_CONFIRM.minHoldMs,
+      },
+    });
+    const { eventId } = await startExpressway({ tripId, geo, autoDecision: reason });
     const bestEntryIc = pickBestEntryIcCandidate(signalCandidates);
     if (bestEntryIc) {
       await updateExpresswayResolved({
@@ -462,13 +578,16 @@ async function maybeHandleNativeAutoExpressway(params: LocationPayload, effectiv
     }
     expresswayRuntime.lastActionAt = now;
     setExpresswayOpenCache(tripId, true, now);
+    resetStartSignalCandidate();
   } catch (error) {
     const message = error instanceof Error ? error.message : '';
     if (message.includes('開始済み')) {
       setExpresswayOpenCache(tripId, true, now);
       expresswayRuntime.lastActionAt = now;
+      resetStartSignalCandidate();
     } else {
       setExpresswayOpenCache(tripId, false, 0);
+      resetStartSignalCandidate();
     }
   } finally {
     expresswayRuntime.inFlight = false;
@@ -547,6 +666,7 @@ export async function startRouteTracking(tripId: string, mode: RouteTrackingMode
   lastPoint = null;
   recordQueue = Promise.resolve();
   resetAutoExpresswayRuntime();
+  maybeRunRoutePointRetention();
 
   if (Capacitor.isNativePlatform()) {
     if (bgWatcherId) return;

@@ -34,7 +34,7 @@ async function queryExpresswayOverpass(
 [out:json][timeout:8];
 (
   node(around:${radiusM},${lat},${lon})['highway'='motorway_junction'];
-  way(around:90,${lat},${lon})['highway'~'^(motorway|motorway_link)$'];
+  way(around:65,${lat},${lon})['highway'~'^(motorway|motorway_link)$'];
   node(around:220,${lat},${lon})['barrier'='toll_booth'];
   node(around:220,${lat},${lon})['highway'='toll_gantry'];
 );
@@ -120,7 +120,7 @@ export async function detectExpresswaySignal(
       resolved: true,
       provider: 'overpass',
       onExpresswayRoad,
-      nearIc: !!nearestIc && nearestIc.distanceM <= 1600,
+      nearIc: !!nearestIc && nearestIc.distanceM <= 1200,
       nearEtcGate,
       nearestIc,
     };

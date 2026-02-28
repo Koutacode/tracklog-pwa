@@ -1,6 +1,6 @@
 import { Capacitor } from '@capacitor/core';
 import { getNativeNotificationDiagnostic } from './nativeExpresswayPrompt';
-import { checkBatteryOptimizationStatus, checkLocationPermissionStatus } from './nativeSetup';
+import { checkBatteryOptimizationStatus, checkLocationPermissionStatus, getNativePlatformInfo } from './nativeSetup';
 
 export type StartupDiagnosticLevel = 'ok' | 'warn' | 'error';
 
@@ -48,6 +48,8 @@ export async function runStartupDiagnostics(): Promise<StartupDiagnosticItem[]> 
   }
 
   if (Capacitor.isNativePlatform()) {
+    const platformInfo = await getNativePlatformInfo();
+    const exactAlarmRelevant = platformInfo.exactAlarmRelevant !== false;
     const nativeDiag = await getNativeNotificationDiagnostic();
     if (nativeDiag) {
       if (nativeDiag.notificationPermission === 'granted') {
@@ -72,7 +74,14 @@ export async function runStartupDiagnostics(): Promise<StartupDiagnosticItem[]> 
           level: 'warn',
         });
       }
-      if (nativeDiag.exactAlarm === 'granted') {
+      if (!exactAlarmRelevant) {
+        items.push({
+          id: 'exact-alarm',
+          label: 'Exact Alarm設定',
+          detail: '対象外（Android 12未満）',
+          level: 'ok',
+        });
+      } else if (nativeDiag.exactAlarm === 'granted') {
         items.push({
           id: 'exact-alarm',
           label: 'Exact Alarm設定',
@@ -90,7 +99,7 @@ export async function runStartupDiagnostics(): Promise<StartupDiagnosticItem[]> 
         items.push({
           id: 'exact-alarm',
           label: 'Exact Alarm設定',
-          detail: '端末によっては無効でも動作しますが、有効化推奨です。',
+          detail: '要確認（Android 12+では有効化推奨）',
           level: 'warn',
         });
       }

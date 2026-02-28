@@ -62,6 +62,7 @@ export type PendingExpresswayEndPrompt = {
   speedKmh: number;
   detectedAt: string;
   geo: Geo;
+  reason?: AutoExpresswayDecisionReason;
 };
 
 export type PendingExpresswayEndDecision = {
@@ -71,6 +72,109 @@ export type PendingExpresswayEndDecision = {
   speedKmh?: number;
   geo?: Geo;
 };
+
+export type AutoExpresswayDecisionReason = {
+  source: 'native-auto';
+  action: 'start' | 'end-prompt';
+  evaluatedAt: string;
+  speedKmh: number;
+  accelerationMs2?: number;
+  accuracyM?: number;
+  signalResolved: boolean;
+  onExpresswayRoad: boolean;
+  nearIc: boolean;
+  nearEtcGate: boolean;
+  nearestIcName?: string;
+  nearestIcDistanceM?: number;
+  config: {
+    startSpeedKmh: number;
+    startDurationSec: number;
+    endSpeedKmh: number;
+    endDurationSec: number;
+  };
+  confirm?: {
+    hits: number;
+    elapsedMs: number;
+    minHits: number;
+    minHoldMs: number;
+  };
+};
+
+function normalizeAutoExpresswayDecisionReason(raw: unknown): AutoExpresswayDecisionReason | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const row = raw as Record<string, unknown>;
+  const source = row.source === 'native-auto' ? row.source : null;
+  const action = row.action === 'start' || row.action === 'end-prompt' ? row.action : null;
+  const evaluatedAt = typeof row.evaluatedAt === 'string' ? row.evaluatedAt : '';
+  const speedKmh = Number(row.speedKmh);
+  if (!source || !action || !evaluatedAt || !Number.isFinite(speedKmh)) return undefined;
+
+  const configRaw = (row.config ?? null) as Record<string, unknown> | null;
+  if (!configRaw) return undefined;
+  const startSpeedKmh = Number(configRaw.startSpeedKmh);
+  const startDurationSec = Number(configRaw.startDurationSec);
+  const endSpeedKmh = Number(configRaw.endSpeedKmh);
+  const endDurationSec = Number(configRaw.endDurationSec);
+  if (
+    !Number.isFinite(startSpeedKmh) ||
+    !Number.isFinite(startDurationSec) ||
+    !Number.isFinite(endSpeedKmh) ||
+    !Number.isFinite(endDurationSec)
+  ) {
+    return undefined;
+  }
+
+  const nearestIcDistanceM = Number(row.nearestIcDistanceM);
+  const accelerationMs2 = Number(row.accelerationMs2);
+  const accuracyM = Number(row.accuracyM);
+  const confirmRaw = (row.confirm ?? null) as Record<string, unknown> | null;
+  let confirm: AutoExpresswayDecisionReason['confirm'];
+  if (confirmRaw) {
+    const hits = Number(confirmRaw.hits);
+    const elapsedMs = Number(confirmRaw.elapsedMs);
+    const minHits = Number(confirmRaw.minHits);
+    const minHoldMs = Number(confirmRaw.minHoldMs);
+    if (
+      Number.isFinite(hits) &&
+      Number.isFinite(elapsedMs) &&
+      Number.isFinite(minHits) &&
+      Number.isFinite(minHoldMs)
+    ) {
+      confirm = {
+        hits: Math.max(0, Math.round(hits)),
+        elapsedMs: Math.max(0, Math.round(elapsedMs)),
+        minHits: Math.max(1, Math.round(minHits)),
+        minHoldMs: Math.max(1, Math.round(minHoldMs)),
+      };
+    }
+  }
+
+  return {
+    source,
+    action,
+    evaluatedAt,
+    speedKmh: Math.max(0, Math.min(200, Math.round(speedKmh))),
+    ...(Number.isFinite(accelerationMs2) ? { accelerationMs2 } : {}),
+    ...(Number.isFinite(accuracyM) ? { accuracyM: Math.max(0, Math.round(accuracyM)) } : {}),
+    signalResolved: !!row.signalResolved,
+    onExpresswayRoad: !!row.onExpresswayRoad,
+    nearIc: !!row.nearIc,
+    nearEtcGate: !!row.nearEtcGate,
+    ...(typeof row.nearestIcName === 'string' && row.nearestIcName.trim()
+      ? { nearestIcName: row.nearestIcName.trim() }
+      : {}),
+    ...(Number.isFinite(nearestIcDistanceM)
+      ? { nearestIcDistanceM: Math.max(0, Math.round(nearestIcDistanceM)) }
+      : {}),
+    config: {
+      startSpeedKmh: Math.max(0, Math.round(startSpeedKmh)),
+      startDurationSec: Math.max(1, Math.round(startDurationSec)),
+      endSpeedKmh: Math.max(0, Math.round(endSpeedKmh)),
+      endDurationSec: Math.max(1, Math.round(endDurationSec)),
+    },
+    ...(confirm ? { confirm } : {}),
+  };
+}
 
 function normalizePendingExpresswayEndPrompt(raw: unknown): PendingExpresswayEndPrompt | null {
   if (!raw || typeof raw !== 'object') return null;
@@ -83,6 +187,7 @@ function normalizePendingExpresswayEndPrompt(raw: unknown): PendingExpresswayEnd
   const lat = Number(geoRaw.lat);
   const lng = Number(geoRaw.lng);
   const accuracy = Number(geoRaw.accuracy);
+  const reason = normalizeAutoExpresswayDecisionReason(row.reason);
   if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
   return {
     tripId,
@@ -93,6 +198,7 @@ function normalizePendingExpresswayEndPrompt(raw: unknown): PendingExpresswayEnd
       lng,
       ...(Number.isFinite(accuracy) ? { accuracy } : {}),
     },
+    ...(reason ? { reason } : {}),
   };
 }
 
@@ -555,6 +661,53 @@ export async function addRoutePoint(point: Omit<RoutePoint, 'id'> & { id?: strin
   return row;
 }
 
+export async function pruneRoutePointsForRetention(params?: {
+  maxClosedTripsToKeep?: number;
+  maxAgeDays?: number;
+}): Promise<{ removedTrips: number; removedPoints: number }> {
+  const maxClosedTripsToKeep = Math.max(1, Math.round(params?.maxClosedTripsToKeep ?? 120));
+  const maxAgeDays = Math.max(14, Math.round(params?.maxAgeDays ?? 120));
+  const cutoffMs = Date.now() - maxAgeDays * 24 * 60 * 60 * 1000;
+
+  const activeTripId = await getActiveTripId();
+  const starts = (await db.events.where('type').equals('trip_start').toArray()) as TripStartEvent[];
+  const ends = (await db.events.where('type').equals('trip_end').toArray()) as TripEndEvent[];
+  const endByTrip = new Map<string, TripEndEvent>();
+  for (const e of ends) {
+    const prev = endByTrip.get(e.tripId);
+    if (!prev || e.ts > prev.ts) endByTrip.set(e.tripId, e);
+  }
+
+  const closed = starts
+    .filter(s => !!endByTrip.get(s.tripId))
+    .sort((a, b) => b.ts.localeCompare(a.ts));
+
+  const keep = new Set<string>();
+  if (activeTripId) keep.add(activeTripId);
+  for (let i = 0; i < closed.length; i++) {
+    const start = closed[i];
+    const startMs = Date.parse(start.ts);
+    const recentEnough = Number.isFinite(startMs) && startMs >= cutoffMs;
+    if (i < maxClosedTripsToKeep || recentEnough) {
+      keep.add(start.tripId);
+    }
+  }
+
+  const allPointTripIds = Array.from(new Set((await db.routePoints.toArray()).map(p => p.tripId)));
+  const staleTripIds = allPointTripIds.filter(tripId => !keep.has(tripId));
+  if (staleTripIds.length === 0) return { removedTrips: 0, removedPoints: 0 };
+
+  let removedPoints = 0;
+  for (const tripId of staleTripIds) {
+    const count = await db.routePoints.where('tripId').equals(tripId).count();
+    if (count > 0) {
+      await db.routePoints.where('tripId').equals(tripId).delete();
+      removedPoints += count;
+    }
+  }
+  return { removedTrips: staleTripIds.length, removedPoints };
+}
+
 export async function listRoutePointsByTripId(tripId: string): Promise<RoutePoint[]> {
   const arr = await db.routePoints.where('tripId').equals(tripId).toArray();
   arr.sort((a, b) => a.ts.localeCompare(b.ts));
@@ -926,14 +1079,24 @@ export async function addPointMark(params: {
 }
 
 // Expressway (高速道路)
-export async function startExpressway(params: { tripId: string; geo?: Geo; address?: string }) {
+export async function startExpressway(params: {
+  tripId: string;
+  geo?: Geo;
+  address?: string;
+  autoDecision?: AutoExpresswayDecisionReason;
+}) {
   const expresswaySessionId = uuid();
+  const autoDecision = normalizeAutoExpresswayDecisionReason(params.autoDecision);
   const e = baseEvent({
     tripId: params.tripId,
     type: 'expressway_start',
     geo: params.geo,
     address: params.address,
-    extras: { expresswaySessionId, icResolveStatus: 'pending' },
+    extras: {
+      expresswaySessionId,
+      icResolveStatus: 'pending',
+      ...(autoDecision ? { autoDecision } : {}),
+    },
   });
   await db.transaction('rw', db.events, db.meta, async () => {
     const events = await db.events.where('tripId').equals(params.tripId).toArray();
@@ -947,8 +1110,14 @@ export async function startExpressway(params: { tripId: string; geo?: Geo; addre
   return { expresswaySessionId, eventId: e.id };
 }
 
-export async function endExpressway(params: { tripId: string; geo?: Geo; address?: string }) {
+export async function endExpressway(params: {
+  tripId: string;
+  geo?: Geo;
+  address?: string;
+  autoDecision?: AutoExpresswayDecisionReason;
+}) {
   let eventId = '';
+  const autoDecision = normalizeAutoExpresswayDecisionReason(params.autoDecision);
   await db.transaction('rw', db.events, db.meta, async () => {
     const events = await db.events.where('tripId').equals(params.tripId).toArray();
     events.sort((a, b) => a.ts.localeCompare(b.ts));
@@ -959,7 +1128,17 @@ export async function endExpressway(params: { tripId: string; geo?: Geo; address
       type: 'expressway_end',
       geo: params.geo,
       address: params.address,
-      extras: open === '__legacy__' ? { icResolveStatus: 'pending' } : { expresswaySessionId: open, icResolveStatus: 'pending' },
+      extras:
+        open === '__legacy__'
+          ? {
+              icResolveStatus: 'pending',
+              ...(autoDecision ? { autoDecision } : {}),
+            }
+          : {
+              expresswaySessionId: open,
+              icResolveStatus: 'pending',
+              ...(autoDecision ? { autoDecision } : {}),
+            },
     });
     await db.events.put(e);
     await clearPendingExpresswayEndPrompt(params.tripId);
@@ -1065,8 +1244,11 @@ export async function backfillMissingAddresses(limit = 30, batches = 2): Promise
 }
 
 export async function deleteTrip(tripId: string): Promise<void> {
-  await db.transaction('rw', db.events, db.meta, async () => {
+  await db.transaction('rw', db.events, db.meta, db.routePoints, async () => {
     await db.events.where('tripId').equals(tripId).delete();
+    await db.routePoints.where('tripId').equals(tripId).delete();
+    await clearPendingExpresswayEndPrompt(tripId);
+    await clearPendingExpresswayEndDecision(tripId);
     const active = await db.meta.get(META_ACTIVE_TRIP_ID);
     if (active?.value === tripId) {
       await db.meta.delete(META_ACTIVE_TRIP_ID);
