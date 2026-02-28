@@ -1,7 +1,15 @@
+import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
+
 const NOTION_API_BASE = 'https://api.notion.com/v1';
 const NOTION_VERSION = '2022-06-28';
 const DEFAULT_REPO = 'Koutacode/tracklog-pwa';
 const DEFAULT_APK_NAME = 'tracklog-assist-debug.apk';
+const DEFAULT_LOCAL_APK_PATH = 'output/tracklog-assist-debug.apk';
+const DEFAULT_APP_ID = 'com.tracklog.assist';
+const DEFAULT_APP_MODE = 'Android Native (Capacitor)';
+const DEFAULT_DEVICE_VERIFICATION = '未記録（実機でクラッシュ/ANR/バックグラウンド継続を確認してください）';
 
 function getEnv(name, fallback = '') {
   const value = process.env[name];
@@ -60,6 +68,67 @@ function richText(content) {
   return [{ type: 'text', text: { content } }];
 }
 
+function runGit(...args) {
+  try {
+    return execFileSync('git', args, { encoding: 'utf8' }).trim();
+  } catch {
+    return '';
+  }
+}
+
+function parseRepoFromRemote(remoteUrl) {
+  if (!remoteUrl) return '';
+  const normalized = remoteUrl.trim();
+  const match = normalized.match(/github\.com[:/]([^/]+)\/(.+?)(?:\.git)?$/i);
+  if (!match) return '';
+  return `${match[1]}/${match[2]}`;
+}
+
+function resolveRepo() {
+  const envRepo = getEnv('GITHUB_REPOSITORY');
+  if (envRepo) return envRepo;
+  const remote = runGit('config', '--get', 'remote.origin.url');
+  const parsed = parseRepoFromRemote(remote);
+  return parsed || DEFAULT_REPO;
+}
+
+function splitList(raw) {
+  return raw
+    .split(/\r?\n|\|\|/g)
+    .map(line => line.trim())
+    .filter(Boolean)
+    .map(line => line.replace(/^[-*•]\s*/, '').trim())
+    .filter(Boolean);
+}
+
+function resolveChangeItems() {
+  const explicit = splitList(getEnv('NOTION_CHANGE_ITEMS'));
+  if (explicit.length > 0) return explicit.slice(0, 6);
+
+  const bodyItems = splitList(runGit('log', '-1', '--pretty=%b'));
+  if (bodyItems.length > 0) return bodyItems.slice(0, 6);
+
+  const subject = runGit('log', '-1', '--pretty=%s') || '更新内容はコミットを参照';
+  return [subject];
+}
+
+function resolveCommitSubject() {
+  return runGit('log', '-1', '--pretty=%s') || 'manual update';
+}
+
+function resolveBranch() {
+  return getEnv('GITHUB_REF_NAME') || runGit('rev-parse', '--abbrev-ref', 'HEAD') || 'unknown';
+}
+
+async function computeLocalApkDigest(apkPath) {
+  try {
+    const content = await readFile(apkPath);
+    return createHash('sha256').update(content).digest('hex').toUpperCase();
+  } catch {
+    return '';
+  }
+}
+
 async function fetchLatestRelease(repo, token) {
   const headers = { Accept: 'application/vnd.github+json' };
   if (token) headers.Authorization = `Bearer ${token}`;
@@ -83,6 +152,11 @@ async function fetchLatestRelease(repo, token) {
 async function appendSyncEntry(token, page, payload) {
   const title = `GitHub同期 ${payload.dateLabel}`;
   const marker = `sync:${payload.sha}`;
+  const changeBlocks = payload.changeItems.map(item => ({
+    object: 'block',
+    type: 'bulleted_list_item',
+    bulleted_list_item: { rich_text: richText(item) },
+  }));
   const children = [
     {
       object: 'block',
@@ -92,12 +166,27 @@ async function appendSyncEntry(token, page, payload) {
     {
       object: 'block',
       type: 'bulleted_list_item',
-      bulleted_list_item: { rich_text: richText(`Commit: ${payload.sha}`) },
+      bulleted_list_item: { rich_text: richText(`App: ${payload.appMode} / ${payload.appId}`) },
+    },
+    {
+      object: 'block',
+      type: 'bulleted_list_item',
+      bulleted_list_item: { rich_text: richText(`Branch: ${payload.branch}`) },
+    },
+    {
+      object: 'block',
+      type: 'bulleted_list_item',
+      bulleted_list_item: { rich_text: richText(`Commit: ${payload.sha} (${payload.subject})`) },
     },
     {
       object: 'block',
       type: 'bulleted_list_item',
       bulleted_list_item: { rich_text: richText(`Commit URL: ${payload.commitUrl}`) },
+    },
+    {
+      object: 'block',
+      type: 'bulleted_list_item',
+      bulleted_list_item: { rich_text: richText(`Release tag: ${payload.releaseTag}`) },
     },
     {
       object: 'block',
@@ -117,6 +206,22 @@ async function appendSyncEntry(token, page, payload) {
     {
       object: 'block',
       type: 'paragraph',
+      paragraph: { rich_text: richText('主な変更点') },
+    },
+    ...changeBlocks,
+    {
+      object: 'block',
+      type: 'paragraph',
+      paragraph: { rich_text: richText('実機検証') },
+    },
+    {
+      object: 'block',
+      type: 'bulleted_list_item',
+      bulleted_list_item: { rich_text: richText(payload.deviceVerification) },
+    },
+    {
+      object: 'block',
+      type: 'paragraph',
       paragraph: { rich_text: richText(marker) },
     },
   ];
@@ -130,16 +235,24 @@ async function main() {
     return;
   }
 
-  const repo = getEnv('GITHUB_REPOSITORY', DEFAULT_REPO);
-  const sha = getEnv('GITHUB_SHA', '').slice(0, 7) || 'manual';
-  const commitUrl =
-    sha === 'manual' ? `https://github.com/${repo}` : `https://github.com/${repo}/commit/${getEnv('GITHUB_SHA')}`;
+  const repo = resolveRepo();
+  const fullSha = getEnv('GITHUB_SHA') || runGit('rev-parse', 'HEAD');
+  const sha = fullSha ? fullSha.slice(0, 7) : 'manual';
+  const commitUrl = fullSha ? `https://github.com/${repo}/commit/${fullSha}` : `https://github.com/${repo}`;
   const release = await fetchLatestRelease(repo, getEnv('GITHUB_TOKEN'));
+  const localApkDigest = await computeLocalApkDigest(getEnv('LOCAL_APK_PATH', DEFAULT_LOCAL_APK_PATH));
   const releaseUrl = release?.apkUrl ?? `https://github.com/${repo}/releases/latest/download/${DEFAULT_APK_NAME}`;
   const apkName = release?.apkName ?? DEFAULT_APK_NAME;
-  const apkDigest = release?.apkDigest ?? 'unknown';
+  const apkDigest = release?.apkDigest && release.apkDigest !== 'unknown' ? release.apkDigest : localApkDigest || 'unknown';
+  const releaseTag = release?.tag ?? 'unknown';
   const now = new Date();
   const dateLabel = now.toISOString().replace('T', ' ').slice(0, 16);
+  const appId = getEnv('TRACKLOG_APP_ID', DEFAULT_APP_ID);
+  const appMode = getEnv('TRACKLOG_APP_MODE', DEFAULT_APP_MODE);
+  const branch = resolveBranch();
+  const subject = resolveCommitSubject();
+  const changeItems = resolveChangeItems();
+  const deviceVerification = getEnv('NOTION_DEVICE_VERIFICATION', DEFAULT_DEVICE_VERIFICATION);
 
   const pages = [
     {
@@ -166,10 +279,17 @@ async function main() {
       }
       await appendSyncEntry(notionToken, page, {
         sha,
+        subject,
+        branch,
+        appId,
+        appMode,
+        releaseTag,
         commitUrl,
         releaseUrl,
         apkName,
         apkDigest,
+        changeItems,
+        deviceVerification,
         dateLabel,
       });
       console.log(`[ok] ${page.label}`);

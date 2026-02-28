@@ -18,6 +18,11 @@ jobs:
       NOTION_PAGE_TRACKLOG: ${{ secrets.NOTION_PAGE_TRACKLOG }}
       NOTION_PAGE_APPS: ${{ secrets.NOTION_PAGE_APPS }}
       NOTION_PAGE_IMPROVEMENTS: ${{ secrets.NOTION_PAGE_IMPROVEMENTS }}
+      NOTION_CHANGE_ITEMS: ${{ github.event.head_commit.message }}
+      NOTION_DEVICE_VERIFICATION: ${{ vars.NOTION_DEVICE_VERIFICATION }}
+      TRACKLOG_APP_ID: ${{ vars.TRACKLOG_APP_ID }}
+      TRACKLOG_APP_MODE: ${{ vars.TRACKLOG_APP_MODE }}
+      LOCAL_APK_PATH: ${{ vars.LOCAL_APK_PATH }}
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
