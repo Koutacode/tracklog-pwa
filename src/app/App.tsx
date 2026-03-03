@@ -11,6 +11,7 @@ import HomeScreen from '../ui/screens/HomeScreen';
 import TripDetail from '../ui/screens/TripDetail';
 import HistoryScreen from '../ui/screens/HistoryScreen';
 import RouteMapScreen from '../ui/screens/RouteMapScreen';
+import ReportDashboard from '../ui/screens/ReportDashboard';
 
 // Keep routing aligned with the Vite base URL.
 const routerBase = import.meta.env.BASE_URL;
@@ -36,6 +37,7 @@ export default function App() {
         <Route path="/trip/:tripId" element={<TripDetail />} />
         <Route path="/trip/:tripId/route" element={<RouteMapScreen />} />
         <Route path="/history" element={<HistoryScreen />} />
+        <Route path="/report" element={<ReportDashboard />} />
       </Routes>
       <div
         style={{

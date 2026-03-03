@@ -62,6 +62,7 @@ export default function HistoryScreen() {
       <div className="page-head">
         <div className="page-head__title">運行履歴</div>
         <div className="page-head__actions">
+          <Link to="/report" className="pill-link">運行日報</Link>
           <Link to="/" className="pill-link">ホーム</Link>
         </div>
       </div>
