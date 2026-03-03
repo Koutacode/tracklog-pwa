@@ -1455,6 +1455,9 @@ export default function HomeScreen() {
               <Link to="/history" className="pill-link">
                 運行履歴
               </Link>
+              <Link to="/report" className="pill-link">
+                運行日報
+              </Link>
             </div>
           </div>
           <div className="start-hero__panel">
@@ -1579,6 +1582,9 @@ export default function HomeScreen() {
           </button>
           <Link to="/history" className="pill-link">
             運行履歴
+          </Link>
+          <Link to="/report" className="pill-link">
+            運行日報
           </Link>
           {expresswayActive && expresswayStart && (
             <div style={{ padding: '8px 10px', borderRadius: 10, background: '#0ea5e9', color: '#fff', fontWeight: 800, fontSize: 12 }}>
