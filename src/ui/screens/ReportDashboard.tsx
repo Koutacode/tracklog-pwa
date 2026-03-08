@@ -63,6 +63,16 @@ export default function ReportDashboard() {
     () => trips.find(t => t.id === selectedTripId) ?? null,
     [trips, selectedTripId]
   );
+  const totalDays = useMemo(() => trips.reduce((sum, trip) => sum + trip.days.length, 0), [trips]);
+  const activeMonths = useMemo(() => {
+    const months = new Set<string>();
+    for (const trip of trips) {
+      for (const day of trip.days) {
+        months.add(day.dateKey.slice(0, 7));
+      }
+    }
+    return months.size;
+  }, [trips]);
 
   function openTrip(tripId: string) {
     setSelectedTripId(tripId);
@@ -74,8 +84,18 @@ export default function ReportDashboard() {
       <div className="report-shell">
         {/* Header */}
         <div className="report-header">
-          <div className="report-header__title">運行日報</div>
-          <Link to="/" className="pill-link">ホーム</Link>
+          <div>
+            <div className="report-header__eyebrow">日報・月次管理</div>
+            <div className="report-header__title">運行日報</div>
+          </div>
+          <div className="report-header__actions">
+            <div className="report-header__chips">
+              <span className="report-header__chip">運行 {trips.length}件</span>
+              <span className="report-header__chip">日数 {totalDays}日</span>
+              <span className="report-header__chip">対象月 {activeMonths}件</span>
+            </div>
+            <Link to="/" className="pill-link">ホーム</Link>
+          </div>
         </div>
 
         {/* Tab bar */}
@@ -163,6 +183,10 @@ function TripListTab({ trips, onOpen, onReload }: {
             <span>{trip.days.length}日間</span>
             <span>{trip.jobs.length}案件</span>
             <span>#{trip.id.slice(0, 8)}</span>
+          </div>
+          <div className="report-trip-card__summary">
+            <span>最初の日付</span>
+            <strong>{trip.days[0]?.dateKey ?? '-'}</strong>
           </div>
           <div className="report-trip-card__actions">
             <button
@@ -290,6 +314,15 @@ function ReportTab({ trip, trips, onSelectTrip }: {
 
   return (
     <div>
+      <div className="report-card report-trip-summary">
+        <div className="report-trip-summary__eyebrow">選択中の運行</div>
+        <div className="report-trip-summary__title">{trip.label || day.dateKey}</div>
+        <div className="report-trip-summary__meta">
+          <span>{trip.days.length}日構成</span>
+          <span>{trip.jobs.length}案件</span>
+          <span>#{trip.id.slice(0, 8)}</span>
+        </div>
+      </div>
       {/* Trip selector + Day selector */}
       <div className="report-selectors">
         <select
@@ -361,6 +394,7 @@ function DailyView({ day }: { day: DayRecord }) {
       ))}
 
       {/* 3 Big Metric Cards */}
+      <div className="report-section-caption">その日の拘束・実働・翌日余力を上段に集約しています。</div>
       <div className="report-big-cards">
         <ConstraintCard minutes={metrics.constraintMinutes} overLimit={metrics.constraintOverLimit} />
         <WorkloadCard metrics={metrics} />
@@ -686,7 +720,7 @@ function MonthlyTab({ trips }: { trips: Trip[] }) {
 
   return (
     <div>
-      <div style={{ marginBottom: 16 }}>
+      <div className="report-monthly-controls">
         <select
           className="report-select"
           value={month}

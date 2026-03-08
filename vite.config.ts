@@ -3,6 +3,7 @@ import react from '@vitejs/plugin-react';
 
 // Note: The APP version is hard-coded here. During build this constant is
 // automatically replaced with the version from package.json via define.
+const fs = require('node:fs');
 const pkg = require('./package.json');
 const releaseConfig = (pkg.tracklogRelease ?? {}) as {
   githubOwner?: string;
@@ -12,10 +13,12 @@ const releaseConfig = (pkg.tracklogRelease ?? {}) as {
 const githubOwner = releaseConfig.githubOwner ?? 'Koutacode';
 const githubRepo = releaseConfig.githubRepo ?? 'tracklog-pwa';
 const apkAssetName = releaseConfig.apkAssetName ?? 'tracklog-assist-debug.apk';
+const projectRoot = fs.realpathSync(__dirname);
 
 const basePath = '/';
 
 export default defineConfig({
+  root: projectRoot,
   base: basePath,
   plugins: [react()],
   define: {

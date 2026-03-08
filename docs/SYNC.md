@@ -30,6 +30,17 @@ TrackLog は以下の2本で同期する。
 - Notion -> GitHub ミラーも自動スキップ
 - 運用は「GitHubを正本、Notionは必要時に手動更新」とする
 
+## Obsidian を含む運用ルール
+
+- 実装と実機反映まで完了した更新は、GitHub / Notion に加えて Obsidian の運用ログにも同日反映する。
+- 推奨順:
+  1. `git status` / 変更確認
+  2. Web build / `cap sync android` / 実機反映
+  3. Obsidian ログ更新
+  4. Notion 3ページ更新
+  5. Git commit / push
+- Obsidian 側の TrackLog ログは、少なくとも「変更概要 / 検証結果 / 実機インストール結果 / 残課題」を残す。
+
 ## ローカル実行コマンド
 
 ```bash

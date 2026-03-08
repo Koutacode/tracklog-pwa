@@ -16,6 +16,7 @@
 
 ## Device Verification
 - 実機確認を依頼されたら、原則 `アンインストール -> 再インストール -> 起動ログ確認` で再現性を担保する。
+- ただし、端末内に進行中の運行データが残っている可能性がある場合はアンインストールしない。`adb install -r` などの上書き更新を優先し、既存データ保持を最優先にする。
 - 優先確認項目:
   - 起動クラッシュ/ANR がないこと
   - バックグラウンド遷移後もプロセスが維持されること
@@ -27,12 +28,17 @@
 - 診断表示は実態ベースで判定し、黄色固定にならないようにする。
 - AI関連の固定文言として `要約してください` を自動挿入しない。
 
-## Notion / GitHub Update Policy
-- 記録更新の依頼時は、実装反映後に GitHub と Notion の両方を更新する。
+## Obsidian / Notion / GitHub Update Policy
+- 記録更新の依頼時は、実装反映後に Obsidian / GitHub / Notion の3箇所を更新する。
+- UI調整や配布APK更新など、実機反映まで完了した変更は「成功した更新」とみなし、関連ログと配布情報を同じ日に反映する。
+- 反映順は原則 `Git 変更確認 -> APK / 実機確認 -> Obsidian ログ更新 -> Notion 更新` とする。
 - Notion の TrackLog関連更新対象:
   - `個人アプリ`
   - `TrackLog運行アシスト｜機能・アップデート・配布情報`
   - `改善点`（TrackLogページのサブページとして維持）
+- Obsidian の TrackLog関連更新対象:
+  - `AI会話/Codex/2026-03-09_Codex-TrackLogとObsidian運用ログ.md`
+  - 必要に応じて `仕事/運行記録/運行記録ホーム.md`
 - 自動同期:
   - `sync-notion-from-github.yml`（`main` push時に GitHub -> Notion）
   - `sync-github-from-notion.yml`（定期実行で Notion -> GitHub ミラー）

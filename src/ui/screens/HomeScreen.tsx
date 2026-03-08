@@ -56,6 +56,17 @@ function fmtDuration(ms: number) {
   return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
 }
 
+function fmtDateTime(ts?: string) {
+  if (!ts) return '-';
+  return new Intl.DateTimeFormat('ja-JP', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(new Date(ts));
+}
+
 const LATEST_APK_URL = DEFAULT_APK_DOWNLOAD_URL;
 
 // Helpers to find open sessions
@@ -795,54 +806,72 @@ export default function HomeScreen() {
               </Link>
             </div>
           </div>
-          <div className="start-hero__panel">
-            <div className="start-hero__title">運行開始</div>
-            <div className="start-hero__subtitle">出発前にODOを入力して運行を開始します。</div>
-          </div>
-          <div className="start-hero__panel">
-            <div className="start-hero__title">運行開始</div>
-            <div className="start-hero__subtitle">虎のように鋭く、今日の運行を記録します。</div>
-            <div className="start-hero__actions">
-              <BigButton
-                label={loading ? '読み込み中…' : '運行開始'}
-                disabled={loading}
-                onClick={() => {
-                  setOdoDialog({ kind: 'trip_start' });
-                }}
-              />
-            </div>
-          </div>
-          {isNative && (
-            <div className="start-hero__panel">
-              <div style={{ fontSize: 24, fontWeight: 900, marginBottom: 8 }}>音声コマンド</div>
-              <div className="start-hero__subtitle" style={{ marginBottom: 10 }}>
-                例: 「運行開始 123456」「現在地更新」
+          <div className="start-hero__content">
+            <div className="start-hero__panel start-hero__panel--hero">
+              <div className="start-hero__eyebrow">出発前チェック</div>
+              <div className="start-hero__title">今日の運行を開始</div>
+              <div className="start-hero__subtitle">開始ODOを入力して、そのまま今日の運行記録を始めます。</div>
+              <div className="start-hero__support-grid">
+                <div className="start-hero__support-card">
+                  <strong>最初に必要なのは開始ODOだけ</strong>
+                  <span>出発時点を先に固定し、距離と区間の計算を安定させます。</span>
+                </div>
+                <div className="start-hero__support-card">
+                  <strong>履歴と日報は別導線</strong>
+                  <span>開始前でも上部リンクから履歴確認や日報入力にすぐ移動できます。</span>
+                </div>
               </div>
-              <button
-                className="pill-link"
-                style={{ width: '100%', justifyContent: 'center', padding: '14px 16px' }}
-                onClick={() => void runVoiceCommand()}
-                disabled={voiceListening || !voiceAvailable}
-              >
-                {voiceListening ? '聞き取り中…' : '音声で操作する'}
-              </button>
-              {voiceLastText && (
-                <div style={{ marginTop: 10, fontSize: 13, opacity: 0.8 }}>
-                  認識: {voiceLastText}
+              <div className="start-hero__actions">
+                <BigButton
+                  label={loading ? '読み込み中…' : '運行開始'}
+                  hint="開始ODOを入力して記録開始"
+                  disabled={loading}
+                  onClick={() => {
+                    setOdoDialog({ kind: 'trip_start' });
+                  }}
+                />
+              </div>
+            </div>
+            <div className="start-hero__stack">
+              <div className="start-hero__panel start-hero__panel--compact">
+                <div className="start-hero__panel-title">このあと使う操作</div>
+                <div className="start-hero__subtitle">
+                  運行開始後はホームで積込・荷卸・休憩・休息をまとめて記録できます。
                 </div>
-              )}
-              {voiceResult && (
-                <div style={{ marginTop: 6, fontSize: 13, color: '#86efac' }}>
-                  結果: {voiceResult}
-                </div>
-              )}
-              {voiceError && (
-                <div style={{ marginTop: 6, fontSize: 13, color: '#fca5a5' }}>
-                  {voiceError}
+              </div>
+              {isNative && (
+                <div className="start-hero__panel start-hero__panel--compact">
+                  <div className="start-hero__panel-title">音声コマンド</div>
+                  <div className="start-hero__subtitle" style={{ marginBottom: 10 }}>
+                    例: 「運行開始 123456」「現在地更新」
+                  </div>
+                  <button
+                    className="pill-link"
+                    style={{ width: '100%', justifyContent: 'center', padding: '14px 16px' }}
+                    onClick={() => void runVoiceCommand()}
+                    disabled={voiceListening || !voiceAvailable}
+                  >
+                    {voiceListening ? '聞き取り中…' : '音声で操作する'}
+                  </button>
+                  {voiceLastText && (
+                    <div style={{ marginTop: 10, fontSize: 13, opacity: 0.8 }}>
+                      認識: {voiceLastText}
+                    </div>
+                  )}
+                  {voiceResult && (
+                    <div style={{ marginTop: 6, fontSize: 13, color: '#86efac' }}>
+                      結果: {voiceResult}
+                    </div>
+                  )}
+                  {voiceError && (
+                    <div style={{ marginTop: 6, fontSize: 13, color: '#fca5a5' }}>
+                      {voiceError}
+                    </div>
+                  )}
                 </div>
               )}
             </div>
-          )}
+          </div>
           {nativeSettingsDialog}
           <OdoDialog
             open={odoDialog?.kind === 'trip_start'}
@@ -887,181 +916,219 @@ export default function HomeScreen() {
   const breakStart = openBreakSessionId
     ? (events.find(e => e.type === 'break_start' && (e as any).extras?.breakSessionId === openBreakSessionId) as any)
     : null;
+  const startMetaText = fmtDateTime(tripStart?.ts);
+  const activeStatusRows = [
+    {
+      key: 'trip',
+      label: '運行',
+      value: tripElapsed != null ? fmtDuration(tripElapsed) : '-',
+      tone: 'trip',
+    },
+    restStart
+      ? {
+          key: 'rest',
+          label: '休息',
+          value: fmtDuration(now - new Date(restStart.ts).getTime()),
+          tone: 'rest',
+        }
+      : null,
+    loadStart
+      ? {
+          key: 'load',
+          label: '積込',
+          value: fmtDuration(now - new Date(loadStart.ts).getTime()),
+          tone: 'load',
+        }
+      : null,
+    unloadStart
+      ? {
+          key: 'unload',
+          label: '荷卸',
+          value: fmtDuration(now - new Date(unloadStart.ts).getTime()),
+          tone: 'unload',
+        }
+      : null,
+    breakStart
+      ? {
+          key: 'break',
+          label: '休憩',
+          value: fmtDuration(now - new Date(breakStart.ts).getTime()),
+          tone: 'break',
+        }
+      : null,
+  ].filter(Boolean) as Array<{ key: string; label: string; value: string; tone: string }>;
+  const activeHighlights = [
+    {
+      key: 'route',
+      label: 'GPS記録',
+      value: routeTrackingMode === 'precision' ? '精度重視' : '電池重視',
+      tone: 'info',
+    },
+    expresswayActive && expresswayStart
+      ? {
+          key: 'expressway',
+          label: '高速',
+          value: fmtDuration(now - new Date(expresswayStart.ts).getTime()),
+          tone: 'accent',
+        }
+      : null,
+    wakeLockAvailable
+      ? {
+          key: 'wake-lock',
+          label: '画面ON',
+          value: wakeLockOn ? '維持中' : 'OFF',
+          tone: wakeLockOn ? 'accent' : 'muted',
+        }
+      : null,
+  ].filter(Boolean) as Array<{ key: string; label: string; value: string; tone: string }>;
+  const currentActivity = activeStatusRows.find(row => row.key !== 'trip');
+  const currentActivityLabel = currentActivity ? `${currentActivity.label}進行中` : '通常運行';
+  const currentActivityTone = currentActivity?.tone ?? 'trip';
   return (
     <div className="home-backdrop">
       <div className="home-shell">
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-        <div>
-          <div style={{ fontSize: 20, fontWeight: 900 }}>運行中</div>
-          <div style={{ opacity: 0.85, fontSize: 13 }}>
-            開始時刻: {tripStart?.ts ? new Intl.DateTimeFormat('ja-JP', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).format(new Date(tripStart.ts)) : '-'} / 開始ODO: {tripStartOdo ?? '-'} km
+        <div className="home-topbar">
+          <div className="home-topbar__main">
+            <div className="home-topbar__eyebrow">TrackLog運行アシスト</div>
+            <div className="home-topbar__title">運行中</div>
+            <div className="home-topbar__meta">開始 {startMetaText} / 開始ODO {tripStartOdo ?? '-'} km</div>
           </div>
-        </div>
-        <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
-          {isNative && (
-            <button className="pill-link" onClick={() => setNativeSettingsOpen(true)} aria-label="ネイティブ設定">
-              ⚙
-            </button>
-          )}
-          <Link to={`/trip/${tripId}`} className="pill-link">
-            運行詳細
-          </Link>
-          <Link to={`/trip/${tripId}/route`} className="pill-link">
-            ルート表示
-          </Link>
-          <Link to="/history" className="pill-link">
-            運行履歴
-          </Link>
-          <Link to="/report" className="pill-link">
-            運行日報
-          </Link>
-          {expresswayActive && expresswayStart && (
-            <div style={{ padding: '8px 10px', borderRadius: 10, background: '#0ea5e9', color: '#fff', fontWeight: 800, fontSize: 12 }}>
-              高速走行中 {fmtDuration(now - new Date(expresswayStart.ts).getTime())}
-            </div>
-          )}
-          {wakeLockAvailable && (
-            <button
-              className="pill-link"
-              style={{ background: wakeLockOn ? '#0ea5e9' : undefined, color: wakeLockOn ? '#fff' : undefined }}
-              onClick={async () => {
-                setWakeLockError(null);
-                if (wakeLockOn) {
-                  await releaseWakeLock();
-                  setWakeLockOn(false);
-                  return;
-                }
-                const ok = await requestWakeLock();
-                if (ok) {
-                  setWakeLockOn(true);
-                } else {
-                  setWakeLockError('画面スリープ防止を有効にできませんでした。ブラウザの許可を確認してください。');
-                }
-              }}
-            >
-              画面ON維持
-            </button>
-          )}
-        </div>
-      </div>
-      {wakeLockError && <div style={{ color: '#fca5a5', marginBottom: 8 }}>{wakeLockError}</div>}
-      {routeTrackingError && <div style={{ color: '#fca5a5', marginBottom: 8 }}>{routeTrackingError}</div>}
-      <div className="home-grid">
-        <div className="home-primary">
-          <div className="card" style={{ color: '#fff', padding: 12, borderRadius: 14 }}>
-            <div style={{ fontWeight: 900, marginBottom: 6 }}>進行中のイベント</div>
-            <div style={{ display: 'grid', gap: 4 }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: 800 }}>
-                <span>運行</span>
-                <span>{tripElapsed != null ? fmtDuration(tripElapsed) : '-'}</span>
-              </div>
-              {restStart && (
-                <div style={{ display: 'flex', justifyContent: 'space-between', opacity: 0.9 }}>
-                  <span>休息</span>
-                  <span>{fmtDuration(now - new Date(restStart.ts).getTime())}</span>
-                </div>
-              )}
-              {loadStart && (
-                <div style={{ display: 'flex', justifyContent: 'space-between', opacity: 0.9 }}>
-                  <span>積込</span>
-                  <span>{fmtDuration(now - new Date(loadStart.ts).getTime())}</span>
-                </div>
-              )}
-              {unloadStart && (
-                <div style={{ display: 'flex', justifyContent: 'space-between', opacity: 0.9 }}>
-                  <span>荷卸</span>
-                  <span>{fmtDuration(now - new Date(unloadStart.ts).getTime())}</span>
-                </div>
-              )}
-              {breakStart && (
-                <div style={{ display: 'flex', justifyContent: 'space-between', opacity: 0.9 }}>
-                  <span>休憩</span>
-                  <span>{fmtDuration(now - new Date(breakStart.ts).getTime())}</span>
-                </div>
-              )}
-              {!restStart && !loadStart && !unloadStart && !breakStart && (
-                <div style={{ opacity: 0.8 }}>進行中のイベントはありません</div>
-              )}
-            </div>
-          </div>
-          <div className="card" style={{ color: '#fff', padding: 12, borderRadius: 14 }}>
-            <div style={{ fontWeight: 900, marginBottom: 6 }}>現在地</div>
-            {geoStatus ? (
-              <div style={{ display: 'grid', gap: 4, fontSize: 14 }}>
-                <div>緯度: {geoStatus.lat.toFixed(5)}</div>
-                <div>経度: {geoStatus.lng.toFixed(5)}</div>
-                {geoStatus.accuracy != null && <div>精度: ±{Math.round(geoStatus.accuracy)}m</div>}
-                {geoStatus.address && <div>住所: {geoStatus.address}</div>}
-                <div style={{ opacity: 0.8 }}>取得時刻: {new Date(geoStatus.at).toLocaleString('ja-JP')}</div>
-              </div>
-            ) : (
-              <div style={{ opacity: 0.8, marginBottom: 4 }}>未取得</div>
+          <div className="home-topbar__actions">
+            {isNative && (
+              <button className="pill-link" onClick={() => setNativeSettingsOpen(true)} aria-label="ネイティブ設定">
+                ⚙
+              </button>
             )}
-            {geoError && <div style={{ color: '#fca5a5', marginTop: 6 }}>{geoError}</div>}
-            <button
-              onClick={captureGeoOnce}
-              style={{
-                marginTop: 8,
-                width: '100%',
-                height: 40,
-                borderRadius: 10,
-                border: '1px solid #374151',
-                background: '#1f2937',
-                color: '#fff',
-                fontWeight: 800,
-              }}
-            >
-              位置情報を更新
-            </button>
-          </div>
-          {isNative && (
-            <div className="card" style={{ color: '#fff', padding: 12, borderRadius: 14 }}>
-              <div style={{ fontWeight: 900, marginBottom: 6 }}>音声コマンド</div>
-              <div style={{ fontSize: 13, opacity: 0.8, marginBottom: 8 }}>
-                例: 「積込開始」「荷卸終了」「高速道路開始」「高速道路終了」
-              </div>
+            <Link to={`/trip/${tripId}`} className="pill-link">
+              運行詳細
+            </Link>
+            <Link to={`/trip/${tripId}/route`} className="pill-link">
+              ルート表示
+            </Link>
+            <Link to="/history" className="pill-link">
+              運行履歴
+            </Link>
+            <Link to="/report" className="pill-link">
+              運行日報
+            </Link>
+            {wakeLockAvailable && (
               <button
-                onClick={() => void runVoiceCommand()}
-                disabled={voiceListening || !voiceAvailable}
-                style={{
-                  width: '100%',
-                  height: 42,
-                  borderRadius: 12,
-                  border: '1px solid #334155',
-                  background: voiceListening ? '#1f2937' : '#0ea5e9',
-                  color: '#fff',
-                  fontWeight: 800,
-                  opacity: voiceAvailable ? 1 : 0.6,
+                className="pill-link"
+                style={{ background: wakeLockOn ? '#0ea5e9' : undefined, color: wakeLockOn ? '#fff' : undefined }}
+                onClick={async () => {
+                  setWakeLockError(null);
+                  if (wakeLockOn) {
+                    await releaseWakeLock();
+                    setWakeLockOn(false);
+                    return;
+                  }
+                  const ok = await requestWakeLock();
+                  if (ok) {
+                    setWakeLockOn(true);
+                  } else {
+                    setWakeLockError('画面スリープ防止を有効にできませんでした。ブラウザの許可を確認してください。');
+                  }
                 }}
               >
-                {voiceListening ? '聞き取り中…' : '音声で操作する'}
+                画面ON維持
               </button>
-              {voiceLastText && (
-                <div style={{ marginTop: 8, fontSize: 13, opacity: 0.85 }}>
-                  認識: {voiceLastText}
-                </div>
-              )}
-              {voiceResult && (
-                <div style={{ marginTop: 6, fontSize: 13, color: '#86efac' }}>
-                  結果: {voiceResult}
-                </div>
-              )}
-              {voiceError && (
-                <div style={{ marginTop: 6, fontSize: 13, color: '#fca5a5' }}>
-                  {voiceError}
-                </div>
-              )}
-            </div>
-          )}
-          {nativeSettingsDialog}
+            )}
+          </div>
         </div>
-        <div className="home-actions">
+        <div className="home-grid">
+          <div className="home-primary">
+            <div className="card home-overview-card">
+              <div className="home-section-label">記録状態</div>
+              <div className="home-overview__hero">
+                <div>
+                  <div className="home-overview__title">バックグラウンド記録を継続中</div>
+                  <div className="home-overview__subtitle">{routeTrackingModeNote}</div>
+                </div>
+                <div className="home-overview__hero-pills">
+                  <div className={`home-overview__pill home-overview__pill--${currentActivityTone}`}>{currentActivityLabel}</div>
+                  <div className="home-overview__pill">開始ODO {tripStartOdo ?? '-'} km</div>
+                </div>
+              </div>
+              <div className="home-status-list">
+                {activeStatusRows.map(row => (
+                  <div key={row.key} className={`home-status-row home-status-row--${row.tone}`}>
+                    <span>{row.label}</span>
+                    <strong>{row.value}</strong>
+                  </div>
+                ))}
+              </div>
+              <div className="home-highlight-pills">
+                {activeHighlights.map(item => (
+                  <div key={item.key} className={`home-highlight-pill home-highlight-pill--${item.tone}`}>
+                    <span>{item.label}</span>
+                    <strong>{item.value}</strong>
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div className="card home-info-card">
+              <div className="home-section-label">現在地</div>
+              {geoStatus ? (
+                <div className="home-kv-list">
+                  <div className="home-kv-row">
+                    <span>精度</span>
+                    <strong>{geoStatus.accuracy != null ? `±${Math.round(geoStatus.accuracy)}m` : '取得中'}</strong>
+                  </div>
+                  <div className="home-kv-row">
+                    <span>緯度</span>
+                    <strong>{geoStatus.lat.toFixed(5)}</strong>
+                  </div>
+                  <div className="home-kv-row">
+                    <span>経度</span>
+                    <strong>{geoStatus.lng.toFixed(5)}</strong>
+                  </div>
+                  {geoStatus.address && <div className="home-info-card__address">{geoStatus.address}</div>}
+                  <div className="home-info-card__meta">取得時刻: {new Date(geoStatus.at).toLocaleString('ja-JP')}</div>
+                </div>
+              ) : (
+                <div className="home-info-card__meta">位置情報は未取得です。</div>
+              )}
+              {geoError && <div className="home-inline-alert">{geoError}</div>}
+              <button className="trip-btn home-secondary-button" onClick={captureGeoOnce}>
+                位置情報を更新
+              </button>
+            </div>
+            {isNative && (
+              <div className="card home-info-card">
+                <div className="home-section-label">音声コマンド</div>
+                <div className="home-info-card__meta">例: 「積込開始」「荷卸終了」「高速道路開始」「高速道路終了」</div>
+                <button
+                  onClick={() => void runVoiceCommand()}
+                  disabled={voiceListening || !voiceAvailable}
+                  className="home-voice-button"
+                >
+                  {voiceListening ? '聞き取り中…' : '音声で操作する'}
+                </button>
+                {voiceLastText && <div className="home-info-card__meta">認識: {voiceLastText}</div>}
+                {voiceResult && <div className="home-inline-success">結果: {voiceResult}</div>}
+                {voiceError && <div className="home-inline-alert">{voiceError}</div>}
+              </div>
+            )}
+          </div>
+          <div className="home-action-stack">
+            {wakeLockError && <div className="home-alert home-alert--danger">{wakeLockError}</div>}
+            {routeTrackingError && <div className="home-alert home-alert--danger">{routeTrackingError}</div>}
+            <div className="card home-action-panel">
+              <div className="home-section-label">主要操作</div>
+              <div className="home-action-panel__hint">運行中に頻繁に使う記録操作です。</div>
+              <div className="home-actions">
           {/* End trip */}
-          <BigButton label="運行終了" variant="danger" onClick={() => setOdoDialog({ kind: 'trip_end' })} />
+          <BigButton
+            label="運行終了"
+            hint="終了ODOを入力して総距離を確定"
+            variant="danger"
+            onClick={() => setOdoDialog({ kind: 'trip_end' })}
+          />
           {/* Load (積込) */}
           {loadActive ? (
             <BigButton
               label="積込終了"
+              hint="進行中の積込を終了"
               variant="neutral"
               onClick={async () => {
                 try {
@@ -1076,6 +1143,7 @@ export default function HomeScreen() {
           ) : (
             <BigButton
               label="積込開始"
+              hint="積込イベントを開始"
               disabled={!canStartLoad}
               onClick={async () => {
                 try {
@@ -1092,6 +1160,7 @@ export default function HomeScreen() {
           {unloadActive ? (
             <BigButton
               label="荷卸終了"
+              hint="進行中の荷卸を終了"
               variant="neutral"
               onClick={async () => {
                 try {
@@ -1106,6 +1175,7 @@ export default function HomeScreen() {
           ) : (
             <BigButton
               label="荷卸開始"
+              hint="荷卸イベントを開始"
               disabled={!canStartUnload}
               onClick={async () => {
                 try {
@@ -1122,6 +1192,7 @@ export default function HomeScreen() {
           {breakActive ? (
             <BigButton
               label="休憩終了"
+              hint="進行中の休憩を終了"
               variant="neutral"
               onClick={async () => {
                 try {
@@ -1137,6 +1208,7 @@ export default function HomeScreen() {
           ) : (
             <BigButton
               label="休憩開始"
+              hint="短時間の休憩を記録"
               disabled={!canStartBreak}
               onClick={async () => {
                 try {
@@ -1153,6 +1225,7 @@ export default function HomeScreen() {
           {restActive ? (
             <BigButton
               label="休息終了"
+              hint="進行中の休息を終了"
               variant="neutral"
               onClick={async () => {
                 if (!openRestSessionId) return;
@@ -1171,91 +1244,112 @@ export default function HomeScreen() {
           ) : (
             <BigButton
               label="休息開始（ODO）"
+              hint="開始ODOを入力して休息開始"
               disabled={!canStartRest}
               onClick={() => {
                 setOdoDialog({ kind: 'rest_start' });
               }}
             />
           )}
-          {/* Fuel (給油) */}
-          <BigButton
-            label="給油（数量）"
-            onClick={() => {
-              setFuelOpen(true);
-            }}
-          />
-          {/* Expressway (高速道路) */}
-          {expresswayActive ? (
-            <BigButton
-              label="高速道路終了"
-              variant="neutral"
-              onClick={async () => {
-                try {
-                  const { geo, address } = await getGeoWithAddress();
-                  await endExpressway({ tripId, geo, address });
-                  await clearPendingExpresswayEndPrompt(tripId);
-                  await clearPendingExpresswayEndDecision(tripId);
-                  await cancelNativeExpresswayEndPrompt(tripId);
-                  await refresh();
-                } catch (e: any) {
-                  alert(e?.message ?? '高速道路の記録に失敗しました');
-                }
-              }}
-            />
-          ) : (
-            <BigButton
-              label="高速道路開始"
-              onClick={async () => {
-                try {
-                  const { geo, address } = await getGeoWithAddress();
-                  const { eventId } = await startExpressway({ tripId, geo, address });
-                  await clearPendingExpresswayEndDecision(tripId);
-                  await cancelNativeExpresswayEndPrompt(tripId);
-                  // 即時にIC名を取得して表示を早める（オンライン時のみ）
-                  if (navigator.onLine && geo) {
-                    const result = await resolveNearestIC(geo.lat, geo.lng);
-                    if (result) {
-                      await updateExpresswayResolved({
-                        eventId,
-                        status: 'resolved',
-                        icName: result.icName,
-                        icDistanceM: result.distanceM,
-                      });
+              </div>
+            </div>
+            <div className="card home-action-panel">
+              <div className="home-section-label">補助操作</div>
+              <div className="home-action-panel__hint">給油や補助イベントは一段弱く表示しています。</div>
+              <div className="home-action-grid">
+                <BigButton
+                  label="給油（数量）"
+                  hint="給油量を記録"
+                  size="compact"
+                  variant="neutral"
+                  onClick={() => {
+                    setFuelOpen(true);
+                  }}
+                />
+                {expresswayActive ? (
+                  <BigButton
+                    label="高速道路終了"
+                    hint="終了地点を記録"
+                    variant="neutral"
+                    size="compact"
+                    onClick={async () => {
+                      try {
+                        const { geo, address } = await getGeoWithAddress();
+                        await endExpressway({ tripId, geo, address });
+                        await clearPendingExpresswayEndPrompt(tripId);
+                        await clearPendingExpresswayEndDecision(tripId);
+                        await cancelNativeExpresswayEndPrompt(tripId);
+                        await refresh();
+                      } catch (e: any) {
+                        alert(e?.message ?? '高速道路の記録に失敗しました');
+                      }
+                    }}
+                  />
+                ) : (
+                  <BigButton
+                    label="高速道路開始"
+                    hint="開始地点を記録"
+                    size="compact"
+                    variant="neutral"
+                    onClick={async () => {
+                      try {
+                        const { geo, address } = await getGeoWithAddress();
+                        const { eventId } = await startExpressway({ tripId, geo, address });
+                        await clearPendingExpresswayEndDecision(tripId);
+                        await cancelNativeExpresswayEndPrompt(tripId);
+                        if (navigator.onLine && geo) {
+                          const result = await resolveNearestIC(geo.lat, geo.lng);
+                          if (result) {
+                            await updateExpresswayResolved({
+                              eventId,
+                              status: 'resolved',
+                              icName: result.icName,
+                              icDistanceM: result.distanceM,
+                            });
+                          }
+                        }
+                        await refresh();
+                      } catch (e: any) {
+                        alert(e?.message ?? '高速道路の記録に失敗しました');
+                      }
+                    }}
+                  />
+                )}
+                <BigButton
+                  label="乗船記録"
+                  hint="乗船イベントを追加"
+                  size="compact"
+                  variant="neutral"
+                  onClick={async () => {
+                    try {
+                      const { geo, address } = await getGeoWithAddress();
+                      await addBoarding({ tripId, geo, address });
+                      await refresh();
+                    } catch (e: any) {
+                      alert(e?.message ?? '乗船の記録に失敗しました');
                     }
-                  }
-                  await refresh();
-                } catch (e: any) {
-                  alert(e?.message ?? '高速道路の記録に失敗しました');
-                }
-              }}
-            />
-          )}
-          {/* Boarding (乗船) */}
-          <BigButton
-            label="乗船記録"
-            onClick={async () => {
-              try {
-                const { geo, address } = await getGeoWithAddress();
-                await addBoarding({ tripId, geo, address });
-                await refresh();
-              } catch (e: any) {
-                alert(e?.message ?? '乗船の記録に失敗しました');
-              }
-            }}
-          />
-          <BigButton
-            label="地点マーク"
-            onClick={async () => {
-              try {
-                const { geo, address } = await getGeoWithAddress();
-                await addPointMark({ tripId, geo, address, label: 'ホーム画面ボタン' });
-                await refresh();
-              } catch (e: any) {
-                alert(e?.message ?? '地点マークの保存に失敗しました');
-              }
-            }}
-          />
+                  }}
+                />
+                <BigButton
+                  label="地点マーク"
+                  hint="現在地をメモ"
+                  size="compact"
+                  variant="neutral"
+                  onClick={async () => {
+                    try {
+                      const { geo, address } = await getGeoWithAddress();
+                      await addPointMark({ tripId, geo, address, label: 'ホーム画面ボタン' });
+                      await refresh();
+                    } catch (e: any) {
+                      alert(e?.message ?? '地点マークの保存に失敗しました');
+                    }
+                  }}
+                />
+              </div>
+            </div>
+          </div>
         </div>
+        {nativeSettingsDialog}
       </div>
       {/* Fuel dialog */}
       <FuelDialog
@@ -1332,7 +1426,6 @@ export default function HomeScreen() {
           }
         }}
       />
-      </div>
     </div>
   );
 }

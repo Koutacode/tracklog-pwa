@@ -34,46 +34,36 @@ $debugApk = Join-Path $androidDir "app\build\outputs\apk\debug\app-debug.apk"
 $outputApk = Join-Path $projectRoot $localApkPath
 $outputDir = Split-Path -Parent $outputApk
 
-function Invoke-Step {
-  param(
-    [Parameter(Mandatory = $true)][string]$Title,
-    [Parameter(Mandatory = $true)][scriptblock]$Action
-  )
-  Write-Host ""
-  Write-Host "== $Title =="
-  & $Action
-}
-
 if ($Build) {
-  Invoke-Step -Title "npm run build" -Action {
-    Push-Location $projectRoot
-    try {
-      npm run build
-    } finally {
-      Pop-Location
-    }
+  Write-Host ""
+  Write-Host "== npm run build =="
+  Push-Location $projectRoot
+  try {
+    & npm.cmd run build
+  } finally {
+    Pop-Location
   }
 }
 
 if ($SyncAndroid) {
-  Invoke-Step -Title "npx cap sync android" -Action {
-    Push-Location $projectRoot
-    try {
-      npx cap sync android
-    } finally {
-      Pop-Location
-    }
+  Write-Host ""
+  Write-Host "== npx cap sync android =="
+  Push-Location $projectRoot
+  try {
+    & npx.cmd cap sync android
+  } finally {
+    Pop-Location
   }
 }
 
 if ($AssembleDebug) {
-  Invoke-Step -Title "gradlew assembleDebug" -Action {
-    Push-Location $androidDir
-    try {
-      .\gradlew.bat assembleDebug
-    } finally {
-      Pop-Location
-    }
+  Write-Host ""
+  Write-Host "== gradlew assembleDebug =="
+  Push-Location $androidDir
+  try {
+    .\gradlew.bat assembleDebug
+  } finally {
+    Pop-Location
   }
 }
 
@@ -104,9 +94,19 @@ $shaText = "N/A"
 
 if ($apkExists) {
   $apk = Get-Item $outputApk
-  $hash = Get-FileHash -Algorithm SHA256 $outputApk
   $apkInfoText = "{0:N0} bytes ({1})" -f $apk.Length, $apk.Name
-  $shaText = $hash.Hash.ToUpperInvariant()
+  $sha256 = [System.Security.Cryptography.SHA256]::Create()
+  try {
+    $stream = [System.IO.File]::OpenRead($outputApk)
+    try {
+      $hashBytes = $sha256.ComputeHash($stream)
+    } finally {
+      $stream.Dispose()
+    }
+    $shaText = ([System.BitConverter]::ToString($hashBytes)).Replace("-", "")
+  } finally {
+    $sha256.Dispose()
+  }
 }
 
 $reportLines = @(

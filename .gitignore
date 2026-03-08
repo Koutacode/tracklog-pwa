@@ -9,4 +9,5 @@ android/local.properties
 .env.local
 output/*.apk
 output/*.aab
+output/playwright/
 recovery/

@@ -35,6 +35,8 @@ function fmtDuration(mins?: number) {
 export default function HistoryScreen() {
   const [rows, setRows] = useState<TripSummary[]>([]);
   const [err, setErr] = useState<string | null>(null);
+  const activeCount = rows.filter(row => row.status === 'active').length;
+  const endedCount = rows.length - activeCount;
   async function load() {
     setErr(null);
     try {
@@ -67,9 +69,25 @@ export default function HistoryScreen() {
         </div>
       </div>
       {err && <div className="trip-detail__alert">{err}</div>}
+      {rows.length > 0 && (
+        <div className="card history-summary">
+          <div className="history-summary__item">
+            <span>総件数</span>
+            <strong>{rows.length}</strong>
+          </div>
+          <div className="history-summary__item">
+            <span>運行中</span>
+            <strong>{activeCount}</strong>
+          </div>
+          <div className="history-summary__item">
+            <span>完了</span>
+            <strong>{endedCount}</strong>
+          </div>
+        </div>
+      )}
       <div className="history-list">
         {rows.length === 0 && !err && (
-          <div className="card history-card" style={{ textAlign: 'center' }}>
+          <div className="card history-card history-card--empty" style={{ textAlign: 'center' }}>
             まだ履歴がありません。運行開始から記録を作成してください。
           </div>
         )}
@@ -79,22 +97,39 @@ export default function HistoryScreen() {
             to={`/trip/${r.tripId}`}
             className="card history-card"
           >
-            <div className="history-card__row">
-              <div className={`history-card__status ${r.status === 'active' ? 'history-card__status--active' : ''}`}>
-                {r.status === 'active' ? '運行中' : '運行終了'}
+            <div className="history-card__top">
+              <div className="history-card__copy">
+                <div className="history-card__range">
+                  {fmtLocal(r.startTs)} → {fmtLocal(r.endTs)}
+                </div>
+                <div className="history-card__meta">
+                  {r.endTs ? '所要' : '経過'}: {fmtDuration(diffMinutes(r.startTs, r.endTs))}
+                </div>
               </div>
-              <div className="history-card__id">#{r.tripId.slice(0, 8)}</div>
+              <div className="history-card__identity">
+                <div className={`history-card__status ${r.status === 'active' ? 'history-card__status--active' : ''}`}>
+                  {r.status === 'active' ? '運行中' : '運行終了'}
+                </div>
+                <div className="history-card__id">#{r.tripId.slice(0, 8)}</div>
+              </div>
             </div>
-            <div className="history-card__range">
-              {fmtLocal(r.startTs)} → {fmtLocal(r.endTs)}
-            </div>
-            <div className="history-card__meta">
-              {r.endTs ? '所要' : '経過'}: {fmtDuration(diffMinutes(r.startTs, r.endTs))}
+            <div className="history-card__stats">
+              <div className="history-card__stat">
+                <span>総距離</span>
+                <strong>{r.totalKm ?? '-'} km</strong>
+              </div>
+              <div className="history-card__stat">
+                <span>最終区間</span>
+                <strong>{r.lastLegKm ?? '-'} km</strong>
+              </div>
+              <div className="history-card__stat">
+                <span>ODO</span>
+                <strong>{r.odoStart} → {r.odoEnd ?? '-'}</strong>
+              </div>
             </div>
             <div className="history-card__metrics">
-              <div className="metric-chip"><span>ODO</span> {r.odoStart} → {r.odoEnd ?? '-'}</div>
-              <div className="metric-chip"><span>総距離</span> {r.totalKm ?? '-'} km</div>
-              <div className="metric-chip"><span>最終区間</span> {r.lastLegKm ?? '-'} km</div>
+              <div className="metric-chip"><span>開始</span> {fmtLocal(r.startTs)}</div>
+              <div className="metric-chip"><span>終了</span> {fmtLocal(r.endTs)}</div>
             </div>
             <div className="history-card__actions">
               <button
