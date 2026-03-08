@@ -13,6 +13,7 @@
   2. `npm run cap:sync:android`
   3. `android\gradlew.bat assembleDebug`（`android` ディレクトリで実行）
 - 配布用デバッグAPKは `output/tracklog-assist-debug.apk` を最新化する。
+- 実機確認や復旧で作ったスクリーンショット、抽出ログなどの一時ファイルは、確認後に削除する。恒久保持が必要なものだけを `output/device-backup/*.tar` のようなバックアップ成果物として残す。
 
 ## Device Verification
 - 実機確認を依頼されたら、既定は `adb install -r -> 起動確認 -> ログ確認` とする。
