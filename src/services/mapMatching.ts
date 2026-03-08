@@ -1,8 +1,10 @@
 import type { RoutePoint } from '../domain/types';
 
 export type LatLng = { lat: number; lng: number };
+export type MatchProvider = 'osrm-match' | 'osrm-route' | 'raw';
 
 const OSRM_MATCH_ENDPOINT = 'https://router.project-osrm.org/match/v1/driving';
+const OSRM_ROUTE_ENDPOINT = 'https://router.project-osrm.org/route/v1/driving';
 const MAX_POINTS_PER_REQUEST = 70;
 const OVERLAP_POINTS = 6;
 
@@ -85,20 +87,56 @@ async function fetchOsrmMatch(points: RoutePoint[]): Promise<LatLng[] | null> {
   }
 }
 
+async function fetchOsrmRoute(points: RoutePoint[]): Promise<LatLng[] | null> {
+  if (points.length < 2) {
+    return points.map(p => ({ lat: p.lat, lng: p.lng }));
+  }
+  const coords = points.map(p => `${p.lng.toFixed(6)},${p.lat.toFixed(6)}`).join(';');
+  const url =
+    `${OSRM_ROUTE_ENDPOINT}/${coords}` +
+    '?geometries=geojson&overview=full&steps=false&continue_straight=true';
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), 7000);
+  try {
+    const res = await fetch(url, { signal: controller.signal });
+    if (!res.ok) return null;
+    const json = await res.json();
+    const route = Array.isArray(json.routes) ? json.routes[0] : null;
+    const coordsArr = route?.geometry?.coordinates;
+    if (!Array.isArray(coordsArr) || coordsArr.length === 0) return null;
+    const path: LatLng[] = [];
+    for (const item of coordsArr) {
+      if (!Array.isArray(item) || item.length < 2) continue;
+      const lng = Number(item[0]);
+      const lat = Number(item[1]);
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
+      path.push({ lat, lng });
+    }
+    return path.length > 0 ? path : null;
+  } catch {
+    return null;
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
+
 export async function mapMatchRoutePoints(points: RoutePoint[]): Promise<{
   path: LatLng[];
-  provider: 'osrm' | 'raw';
+  provider: MatchProvider;
 }> {
   if (points.length < 2) {
     return { path: points.map(p => ({ lat: p.lat, lng: p.lng })), provider: 'raw' };
   }
   const chunks = splitIntoChunks(points);
   const merged: LatLng[] = [];
-  let usedOsrm = false;
+  let usedMatch = false;
+  let usedRoute = false;
   for (const chunk of chunks) {
     const matched = await fetchOsrmMatch(chunk);
-    const part = matched ?? chunk.map(p => ({ lat: p.lat, lng: p.lng }));
-    if (matched) usedOsrm = true;
+    const routed = matched ? null : await fetchOsrmRoute(chunk);
+    const part = matched ?? routed ?? chunk.map(p => ({ lat: p.lat, lng: p.lng }));
+    if (matched) usedMatch = true;
+    else if (routed) usedRoute = true;
     if (merged.length === 0) {
       merged.push(...part);
       continue;
@@ -110,6 +148,8 @@ export async function mapMatchRoutePoints(points: RoutePoint[]): Promise<{
     }
     merged.push(...part.slice(startIdx));
   }
-  return { path: merged, provider: usedOsrm ? 'osrm' : 'raw' };
+  return {
+    path: merged,
+    provider: usedMatch ? 'osrm-match' : usedRoute ? 'osrm-route' : 'raw',
+  };
 }
-

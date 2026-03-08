@@ -587,11 +587,47 @@ a:hover {
   display: inline-flex;
   align-items: center;
   gap: 8px;
+  flex-wrap: wrap;
 }
 
 .trip-edit__id {
   font-size: 12px;
   color: var(--muted);
+}
+
+.trip-edit--compact {
+  gap: 12px;
+}
+
+.trip-edit__summary {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+
+.trip-edit__summary-main {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  flex: 1 1 260px;
+}
+
+.trip-edit__address-preview {
+  word-break: break-word;
+}
+
+.trip-edit__panel {
+  display: grid;
+  gap: 12px;
+}
+
+.trip-edit__section {
+  display: grid;
+  gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(148, 163, 184, 0.18);
 }
 
 .trip-edit__label {
@@ -612,6 +648,17 @@ a:hover {
   width: 100%;
 }
 
+.trip-edit__stack {
+  display: grid;
+  gap: 8px;
+}
+
+.trip-edit__inline-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .trip-input {
   height: 40px;
   border-radius: 10px;
@@ -619,6 +666,14 @@ a:hover {
   background: #111827;
   color: #fff;
   padding: 0 10px;
+  width: 100%;
+  min-width: 0;
+}
+
+.trip-input--textarea {
+  height: auto;
+  padding: 10px;
+  resize: vertical;
 }
 
 .trip-btn {

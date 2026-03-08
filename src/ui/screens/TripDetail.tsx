@@ -370,6 +370,7 @@ export default function TripDetail() {
   const [deleting, setDeleting] = useState(false);
   const [sharing, setSharing] = useState(false);
   const [workingId, setWorkingId] = useState<string | null>(null);
+  const [openEditorId, setOpenEditorId] = useState<string | null>(null);
 
   function toLocalInputValue(ts: string) {
     const d = new Date(ts);
@@ -566,6 +567,7 @@ export default function TripDetail() {
   const tripStartEvent = events.find(e => e.type === 'trip_start');
   const tripStartTs = tripStartEvent?.ts ?? events[0]?.ts;
   const groupedByDay = tripStartTs ? groupItemsByDay(grouped, tripStartTs) : [];
+  const editingEvents = [...events].sort((a, b) => b.ts.localeCompare(a.ts));
   return (
     <div className="page-shell trip-detail">
       <div className="trip-detail__header">
@@ -756,13 +758,15 @@ export default function TripDetail() {
               <div className="card trip-section">
               <div className="trip-section__title">イベント一覧（編集）</div>
               <div className="trip-section__note">
-                時間・ODO・給油量・項目を編集できます。開始/終了の項目変更は対応するイベントも自動で変更されます。
+                新しい順で表示します。必要なイベントだけ開いて、時間・ODO・給油量・住所・項目を編集できます。
               </div>
               <div className="trip-list">
-                  {events.map(ev => {
+                  {editingEvents.map(ev => {
                     const numDef = getNumericEditDef(ev);
+                    const isOpen = openEditorId === ev.id;
                     const timeEditing = editing?.id === ev.id;
                     const typeEditingActive = typeEditing?.id === ev.id;
+                    const addressEditingActive = addressEditing?.id === ev.id;
                     const numberEditingActive =
                       !!numDef && numberEditing?.id === ev.id && numberEditing.field === numDef.field;
                     const canDelete = ev.type !== 'trip_start';
@@ -771,11 +775,23 @@ export default function TripDetail() {
                       ? EDITABLE_EVENT_TYPES
                       : [ev.type, ...EDITABLE_EVENT_TYPES];
                     return (
-                      <div key={ev.id} className="trip-item trip-edit">
-                        <div className="trip-edit__header">
-                          <div className="trip-item__title">{label(ev)}</div>
+                      <div key={ev.id} className="trip-item trip-edit trip-edit--compact">
+                        <div className="trip-edit__summary">
+                          <div className="trip-edit__summary-main">
+                            <div className="trip-item__title">{label(ev)}</div>
+                            <div className="trip-item__meta">{fmtLocal(ev.ts)}</div>
+                            {numDef && <div className="trip-item__meta">{numDef.label}: {numDef.value ?? '-'}</div>}
+                            <div className="trip-item__meta trip-edit__address-preview">{ev.address ?? '住所未設定'}</div>
+                          </div>
                           <div className="trip-edit__actions">
                             <div className="trip-edit__id">{ev.id.slice(0, 8)}</div>
+                            <button
+                              onClick={() => setOpenEditorId(current => (current === ev.id ? null : ev.id))}
+                              className="trip-btn"
+                              type="button"
+                            >
+                              {isOpen ? '閉じる' : '編集を開く'}
+                            </button>
                             {canDelete && (
                               <button
                                 onClick={() => handleDeleteEvent(ev.id)}
@@ -787,145 +803,168 @@ export default function TripDetail() {
                             )}
                           </div>
                         </div>
-                        <div className="trip-list">
-                          <div style={{ display: 'grid', gap: 8 }}>
-                            <div className="trip-edit__label">項目</div>
-                            {canEditType ? (
-                              typeEditingActive ? (
-                                <div className="trip-edit__row">
-                                  <select
-                                    value={typeEditing?.value ?? ev.type}
-                                    onChange={e => setTypeEditing({ id: ev.id, value: e.target.value as EventType })}
-                                    disabled={saving}
-                                    className="trip-input"
-                                  >
-                                    {typeOptions.map(t => (
-                                      <option key={t} value={t}>
-                                        {label({ type: t } as AppEvent)}
-                                      </option>
-                                    ))}
-                                  </select>
-                                  <button
-                                    onClick={handleSaveType}
-                                    disabled={saving}
-                                    className="trip-btn"
-                                  >
-                                    保存
-                                  </button>
-                                  <button
-                                    onClick={() => setTypeEditing(null)}
-                                    disabled={saving}
-                                    className="trip-btn trip-btn--ghost"
-                                  >
-                                    取消
-                                  </button>
-                                </div>
+                        {isOpen && (
+                          <div className="trip-edit__panel">
+                            <div className="trip-edit__section">
+                              <div className="trip-edit__label">項目</div>
+                              {canEditType ? (
+                                typeEditingActive ? (
+                                  <div className="trip-edit__stack">
+                                    <select
+                                      value={typeEditing?.value ?? ev.type}
+                                      onChange={e => setTypeEditing({ id: ev.id, value: e.target.value as EventType })}
+                                      disabled={saving}
+                                      className="trip-input"
+                                    >
+                                      {typeOptions.map(t => (
+                                        <option key={t} value={t}>
+                                          {label({ type: t } as AppEvent)}
+                                        </option>
+                                      ))}
+                                    </select>
+                                    <div className="trip-edit__inline-actions">
+                                      <button onClick={handleSaveType} disabled={saving} className="trip-btn">保存</button>
+                                      <button onClick={() => setTypeEditing(null)} disabled={saving} className="trip-btn trip-btn--ghost">取消</button>
+                                    </div>
+                                  </div>
+                                ) : (
+                                  <div className="trip-edit__stack">
+                                    <div>{label(ev)}</div>
+                                    <div className="trip-edit__inline-actions">
+                                      <button
+                                        onClick={() => setTypeEditing({ id: ev.id, value: ev.type })}
+                                        disabled={saving}
+                                        className="trip-btn"
+                                      >
+                                        項目を編集
+                                      </button>
+                                    </div>
+                                  </div>
+                                )
                               ) : (
-                                <div className="trip-edit__row trip-edit__row--between">
+                                <div className="trip-edit__stack">
                                   <div>{label(ev)}</div>
-                                  <button
-                                    onClick={() => setTypeEditing({ id: ev.id, value: ev.type })}
-                                    disabled={saving}
-                                    className="trip-btn"
-                                  >
-                                    編集
-                                  </button>
-                                </div>
-                              )
-                            ) : (
-                              <div className="trip-edit__row trip-edit__row--between">
-                                <div>{label(ev)}</div>
-                                <div style={{ opacity: 0.7, fontSize: 12 }}>変更不可</div>
-                              </div>
-                            )}
-                            <div className="trip-edit__label">時間</div>
-                            {timeEditing ? (
-                              <div className="trip-edit__row">
-                                <input
-                                  type="datetime-local"
-                                  value={editing.value}
-                                  onChange={e => setEditing({ id: ev.id, value: e.target.value })}
-                                  disabled={saving}
-                                  className="trip-input"
-                                />
-                                <button
-                                  onClick={handleSaveTime}
-                                  disabled={saving}
-                                  className="trip-btn"
-                                >
-                                  保存
-                                </button>
-                                <button
-                                  onClick={() => setEditing(null)}
-                                  disabled={saving}
-                                  className="trip-btn trip-btn--ghost"
-                                >
-                                  取消
-                                </button>
-                              </div>
-                            ) : (
-                              <div className="trip-edit__row trip-edit__row--between">
-                                <div>{fmtLocal(ev.ts)}</div>
-                                <button
-                                  onClick={() => setEditing({ id: ev.id, value: toLocalInputValue(ev.ts) })}
-                                  disabled={saving}
-                                  className="trip-btn"
-                                >
-                                  編集
-                                </button>
-                              </div>
-                            )}
-                          </div>
-                          {numDef && (
-                            <div style={{ display: 'grid', gap: 8 }}>
-                              <div className="trip-edit__label">{numDef.label}</div>
-                              {numberEditingActive ? (
-                                <div className="trip-edit__row">
-                                  <input
-                                    type="number"
-                                    value={numberEditing?.value ?? ''}
-                                    min={numDef.min}
-                                    step={numDef.step}
-                                    onChange={e => setNumberEditing({ id: ev.id, field: numDef.field, value: e.target.value })}
-                                    disabled={saving}
-                                    className="trip-input"
-                                  />
-                                  <button
-                                    onClick={handleSaveNumber}
-                                    disabled={saving}
-                                    className="trip-btn"
-                                  >
-                                    保存
-                                  </button>
-                                  <button
-                                    onClick={() => setNumberEditing(null)}
-                                    disabled={saving}
-                                    className="trip-btn trip-btn--ghost"
-                                  >
-                                    取消
-                                  </button>
-                                </div>
-                              ) : (
-                                <div className="trip-edit__row trip-edit__row--between">
-                                  <div>{numDef.value ?? '-'}</div>
-                                  <button
-                                    onClick={() =>
-                                      setNumberEditing({
-                                        id: ev.id,
-                                        field: numDef.field,
-                                        value: numDef.value != null ? String(numDef.value) : '',
-                                      })
-                                    }
-                                    disabled={saving}
-                                    className="trip-btn"
-                                  >
-                                    編集
-                                  </button>
+                                  <div style={{ opacity: 0.7, fontSize: 12 }}>変更不可</div>
                                 </div>
                               )}
                             </div>
-                          )}
-                        </div>
+
+                            <div className="trip-edit__section">
+                              <div className="trip-edit__label">時間</div>
+                              {timeEditing ? (
+                                <div className="trip-edit__stack">
+                                  <input
+                                    type="datetime-local"
+                                    value={editing.value}
+                                    onChange={e => setEditing({ id: ev.id, value: e.target.value })}
+                                    disabled={saving}
+                                    className="trip-input"
+                                  />
+                                  <div className="trip-edit__inline-actions">
+                                    <button onClick={handleSaveTime} disabled={saving} className="trip-btn">保存</button>
+                                    <button onClick={() => setEditing(null)} disabled={saving} className="trip-btn trip-btn--ghost">取消</button>
+                                  </div>
+                                </div>
+                              ) : (
+                                <div className="trip-edit__stack">
+                                  <div>{fmtLocal(ev.ts)}</div>
+                                  <div className="trip-edit__inline-actions">
+                                    <button
+                                      onClick={() => setEditing({ id: ev.id, value: toLocalInputValue(ev.ts) })}
+                                      disabled={saving}
+                                      className="trip-btn"
+                                    >
+                                      時間を編集
+                                    </button>
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+
+                            {numDef && (
+                              <div className="trip-edit__section">
+                                <div className="trip-edit__label">{numDef.label}</div>
+                                {numberEditingActive ? (
+                                  <div className="trip-edit__stack">
+                                    <input
+                                      type="number"
+                                      value={numberEditing?.value ?? ''}
+                                      min={numDef.min}
+                                      step={numDef.step}
+                                      onChange={e => setNumberEditing({ id: ev.id, field: numDef.field, value: e.target.value })}
+                                      disabled={saving}
+                                      className="trip-input"
+                                    />
+                                    <div className="trip-edit__inline-actions">
+                                      <button onClick={handleSaveNumber} disabled={saving} className="trip-btn">保存</button>
+                                      <button onClick={() => setNumberEditing(null)} disabled={saving} className="trip-btn trip-btn--ghost">取消</button>
+                                    </div>
+                                  </div>
+                                ) : (
+                                  <div className="trip-edit__stack">
+                                    <div>{numDef.value ?? '-'}</div>
+                                    <div className="trip-edit__inline-actions">
+                                      <button
+                                        onClick={() =>
+                                          setNumberEditing({
+                                            id: ev.id,
+                                            field: numDef.field,
+                                            value: numDef.value != null ? String(numDef.value) : '',
+                                          })
+                                        }
+                                        disabled={saving}
+                                        className="trip-btn"
+                                      >
+                                        数値を編集
+                                      </button>
+                                    </div>
+                                  </div>
+                                )}
+                              </div>
+                            )}
+
+                            <div className="trip-edit__section">
+                              <div className="trip-edit__label">住所</div>
+                              {addressEditingActive ? (
+                                <div className="trip-edit__stack">
+                                  <textarea
+                                    value={addressEditing.value}
+                                    onChange={e => setAddressEditing({ id: ev.id, value: e.target.value })}
+                                    disabled={saving}
+                                    className="trip-input trip-input--textarea"
+                                    rows={3}
+                                  />
+                                  <div className="trip-edit__inline-actions">
+                                    <button onClick={handleSaveAddress} disabled={saving} className="trip-btn">保存</button>
+                                    <button onClick={() => setAddressEditing(null)} disabled={saving} className="trip-btn trip-btn--ghost">取消</button>
+                                  </div>
+                                </div>
+                              ) : (
+                                <div className="trip-edit__stack">
+                                  <div className="trip-edit__address-preview">{ev.address ?? '住所未設定'}</div>
+                                  <div className="trip-edit__inline-actions">
+                                    <button
+                                      onClick={() => setAddressEditing({ id: ev.id, value: ev.address ?? '' })}
+                                      disabled={saving}
+                                      className="trip-btn"
+                                    >
+                                      住所を編集
+                                    </button>
+                                    {ev.geo && (
+                                      <button
+                                        onClick={() => handleRefreshAddress(ev.id)}
+                                        disabled={workingId === ev.id}
+                                        className="trip-btn trip-btn--ghost"
+                                      >
+                                        住所を再取得
+                                      </button>
+                                    )}
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        )}
                       </div>
                     );
                   })}
