@@ -61,7 +61,7 @@ if ($AssembleDebug) {
   Write-Host "== gradlew assembleDebug =="
   Push-Location $androidDir
   try {
-    .\gradlew.bat assembleDebug
+    .\gradlew.bat --no-daemon assembleDebug
   } finally {
     Pop-Location
   }
