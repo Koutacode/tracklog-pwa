@@ -1343,6 +1343,439 @@ export async function deleteTrip(tripId: string): Promise<void> {
   });
 }
 
+type RestoreSnapshotPayload = {
+  events?: unknown[];
+  routePoints?: unknown[];
+  recordType?: string;
+  tripId?: string;
+  summary?: unknown;
+  segments?: unknown[];
+  timeline?: unknown[];
+  cutoff?: unknown;
+};
+
+export type RestoreSnapshotResult = {
+  importedEvents: number;
+  importedRoutePoints: number;
+  restoredTripIds: string[];
+  activeTripId: string | null;
+};
+
+const RESTORE_EVENT_TYPES: Set<EventType> = new Set([
+  'trip_start',
+  'trip_end',
+  'rest_start',
+  'rest_end',
+  'break_start',
+  'break_end',
+  'load_start',
+  'load_end',
+  'unload_start',
+  'unload_end',
+  'refuel',
+  'boarding',
+  'expressway',
+  'expressway_start',
+  'expressway_end',
+  'point_mark',
+]);
+
+function isRecord(raw: unknown): raw is Record<string, unknown> {
+  return !!raw && typeof raw === 'object' && !Array.isArray(raw);
+}
+
+function normalizeRestoreGeo(raw: unknown): Geo | undefined {
+  if (!isRecord(raw)) return undefined;
+  const lat = Number(raw.lat);
+  const lng = Number(raw.lng);
+  const accuracy = Number(raw.accuracy);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return undefined;
+  return {
+    lat,
+    lng,
+    ...(Number.isFinite(accuracy) ? { accuracy } : {}),
+  };
+}
+
+function normalizeRestoreEvent(raw: unknown): AppEvent | null {
+  if (!isRecord(raw)) return null;
+  const id = typeof raw.id === 'string' ? raw.id.trim() : '';
+  const tripId = typeof raw.tripId === 'string' ? raw.tripId.trim() : '';
+  const typeRaw = typeof raw.type === 'string' ? raw.type.trim() : '';
+  const ts = typeof raw.ts === 'string' ? raw.ts.trim() : '';
+  if (!id || !tripId || !ts || !Number.isFinite(Date.parse(ts))) return null;
+  if (!RESTORE_EVENT_TYPES.has(typeRaw as EventType)) return null;
+  const syncStatus =
+    raw.syncStatus === 'synced' || raw.syncStatus === 'error' ? raw.syncStatus : 'pending';
+  const geo = normalizeRestoreGeo(raw.geo);
+  const extras = isRecord(raw.extras) ? { ...raw.extras } : undefined;
+  const address = typeof raw.address === 'string' && raw.address.trim() ? raw.address.trim() : undefined;
+  return {
+    id,
+    tripId,
+    type: typeRaw as EventType,
+    ts,
+    syncStatus,
+    ...(geo ? { geo } : {}),
+    ...(address ? { address } : {}),
+    ...(extras ? { extras } : {}),
+  };
+}
+
+function normalizeRestoreRoutePoint(raw: unknown): RoutePoint | null {
+  if (!isRecord(raw)) return null;
+  const id = typeof raw.id === 'string' ? raw.id.trim() : '';
+  const tripId = typeof raw.tripId === 'string' ? raw.tripId.trim() : '';
+  const ts = typeof raw.ts === 'string' ? raw.ts.trim() : '';
+  const lat = Number(raw.lat);
+  const lng = Number(raw.lng);
+  if (!id || !tripId || !ts || !Number.isFinite(Date.parse(ts)) || !Number.isFinite(lat) || !Number.isFinite(lng)) {
+    return null;
+  }
+  const accuracy = Number(raw.accuracy);
+  const speed = Number(raw.speed);
+  const heading = Number(raw.heading);
+  const source =
+    raw.source === 'foreground' || raw.source === 'background' ? raw.source : undefined;
+  return {
+    id,
+    tripId,
+    ts,
+    lat,
+    lng,
+    ...(Number.isFinite(accuracy) ? { accuracy } : {}),
+    ...(Number.isFinite(speed) ? { speed } : {}),
+    ...(Number.isFinite(heading) ? { heading } : {}),
+    ...(source ? { source } : {}),
+  };
+}
+
+type OperationLogTimelineItem = {
+  ts: string;
+  title: string;
+  detail?: string;
+};
+
+type OperationLogSegment = {
+  index: number;
+  toTs?: string;
+  toOdo?: number;
+  restSessionIdTo?: string;
+};
+
+type OperationLogSummary = {
+  startTs: string;
+  startAddress?: string;
+  odoStart?: number;
+};
+
+function parseOperationLogSummary(raw: unknown): OperationLogSummary | null {
+  if (!isRecord(raw)) return null;
+  const startTs = typeof raw.startTs === 'string' ? raw.startTs.trim() : '';
+  if (!startTs || !Number.isFinite(Date.parse(startTs))) return null;
+  const odoStart = Number(raw.odoStart);
+  return {
+    startTs,
+    ...(typeof raw.startAddress === 'string' && raw.startAddress.trim()
+      ? { startAddress: raw.startAddress.trim() }
+      : {}),
+    ...(Number.isFinite(odoStart) ? { odoStart } : {}),
+  };
+}
+
+function parseOperationLogSegments(raw: unknown): OperationLogSegment[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map(item => {
+      if (!isRecord(item)) return null;
+      const index = Number(item.index);
+      const toTs = typeof item.toTs === 'string' && Number.isFinite(Date.parse(item.toTs)) ? item.toTs : undefined;
+      const toOdo = Number(item.toOdo);
+      const restSessionIdTo =
+        typeof item.restSessionIdTo === 'string' && item.restSessionIdTo.trim()
+          ? item.restSessionIdTo.trim()
+          : undefined;
+      if (!Number.isFinite(index)) return null;
+      return {
+        index: Math.max(1, Math.round(index)),
+        ...(toTs ? { toTs } : {}),
+        ...(Number.isFinite(toOdo) ? { toOdo } : {}),
+        ...(restSessionIdTo ? { restSessionIdTo } : {}),
+      } satisfies OperationLogSegment;
+    })
+    .filter((item): item is OperationLogSegment => item !== null)
+    .sort((a, b) => a.index - b.index);
+}
+
+function parseOperationLogTimeline(raw: unknown): OperationLogTimelineItem[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map(item => {
+      if (!isRecord(item)) return null;
+      const ts = typeof item.ts === 'string' ? item.ts.trim() : '';
+      const title = typeof item.title === 'string' ? item.title.trim() : '';
+      const detail = typeof item.detail === 'string' ? item.detail.trim() : undefined;
+      if (!ts || !title || !Number.isFinite(Date.parse(ts))) return null;
+      return { ts, title, ...(detail ? { detail } : {}) };
+    })
+    .filter((item): item is OperationLogTimelineItem => item !== null)
+    .sort((a, b) => a.ts.localeCompare(b.ts));
+}
+
+function makeRecoveryEventId(prefix: string, sourceTs: string, suffix = ''): string {
+  const stamp = sourceTs.replace(/[-:.TZ]/g, '');
+  const tail = suffix ? `-${suffix}` : '';
+  return `recovery-${prefix}-${stamp}${tail}`;
+}
+
+function parseDetailDurationMinutes(detail?: string): number | null {
+  if (!detail) return null;
+  const m = detail.match(/（(?:(\d+)時間)?(\d+)分）/);
+  if (!m) return null;
+  const hours = Number(m[1] ?? 0);
+  const minutes = Number(m[2] ?? 0);
+  if (!Number.isFinite(hours) || !Number.isFinite(minutes)) return null;
+  return hours * 60 + minutes;
+}
+
+function deriveEndTsFromDetail(startTs: string, detail?: string): string | null {
+  const minutes = parseDetailDurationMinutes(detail);
+  if (minutes == null) return null;
+  return new Date(new Date(startTs).getTime() + minutes * 60000).toISOString();
+}
+
+function extractAddressFromDetail(detail?: string): string | undefined {
+  if (!detail) return undefined;
+  const parts = detail.split(' / ').map(part => part.trim()).filter(Boolean);
+  if (parts.length === 0) return undefined;
+  const last = parts[parts.length - 1];
+  return last || undefined;
+}
+
+function extractRefuelLiters(detail?: string): number | undefined {
+  if (!detail) return undefined;
+  const m = detail.match(/(\d+(?:\.\d+)?)\s*L/i);
+  if (!m) return undefined;
+  const liters = Number(m[1]);
+  return Number.isFinite(liters) ? liters : undefined;
+}
+
+function buildOperationLogEvents(payload: RestoreSnapshotPayload): AppEvent[] {
+  const tripId = typeof payload.tripId === 'string' ? payload.tripId.trim() : '';
+  const summary = parseOperationLogSummary(payload.summary);
+  const timeline = parseOperationLogTimeline(payload.timeline);
+  const segments = parseOperationLogSegments(payload.segments);
+  if (!tripId || !summary || timeline.length === 0) {
+    return [];
+  }
+
+  const events: AppEvent[] = [
+    {
+      id: makeRecoveryEventId('trip-start', summary.startTs),
+      tripId,
+      type: 'trip_start',
+      ts: summary.startTs,
+      syncStatus: 'pending',
+      ...(summary.startAddress ? { address: summary.startAddress } : {}),
+      extras: {
+        odoKm: Number.isFinite(summary.odoStart) ? summary.odoStart : 0,
+      },
+    } as TripStartEvent,
+  ];
+
+  let restIndex = 0;
+  let pairIndex = 0;
+  for (const item of timeline) {
+    if (item.title === '運行開始') continue;
+    const address = extractAddressFromDetail(item.detail);
+    const title = item.title.trim();
+    if (item.title === '休息') {
+      const segment = segments[restIndex];
+      const restSessionId = segment?.restSessionIdTo ?? makeRecoveryEventId('rest-session', item.ts);
+      const restStart: AppEvent = {
+        id: makeRecoveryEventId('rest-start', item.ts),
+        tripId,
+        type: 'rest_start',
+        ts: item.ts,
+        syncStatus: 'pending',
+        ...(address ? { address } : {}),
+        extras: {
+          restSessionId,
+          odoKm: Number.isFinite(segment?.toOdo) ? segment!.toOdo! : 0,
+        },
+      } as RestStartEvent;
+      events.push(restStart);
+
+      if (!item.detail?.includes('進行中')) {
+        const endTs = deriveEndTsFromDetail(item.ts, item.detail);
+        if (endTs) {
+          events.push({
+            id: makeRecoveryEventId('rest-end', endTs),
+            tripId,
+            type: 'rest_end',
+            ts: endTs,
+            syncStatus: 'pending',
+            ...(address ? { address } : {}),
+            extras: {
+              restSessionId,
+              dayClose: false,
+            },
+          } as RestEndEvent);
+        }
+      }
+      restIndex += 1;
+      continue;
+    }
+
+    const endTs = deriveEndTsFromDetail(item.ts, item.detail);
+    const sessionId = makeRecoveryEventId('session', item.ts, String(pairIndex + 1));
+    pairIndex += 1;
+    switch (title) {
+      case '積込':
+      case '積込み':
+        events.push({
+          id: makeRecoveryEventId('load-start', item.ts),
+          tripId,
+          type: 'load_start',
+          ts: item.ts,
+          syncStatus: 'pending',
+          ...(address ? { address } : {}),
+          extras: { loadSessionId: sessionId },
+        });
+        if (endTs) {
+          events.push({
+            id: makeRecoveryEventId('load-end', endTs),
+            tripId,
+            type: 'load_end',
+            ts: endTs,
+            syncStatus: 'pending',
+            ...(address ? { address } : {}),
+            extras: { loadSessionId: sessionId },
+          });
+        }
+        break;
+      case '荷卸':
+      case '積下ろし':
+      case '積み下ろし':
+      case '積み卸し':
+        events.push({
+          id: makeRecoveryEventId('unload-start', item.ts),
+          tripId,
+          type: 'unload_start',
+          ts: item.ts,
+          syncStatus: 'pending',
+          ...(address ? { address } : {}),
+          extras: { unloadSessionId: sessionId },
+        });
+        if (endTs) {
+          events.push({
+            id: makeRecoveryEventId('unload-end', endTs),
+            tripId,
+            type: 'unload_end',
+            ts: endTs,
+            syncStatus: 'pending',
+            ...(address ? { address } : {}),
+            extras: { unloadSessionId: sessionId },
+          });
+        }
+        break;
+      case '休憩':
+        events.push({
+          id: makeRecoveryEventId('break-start', item.ts),
+          tripId,
+          type: 'break_start',
+          ts: item.ts,
+          syncStatus: 'pending',
+          ...(address ? { address } : {}),
+          extras: { breakSessionId: sessionId },
+        });
+        if (endTs) {
+          events.push({
+            id: makeRecoveryEventId('break-end', endTs),
+            tripId,
+            type: 'break_end',
+            ts: endTs,
+            syncStatus: 'pending',
+            ...(address ? { address } : {}),
+            extras: { breakSessionId: sessionId },
+          });
+        }
+        break;
+      case '給油': {
+        const liters = extractRefuelLiters(item.detail);
+        events.push({
+          id: makeRecoveryEventId('refuel', item.ts),
+          tripId,
+          type: 'refuel',
+          ts: item.ts,
+          syncStatus: 'pending',
+          ...(address ? { address } : {}),
+          extras: {
+            ...(Number.isFinite(liters) ? { liters } : {}),
+          },
+        });
+        break;
+      }
+      default:
+        break;
+    }
+  }
+
+  return events.sort((a, b) => a.ts.localeCompare(b.ts));
+}
+
+function findActiveTripIdFromEvents(events: AppEvent[]): string | null {
+  const starts = events.filter(e => e.type === 'trip_start').sort((a, b) => b.ts.localeCompare(a.ts));
+  for (const start of starts) {
+    const ended = events.some(e => e.tripId === start.tripId && e.type === 'trip_end');
+    if (!ended) return start.tripId;
+  }
+  return null;
+}
+
+export async function restoreSnapshotJson(jsonText: string): Promise<RestoreSnapshotResult> {
+  let parsed: RestoreSnapshotPayload;
+  try {
+    parsed = JSON.parse(jsonText) as RestoreSnapshotPayload;
+  } catch {
+    throw new Error('JSON の解析に失敗しました');
+  }
+  const events = Array.isArray(parsed.events)
+    ? parsed.events.map(normalizeRestoreEvent).filter((event): event is AppEvent => event !== null)
+    : parsed.recordType === 'operation_log'
+      ? buildOperationLogEvents(parsed)
+      : [];
+  if (events.length === 0) {
+    throw new Error('復元用 JSON に復元可能なイベントがありません');
+  }
+  const routePoints = Array.isArray(parsed.routePoints)
+    ? parsed.routePoints
+        .map(normalizeRestoreRoutePoint)
+        .filter((point): point is RoutePoint => point !== null)
+    : [];
+  const restoredTripIds = [...new Set(events.map(event => event.tripId))];
+  const activeTripId = findActiveTripIdFromEvents(events);
+
+  await db.transaction('rw', db.events, db.meta, db.routePoints, async () => {
+    await Promise.all(restoredTripIds.map(tripId => db.events.where('tripId').equals(tripId).delete()));
+    await Promise.all(restoredTripIds.map(tripId => db.routePoints.where('tripId').equals(tripId).delete()));
+    await db.events.bulkPut(events);
+    if (routePoints.length > 0) {
+      await db.routePoints.bulkPut(routePoints);
+    }
+    await clearPendingExpresswayEndPrompt();
+    await clearPendingExpresswayEndDecision();
+    await setMeta(META_ACTIVE_TRIP_ID, activeTripId);
+  });
+
+  return {
+    importedEvents: events.length,
+    importedRoutePoints: routePoints.length,
+    restoredTripIds,
+    activeTripId,
+  };
+}
+
 /**
  * Delete a single event. Trip startは運行の基点なので削除不可とする。
  * rest_end (dayClose) の並びが変わる場合は日次インデックスを再計算する。

@@ -1782,6 +1782,12 @@ a:hover {
   color: #fecaca;
 }
 
+.report-alert--success {
+  background: rgba(20, 83, 45, 0.72);
+  border: 1px solid rgba(74, 222, 128, 0.32);
+  color: #dcfce7;
+}
+
 /* Section title */
 .report-section-title {
   font-weight: 900;

@@ -10,4 +10,6 @@ android/local.properties
 output/*.apk
 output/*.aab
 output/playwright/
+output/device-backup/
 recovery/
+src/app/recoveryPayload.local.ts

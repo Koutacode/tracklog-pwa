@@ -1,5 +1,6 @@
 import { BrowserRouter, Routes, Route } from 'react-router-dom';
 import IcResolverJob from './IcResolverJob';
+import LocalRecoveryBootstrap from './LocalRecoveryBootstrap';
 import NativeUpdateNotice from './NativeUpdateNotice';
 import RouteTrackingSupervisor from './RouteTrackingSupervisor';
 import { APP_VERSION } from './version';
@@ -24,6 +25,7 @@ export default function App() {
   return (
     <BrowserRouter basename={routerBase}>
       <IcResolverJob />
+      <LocalRecoveryBootstrap />
       <NativeUpdateNotice />
       <RouteTrackingSupervisor />
       <Routes>

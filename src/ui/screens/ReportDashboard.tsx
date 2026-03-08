@@ -16,7 +16,7 @@ import {
   deleteReportTrip,
   getReportTripsByMonth,
 } from '../../db/reportRepository';
-import { uuid } from '../../db/repositories';
+import { restoreSnapshotJson, uuid } from '../../db/repositories';
 
 // --- Status colors ---
 const STATUS_COLORS: Record<string, string> = {
@@ -209,10 +209,12 @@ function NewTripTab({ onSaved }: { onSaved: (trip: Trip) => void }) {
   const [jsonText, setJsonText] = useState('');
   const [label, setLabel] = useState('');
   const [parseError, setParseError] = useState<string | null>(null);
+  const [restoreMessage, setRestoreMessage] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
   async function handleSubmit() {
     setParseError(null);
+    setRestoreMessage(null);
     if (!jsonText.trim()) {
       setParseError('JSONを入力してください');
       return;
@@ -230,6 +232,31 @@ function NewTripTab({ onSaved }: { onSaved: (trip: Trip) => void }) {
     } catch (e: any) {
       setSaving(false);
       setParseError(e?.message ?? 'JSONのパースに失敗しました');
+    }
+  }
+
+  async function handleRestore() {
+    setParseError(null);
+    setRestoreMessage(null);
+    if (!jsonText.trim()) {
+      setParseError('JSONを入力してください');
+      return;
+    }
+    if (!window.confirm('この JSON から現行運行を復元します。未終了の運行があればアクティブ状態として戻します。続けますか？')) {
+      return;
+    }
+    try {
+      setSaving(true);
+      const result = await restoreSnapshotJson(jsonText.trim());
+      setSaving(false);
+      setRestoreMessage(
+        result.activeTripId
+          ? `復元しました。${result.importedEvents}件のイベントを戻し、未終了の運行をアクティブにしました。ホームで確認してください。`
+          : `復元しました。${result.importedEvents}件のイベントを戻しました。`
+      );
+    } catch (e: any) {
+      setSaving(false);
+      setParseError(e?.message ?? 'JSON からの復元に失敗しました');
     }
   }
 
@@ -257,6 +284,7 @@ function NewTripTab({ onSaved }: { onSaved: (trip: Trip) => void }) {
         />
       </div>
       {parseError && <div className="report-alert report-alert--danger">{parseError}</div>}
+      {restoreMessage && <div className="report-alert report-alert--success">{restoreMessage}</div>}
       <button
         className="report-btn report-btn--primary"
         onClick={() => void handleSubmit()}
@@ -265,6 +293,17 @@ function NewTripTab({ onSaved }: { onSaved: (trip: Trip) => void }) {
       >
         {saving ? '保存中...' : '登録する'}
       </button>
+      <button
+        className="report-btn"
+        onClick={() => void handleRestore()}
+        disabled={saving}
+        style={{ width: '100%', marginTop: 10 }}
+      >
+        {saving ? '復元中...' : '現行運行へ復元する'}
+      </button>
+      <div className="report-section-caption" style={{ marginTop: 10 }}>
+        `events` 付きスナップショットか `operation_log` 形式を復元できます。`operation_log` は運行開始・休憩・休息・積込・荷卸・給油の時刻を再構成し、未終了の `trip_start` があれば運行中として戻します。
+      </div>
     </div>
   );
 }
