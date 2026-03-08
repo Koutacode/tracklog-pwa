@@ -1,10 +1,8 @@
-import { useEffect } from 'react';
 import { BrowserRouter, Routes, Route } from 'react-router-dom';
 import IcResolverJob from './IcResolverJob';
 import NativeUpdateNotice from './NativeUpdateNotice';
 import RouteTrackingSupervisor from './RouteTrackingSupervisor';
 import { APP_VERSION } from './version';
-import { initNativeExpresswayPrompt } from '../services/nativeExpresswayPrompt';
 
 // Screens
 import HomeScreen from '../ui/screens/HomeScreen';
@@ -23,10 +21,6 @@ const routerBase = import.meta.env.BASE_URL;
  * version is displayed in the bottom-right corner for debugging.
  */
 export default function App() {
-  useEffect(() => {
-    void initNativeExpresswayPrompt();
-  }, []);
-
   return (
     <BrowserRouter basename={routerBase}>
       <IcResolverJob />

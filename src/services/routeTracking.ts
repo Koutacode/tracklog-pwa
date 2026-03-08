@@ -1,22 +1,7 @@
 import { Capacitor, registerPlugin } from '@capacitor/core';
 import type { BackgroundGeolocationPlugin } from '@capacitor-community/background-geolocation';
-import {
-  addRoutePoint,
-  clearPendingExpresswayEndDecision,
-  clearPendingExpresswayEndPrompt,
-  DEFAULT_AUTO_EXPRESSWAY_CONFIG,
-  getAutoExpresswayConfig,
-  getEventsByTripId,
-  getPendingExpresswayEndDecision,
-  pruneRoutePointsForRetention,
-  setPendingExpresswayEndPrompt,
-  startExpressway,
-  updateExpresswayResolved,
-} from '../db/repositories';
-import type { AppEvent } from '../domain/types';
-import type { AutoExpresswayConfig, AutoExpresswayDecisionReason, RouteTrackingMode } from '../db/repositories';
-import { detectExpresswaySignal } from './icResolver';
-import { cancelNativeExpresswayEndPrompt, showNativeExpresswayEndPrompt } from './nativeExpresswayPrompt';
+import { addRoutePoint, pruneRoutePointsForRetention } from '../db/repositories';
+import type { RouteTrackingMode } from '../db/repositories';
 
 const BackgroundGeolocation = registerPlugin<BackgroundGeolocationPlugin>('BackgroundGeolocation');
 
@@ -30,6 +15,8 @@ let pendingRecordCount = 0;
 let droppedRecordCount = 0;
 let lastDropWarningAt = 0;
 let routePointRetentionRunAt = 0;
+let smoothedSpeedKmh: number | null = null;
+
 const MAX_PENDING_RECORDS = 120;
 const MAX_STALE_POINT_AGE_MS = 90 * 1000;
 const DROP_WARNING_INTERVAL_MS = 60 * 1000;
@@ -72,49 +59,6 @@ const MODE_CONFIG: Record<RouteTrackingMode, ModeConfig> = {
 };
 
 let modeConfig = MODE_CONFIG.precision;
-let autoExpresswayConfigCache: AutoExpresswayConfig = DEFAULT_AUTO_EXPRESSWAY_CONFIG;
-let autoExpresswayConfigLoadedAt = 0;
-let expresswayOpenCache: { tripId: string | null; checkedAt: number; isOpen: boolean } = {
-  tripId: null,
-  checkedAt: 0,
-  isOpen: false,
-};
-const expresswayRuntime = {
-  speedAboveSince: null as number | null,
-  speedBelowSince: null as number | null,
-  speedRecoveredSince: null as number | null,
-  lastSpeedMs: null as number | null,
-  lastSpeedAt: null as number | null,
-  lastStrongAccelAt: null as number | null,
-  lastStrongAccelGeo: null as { lat: number; lng: number; at: number } | null,
-  lastStrongDecelAt: null as number | null,
-  smoothedSpeedKmh: null as number | null,
-  lastEndPromptAt: 0,
-  lastKeepDecisionCheckAt: 0,
-  endPromptOutstanding: false,
-  inFlight: false,
-  lastActionAt: 0,
-  startSignalFirstAt: null as number | null,
-  startSignalLastAt: null as number | null,
-  startSignalHits: 0,
-};
-
-const AUTO_EXPRESSWAY_ACCEL_PROFILE = {
-  startAccelMs2: 0.18,
-  startAccelWindowMs: 75 * 1000,
-  endDecelMs2: -0.28,
-  endDecelWindowMs: 90 * 1000,
-  endPromptCooldownMs: 45 * 1000,
-  endResetMarginKmh: 8,
-  endResetHoldMs: 20 * 1000,
-  endNoDecelFallbackMs: 75 * 1000,
-};
-
-const AUTO_EXPRESSWAY_START_CONFIRM = {
-  minHits: 2,
-  minHoldMs: 12 * 1000,
-  maxGapMs: 25 * 1000,
-};
 
 type LocationPayload = {
   lat: number;
@@ -133,65 +77,9 @@ function applyMode(mode: RouteTrackingMode) {
   return config;
 }
 
-function resetAutoExpresswayRuntime() {
-  expresswayRuntime.speedAboveSince = null;
-  expresswayRuntime.speedBelowSince = null;
-  expresswayRuntime.speedRecoveredSince = null;
-  expresswayRuntime.lastSpeedMs = null;
-  expresswayRuntime.lastSpeedAt = null;
-  expresswayRuntime.lastStrongAccelAt = null;
-  expresswayRuntime.lastStrongAccelGeo = null;
-  expresswayRuntime.lastStrongDecelAt = null;
-  expresswayRuntime.smoothedSpeedKmh = null;
-  expresswayRuntime.lastEndPromptAt = 0;
-  expresswayRuntime.lastKeepDecisionCheckAt = 0;
-  expresswayRuntime.endPromptOutstanding = false;
-  expresswayRuntime.inFlight = false;
-  expresswayRuntime.lastActionAt = 0;
-  expresswayRuntime.startSignalFirstAt = null;
-  expresswayRuntime.startSignalLastAt = null;
-  expresswayRuntime.startSignalHits = 0;
-  expresswayOpenCache = { tripId: activeTripId, checkedAt: 0, isOpen: false };
-}
-
-function resetStartSignalCandidate() {
-  expresswayRuntime.startSignalFirstAt = null;
-  expresswayRuntime.startSignalLastAt = null;
-  expresswayRuntime.startSignalHits = 0;
-}
-
-function buildAutoDecisionReason(params: {
-  action: 'start' | 'end-prompt';
-  now: number;
-  speedKmh: number;
-  accelerationMs2: number | null;
-  accuracyM: number | null;
-  signal: Awaited<ReturnType<typeof detectExpresswaySignal>>;
-  config: AutoExpresswayConfig;
-  confirm?: AutoExpresswayDecisionReason['confirm'];
-}): AutoExpresswayDecisionReason {
-  const { action, now, speedKmh, accelerationMs2, accuracyM, signal, config, confirm } = params;
-  return {
-    source: 'native-auto',
-    action,
-    evaluatedAt: new Date(now).toISOString(),
-    speedKmh: Math.round(speedKmh),
-    ...(accelerationMs2 != null ? { accelerationMs2: Number(accelerationMs2.toFixed(3)) } : {}),
-    ...(accuracyM != null ? { accuracyM: Math.round(accuracyM) } : {}),
-    signalResolved: signal.resolved,
-    onExpresswayRoad: signal.onExpresswayRoad,
-    nearIc: signal.nearIc,
-    nearEtcGate: signal.nearEtcGate,
-    ...(signal.nearestIc?.icName ? { nearestIcName: signal.nearestIc.icName } : {}),
-    ...(signal.nearestIc?.distanceM != null ? { nearestIcDistanceM: Math.round(signal.nearestIc.distanceM) } : {}),
-    config: {
-      startSpeedKmh: config.speedKmh,
-      startDurationSec: config.durationSec,
-      endSpeedKmh: config.endSpeedKmh,
-      endDurationSec: config.endDurationSec,
-    },
-    ...(confirm ? { confirm } : {}),
-  };
+function resetTrackingRuntime() {
+  lastPoint = null;
+  smoothedSpeedKmh = null;
 }
 
 function maybeRunRoutePointRetention() {
@@ -251,14 +139,13 @@ function fuseSpeedKmh(
   return sensorSpeedKmh * sensorWeight + inferredSpeedKmh * (1 - sensorWeight);
 }
 
-function smoothSpeedKmh(nextSpeedKmh: number | null, accuracyM: number | null): number | null {
+function smoothSpeedEstimate(nextSpeedKmh: number | null, accuracyM: number | null): number | null {
   if (nextSpeedKmh == null) {
-    expresswayRuntime.smoothedSpeedKmh = null;
+    smoothedSpeedKmh = null;
     return null;
   }
-  const prev = expresswayRuntime.smoothedSpeedKmh;
-  if (prev == null) {
-    expresswayRuntime.smoothedSpeedKmh = nextSpeedKmh;
+  if (smoothedSpeedKmh == null) {
+    smoothedSpeedKmh = nextSpeedKmh;
     return nextSpeedKmh;
   }
   let alpha = 0.34;
@@ -266,338 +153,8 @@ function smoothSpeedKmh(nextSpeedKmh: number | null, accuracyM: number | null): 
     if (accuracyM <= 10) alpha = 0.46;
     else if (accuracyM >= 35) alpha = 0.22;
   }
-  const smoothed = prev + alpha * (nextSpeedKmh - prev);
-  expresswayRuntime.smoothedSpeedKmh = smoothed;
-  return smoothed;
-}
-
-function deriveAccelerationMs2(speedMs: number | null, nowMs: number): number | null {
-  const prevSpeedMs = expresswayRuntime.lastSpeedMs;
-  const prevAt = expresswayRuntime.lastSpeedAt;
-  expresswayRuntime.lastSpeedMs = speedMs;
-  expresswayRuntime.lastSpeedAt = nowMs;
-  if (speedMs == null || prevSpeedMs == null || prevAt == null) return null;
-  const dtSec = (nowMs - prevAt) / 1000;
-  if (!Number.isFinite(dtSec) || dtSec < 1 || dtSec > 20) return null;
-  return (speedMs - prevSpeedMs) / dtSec;
-}
-
-function hasOpenExpressway(events: AppEvent[]): boolean {
-  const starts = events
-    .filter(e => e.type === 'expressway_start')
-    .sort((a, b) => a.ts.localeCompare(b.ts));
-  if (starts.length === 0) return false;
-  const ends = events.filter(e => e.type === 'expressway_end');
-  for (let i = starts.length - 1; i >= 0; i--) {
-    const sid = (starts[i] as any).extras?.expresswaySessionId as string | undefined;
-    if (!sid) continue;
-    const hasEnd = ends.some(en => (en as any).extras?.expresswaySessionId === sid);
-    if (!hasEnd) return true;
-  }
-  const lastStart = starts[starts.length - 1];
-  return !!lastStart && !ends.some(en => en.ts > lastStart.ts);
-}
-
-async function loadAutoExpresswayConfigCached(now: number): Promise<AutoExpresswayConfig> {
-  if (now - autoExpresswayConfigLoadedAt < 15000) return autoExpresswayConfigCache;
-  autoExpresswayConfigLoadedAt = now;
-  try {
-    autoExpresswayConfigCache = await getAutoExpresswayConfig();
-  } catch {
-    // keep previous config
-  }
-  return autoExpresswayConfigCache;
-}
-
-function setExpresswayOpenCache(tripId: string | null, isOpen: boolean, now: number) {
-  expresswayOpenCache = { tripId, isOpen, checkedAt: now };
-}
-
-async function getExpresswayOpenCached(tripId: string, now: number): Promise<boolean> {
-  if (expresswayOpenCache.tripId === tripId && now - expresswayOpenCache.checkedAt < 5000) {
-    return expresswayOpenCache.isOpen;
-  }
-  const events = await getEventsByTripId(tripId);
-  const isOpen = hasOpenExpressway(events);
-  setExpresswayOpenCache(tripId, isOpen, now);
-  return isOpen;
-}
-
-async function consumeKeepDecisionIfAny(tripId: string, now: number) {
-  if (now - expresswayRuntime.lastKeepDecisionCheckAt < 3000) return;
-  expresswayRuntime.lastKeepDecisionCheckAt = now;
-  let decision: Awaited<ReturnType<typeof getPendingExpresswayEndDecision>> = null;
-  try {
-    decision = await getPendingExpresswayEndDecision();
-  } catch {
-    return;
-  }
-  if (!decision || decision.tripId !== tripId || decision.action !== 'keep') return;
-  const decidedAtMs = Date.parse(decision.decidedAt);
-  const actionAt = Number.isFinite(decidedAtMs) ? decidedAtMs : now;
-  expresswayRuntime.lastActionAt = Math.max(expresswayRuntime.lastActionAt, actionAt);
-  expresswayRuntime.lastEndPromptAt = Math.max(expresswayRuntime.lastEndPromptAt, actionAt);
-  expresswayRuntime.speedBelowSince = now;
-  expresswayRuntime.speedRecoveredSince = null;
-  expresswayRuntime.endPromptOutstanding = false;
-  await clearPendingExpresswayEndPrompt(tripId);
-  await clearPendingExpresswayEndDecision(tripId);
-  await cancelNativeExpresswayEndPrompt(tripId);
-}
-
-function pickBestEntryIcCandidate(
-  candidates: Array<{ signal: Awaited<ReturnType<typeof detectExpresswaySignal>>; source: 'now' | 'accel' }>,
-) {
-  const mapped = candidates
-    .filter(item => !!item.signal?.nearestIc)
-    .map(item => ({
-      source: item.source,
-      icName: item.signal.nearestIc!.icName,
-      distanceM: item.signal.nearestIc!.distanceM,
-      near: item.signal.nearIc || item.signal.nearEtcGate,
-    }));
-  if (mapped.length === 0) return null;
-  mapped.sort((a, b) => {
-    if (a.near !== b.near) return a.near ? -1 : 1;
-    if (a.distanceM !== b.distanceM) return a.distanceM - b.distanceM;
-    if (a.source !== b.source) return a.source === 'accel' ? -1 : 1;
-    return 0;
-  });
-  return mapped[0];
-}
-
-async function maybeHandleNativeAutoExpressway(params: LocationPayload, effectiveSpeedKmh: number | null) {
-  if (!Capacitor.isNativePlatform() || !activeTripId) return;
-  const now = typeof params.time === 'number' && Number.isFinite(params.time) ? params.time : Date.now();
-  const config = await loadAutoExpresswayConfigCached(now);
-  const speedKmh = effectiveSpeedKmh;
-  const accelMs2 = deriveAccelerationMs2(speedKmhToMs(speedKmh), now);
-  if (accelMs2 != null) {
-    if (accelMs2 >= AUTO_EXPRESSWAY_ACCEL_PROFILE.startAccelMs2) {
-      expresswayRuntime.lastStrongAccelAt = now;
-      expresswayRuntime.lastStrongAccelGeo = { lat: params.lat, lng: params.lng, at: now };
-    }
-    if (accelMs2 <= AUTO_EXPRESSWAY_ACCEL_PROFILE.endDecelMs2) {
-      expresswayRuntime.lastStrongDecelAt = now;
-    }
-  }
-  if (speedKmh == null) {
-    expresswayRuntime.speedAboveSince = null;
-    expresswayRuntime.speedBelowSince = null;
-    expresswayRuntime.speedRecoveredSince = null;
-    resetStartSignalCandidate();
-    return;
-  }
-  const tripId = activeTripId;
-  const isOpen = await getExpresswayOpenCached(tripId, now);
-  if (isOpen) {
-    await consumeKeepDecisionIfAny(tripId, now);
-  }
-  const cooldownMs = 60 * 1000;
-  if (expresswayRuntime.inFlight || now - expresswayRuntime.lastActionAt < cooldownMs) return;
-
-  const geo = {
-    lat: params.lat,
-    lng: params.lng,
-    accuracy: params.accuracy ?? undefined,
-  };
-
-  if (isOpen) {
-    resetStartSignalCandidate();
-    expresswayRuntime.speedAboveSince = null;
-    const recoverThreshold = config.endSpeedKmh + AUTO_EXPRESSWAY_ACCEL_PROFILE.endResetMarginKmh;
-    if (speedKmh >= recoverThreshold) {
-      if (expresswayRuntime.speedRecoveredSince == null) {
-        expresswayRuntime.speedRecoveredSince = now;
-      }
-      const recoveredLongEnough =
-        now - expresswayRuntime.speedRecoveredSince >= AUTO_EXPRESSWAY_ACCEL_PROFILE.endResetHoldMs;
-      if (recoveredLongEnough && expresswayRuntime.endPromptOutstanding) {
-        await clearPendingExpresswayEndPrompt(tripId);
-        await clearPendingExpresswayEndDecision(tripId);
-        await cancelNativeExpresswayEndPrompt(tripId);
-        expresswayRuntime.endPromptOutstanding = false;
-      }
-      expresswayRuntime.speedBelowSince = null;
-      return;
-    }
-    expresswayRuntime.speedRecoveredSince = null;
-    if (speedKmh >= config.endSpeedKmh) {
-      expresswayRuntime.speedBelowSince = null;
-      return;
-    }
-    if (expresswayRuntime.speedBelowSince == null) {
-      expresswayRuntime.speedBelowSince = now;
-      return;
-    }
-    const lowSpeedSustained = now - expresswayRuntime.speedBelowSince >= config.endDurationSec * 1000;
-    const strongDecelRecent =
-      expresswayRuntime.lastStrongDecelAt != null &&
-      now - expresswayRuntime.lastStrongDecelAt <= AUTO_EXPRESSWAY_ACCEL_PROFILE.endDecelWindowMs;
-    const stopLikeSustained = lowSpeedSustained && speedKmh <= 20;
-    const noDecelFallbackReached =
-      now - expresswayRuntime.speedBelowSince >=
-      Math.max(config.endDurationSec * 1000, AUTO_EXPRESSWAY_ACCEL_PROFILE.endNoDecelFallbackMs);
-    if (!lowSpeedSustained || (!strongDecelRecent && !stopLikeSustained && !noDecelFallbackReached)) return;
-    if (now - expresswayRuntime.lastEndPromptAt < AUTO_EXPRESSWAY_ACCEL_PROFILE.endPromptCooldownMs) return;
-    expresswayRuntime.inFlight = true;
-    try {
-      const signal = await detectExpresswaySignal(geo.lat, geo.lng);
-      const allowEndBySignal = !signal.resolved || signal.nearIc || signal.nearEtcGate || !signal.onExpresswayRoad;
-      if (!allowEndBySignal) {
-        expresswayRuntime.speedBelowSince = now;
-        return;
-      }
-      const reason = buildAutoDecisionReason({
-        action: 'end-prompt',
-        now,
-        speedKmh,
-        accelerationMs2: accelMs2,
-        accuracyM: geo.accuracy ?? null,
-        signal,
-        config,
-      });
-      const prompt = {
-        tripId,
-        speedKmh: Math.round(speedKmh),
-        detectedAt: new Date(now).toISOString(),
-        geo,
-        reason,
-      } as const;
-      await setPendingExpresswayEndPrompt(prompt);
-      const shown = await showNativeExpresswayEndPrompt(prompt);
-      expresswayRuntime.lastEndPromptAt = now;
-      if (shown) {
-        expresswayRuntime.lastActionAt = now;
-        expresswayRuntime.endPromptOutstanding = true;
-      } else {
-        // Keep candidate warm so the app can retry after short sustained low-speed.
-        expresswayRuntime.endPromptOutstanding = false;
-      }
-      setExpresswayOpenCache(tripId, true, now);
-      expresswayRuntime.speedBelowSince = shown ? null : now;
-    } catch {
-      setExpresswayOpenCache(tripId, true, 0);
-    } finally {
-      expresswayRuntime.inFlight = false;
-    }
-    return;
-  }
-
-  expresswayRuntime.speedBelowSince = null;
-  expresswayRuntime.speedRecoveredSince = null;
-  expresswayRuntime.endPromptOutstanding = false;
-  if (speedKmh < config.speedKmh) {
-    expresswayRuntime.speedAboveSince = null;
-    resetStartSignalCandidate();
-    if (speedKmh >= 0 && speedKmh < config.speedKmh * 0.8) {
-      expresswayRuntime.lastStrongAccelAt = null;
-      expresswayRuntime.lastStrongAccelGeo = null;
-    }
-    return;
-  }
-  if (expresswayRuntime.speedAboveSince == null) {
-    expresswayRuntime.speedAboveSince = now;
-    return;
-  }
-  const strongAccelRecent =
-    expresswayRuntime.lastStrongAccelAt != null &&
-    now - expresswayRuntime.lastStrongAccelAt <= AUTO_EXPRESSWAY_ACCEL_PROFILE.startAccelWindowMs;
-  if (!strongAccelRecent) {
-    resetStartSignalCandidate();
-    return;
-  }
-  if (now - expresswayRuntime.speedAboveSince < config.durationSec * 1000) return;
-  const accelGeoCandidate =
-    expresswayRuntime.lastStrongAccelGeo &&
-    now - expresswayRuntime.lastStrongAccelGeo.at <= AUTO_EXPRESSWAY_ACCEL_PROFILE.startAccelWindowMs
-      ? expresswayRuntime.lastStrongAccelGeo
-      : null;
-  expresswayRuntime.inFlight = true;
-  try {
-    const [signalNow, signalAccel] = await Promise.all([
-      detectExpresswaySignal(geo.lat, geo.lng),
-      accelGeoCandidate ? detectExpresswaySignal(accelGeoCandidate.lat, accelGeoCandidate.lng) : Promise.resolve(null),
-    ]);
-    const signalCandidates: Array<{
-      signal: Awaited<ReturnType<typeof detectExpresswaySignal>>;
-      source: 'now' | 'accel';
-    }> = [{ signal: signalNow, source: 'now' }];
-    if (signalAccel) signalCandidates.push({ signal: signalAccel, source: 'accel' as const });
-    const allowStartBySignal = signalCandidates.some(
-      item => item.signal.onExpresswayRoad || item.signal.nearEtcGate,
-    );
-    if (!allowStartBySignal) {
-      resetStartSignalCandidate();
-      expresswayRuntime.speedAboveSince = now;
-      return;
-    }
-    if (
-      expresswayRuntime.startSignalFirstAt == null ||
-      expresswayRuntime.startSignalLastAt == null ||
-      now - expresswayRuntime.startSignalLastAt > AUTO_EXPRESSWAY_START_CONFIRM.maxGapMs
-    ) {
-      expresswayRuntime.startSignalFirstAt = now;
-      expresswayRuntime.startSignalLastAt = now;
-      expresswayRuntime.startSignalHits = 1;
-      return;
-    }
-    expresswayRuntime.startSignalLastAt = now;
-    expresswayRuntime.startSignalHits += 1;
-    const confirmElapsedMs = Math.max(0, now - expresswayRuntime.startSignalFirstAt);
-    if (
-      expresswayRuntime.startSignalHits < AUTO_EXPRESSWAY_START_CONFIRM.minHits ||
-      confirmElapsedMs < AUTO_EXPRESSWAY_START_CONFIRM.minHoldMs
-    ) {
-      return;
-    }
-    expresswayRuntime.speedAboveSince = null;
-    await clearPendingExpresswayEndPrompt(tripId);
-    await clearPendingExpresswayEndDecision(tripId);
-    await cancelNativeExpresswayEndPrompt(tripId);
-    const startSignal =
-      signalCandidates.find(item => item.signal.onExpresswayRoad || item.signal.nearEtcGate)?.signal ?? signalNow;
-    const reason = buildAutoDecisionReason({
-      action: 'start',
-      now,
-      speedKmh,
-      accelerationMs2: accelMs2,
-      accuracyM: geo.accuracy ?? null,
-      signal: startSignal,
-      config,
-      confirm: {
-        hits: expresswayRuntime.startSignalHits,
-        elapsedMs: confirmElapsedMs,
-        minHits: AUTO_EXPRESSWAY_START_CONFIRM.minHits,
-        minHoldMs: AUTO_EXPRESSWAY_START_CONFIRM.minHoldMs,
-      },
-    });
-    const { eventId } = await startExpressway({ tripId, geo, autoDecision: reason });
-    const bestEntryIc = pickBestEntryIcCandidate(signalCandidates);
-    if (bestEntryIc) {
-      await updateExpresswayResolved({
-        eventId,
-        status: 'resolved',
-        icName: bestEntryIc.icName,
-        icDistanceM: bestEntryIc.distanceM,
-      });
-    }
-    expresswayRuntime.lastActionAt = now;
-    setExpresswayOpenCache(tripId, true, now);
-    resetStartSignalCandidate();
-  } catch (error) {
-    const message = error instanceof Error ? error.message : '';
-    if (message.includes('開始済み')) {
-      setExpresswayOpenCache(tripId, true, now);
-      expresswayRuntime.lastActionAt = now;
-      resetStartSignalCandidate();
-    } else {
-      setExpresswayOpenCache(tripId, false, 0);
-      resetStartSignalCandidate();
-    }
-  } finally {
-    expresswayRuntime.inFlight = false;
-  }
+  smoothedSpeedKmh = smoothedSpeedKmh + alpha * (nextSpeedKmh - smoothedSpeedKmh);
+  return smoothedSpeedKmh;
 }
 
 async function recordLocation(params: LocationPayload) {
@@ -610,8 +167,9 @@ async function recordLocation(params: LocationPayload) {
   if (accuracy != null && accuracy > modeConfig.maxAccuracyM) {
     return;
   }
+
   let inferredSpeedKmh: number | null = null;
-  let sensorSpeedKmh: number | null = speedMsToKmh(params.speed);
+  const sensorSpeedKmh = speedMsToKmh(params.speed);
   if (lastPoint) {
     const dt = now - lastPoint.at;
     const dist = distanceMeters(lastPoint, { lat: params.lat, lng: params.lng });
@@ -628,11 +186,13 @@ async function recordLocation(params: LocationPayload) {
     }
     if (dt < modeConfig.minTimeMs && dist < modeConfig.minDistanceM) return;
   }
-  const fusedSpeedKmh = smoothSpeedKmh(
+
+  const fusedSpeedKmh = smoothSpeedEstimate(
     fuseSpeedKmh(sensorSpeedKmh, inferredSpeedKmh, accuracy),
     accuracy,
   );
   const fusedSpeedMs = speedKmhToMs(fusedSpeedKmh);
+
   lastPoint = { lat: params.lat, lng: params.lng, at: now };
   await addRoutePoint({
     tripId: activeTripId,
@@ -644,13 +204,6 @@ async function recordLocation(params: LocationPayload) {
     heading: params.heading ?? null,
     source: params.source,
   });
-  await maybeHandleNativeAutoExpressway(
-    {
-      ...params,
-      speed: fusedSpeedMs ?? params.speed ?? null,
-    },
-    fusedSpeedKmh,
-  );
 }
 
 function enqueueRecordLocation(params: LocationPayload): Promise<void> {
@@ -688,12 +241,11 @@ export async function startRouteTracking(tripId: string, mode: RouteTrackingMode
   }
   const config = applyMode(mode);
   activeTripId = tripId;
-  lastPoint = null;
+  resetTrackingRuntime();
   recordQueue = Promise.resolve();
   pendingRecordCount = 0;
   droppedRecordCount = 0;
   lastDropWarningAt = 0;
-  resetAutoExpresswayRuntime();
   maybeRunRoutePointRetention();
 
   if (Capacitor.isNativePlatform()) {
@@ -708,7 +260,6 @@ export async function startRouteTracking(tripId: string, mode: RouteTrackingMode
       },
       async (location, error) => {
         if (error) {
-          // NOT_AUTHORIZED is handled in UI
           return;
         }
         if (!location) return;
@@ -749,12 +300,11 @@ export async function startRouteTracking(tripId: string, mode: RouteTrackingMode
 
 export async function stopRouteTracking() {
   activeTripId = null;
-  lastPoint = null;
+  resetTrackingRuntime();
   recordQueue = Promise.resolve();
   pendingRecordCount = 0;
   droppedRecordCount = 0;
   lastDropWarningAt = 0;
-  resetAutoExpresswayRuntime();
   if (bgWatcherId) {
     const id = bgWatcherId;
     bgWatcherId = null;

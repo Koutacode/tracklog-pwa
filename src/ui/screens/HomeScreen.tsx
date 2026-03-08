@@ -24,24 +24,17 @@ import {
   addPointMark,
   startExpressway,
   endExpressway,
-  deleteEvent,
   updateExpresswayResolved,
   backfillMissingAddresses,
   clearPendingExpresswayEndDecision,
   clearPendingExpresswayEndPrompt,
-  getAutoExpresswayConfig,
-  getPendingExpresswayEndDecision,
-  getPendingExpresswayEndPrompt,
-  setAutoExpresswayConfig,
-  setPendingExpresswayEndPrompt,
   getRouteTrackingMode,
   setRouteTrackingMode,
-  DEFAULT_AUTO_EXPRESSWAY_CONFIG,
   DEFAULT_ROUTE_TRACKING_MODE,
 } from '../../db/repositories';
-import type { AutoExpresswayConfig, RouteTrackingMode } from '../../db/repositories';
-import type { AppEvent, Geo } from '../../domain/types';
-import { detectExpresswaySignal, resolveNearestIC } from '../../services/icResolver';
+import type { RouteTrackingMode } from '../../db/repositories';
+import type { AppEvent } from '../../domain/types';
+import { resolveNearestIC } from '../../services/icResolver';
 import { openNativeSettings, startRouteTracking, stopRouteTracking } from '../../services/routeTracking';
 import { cancelNativeExpresswayEndPrompt } from '../../services/nativeExpresswayPrompt';
 import { runStartupDiagnostics, type StartupDiagnosticItem } from '../../services/startupDiagnostics';
@@ -64,61 +57,6 @@ function fmtDuration(ms: number) {
 }
 
 const LATEST_APK_URL = DEFAULT_APK_DOWNLOAD_URL;
-const AUTO_EXPRESSWAY_ACCEL_PROFILE = {
-  startAccelMs2: 0.18,
-  startAccelWindowMs: 75 * 1000,
-  endDecelMs2: -0.28,
-  endDecelWindowMs: 90 * 1000,
-  endPromptCooldownMs: 45 * 1000,
-};
-
-function distanceMeters(a: { lat: number; lng: number }, b: { lat: number; lng: number }) {
-  const toRad = (v: number) => (v * Math.PI) / 180;
-  const r = 6371000;
-  const dLat = toRad(b.lat - a.lat);
-  const dLng = toRad(b.lng - a.lng);
-  const lat1 = toRad(a.lat);
-  const lat2 = toRad(b.lat);
-  const sin1 = Math.sin(dLat / 2);
-  const sin2 = Math.sin(dLng / 2);
-  const h = sin1 * sin1 + Math.cos(lat1) * Math.cos(lat2) * sin2 * sin2;
-  return 2 * r * Math.asin(Math.min(1, Math.sqrt(h)));
-}
-
-function fuseSpeedKmh(
-  sensorSpeedKmh: number | null,
-  inferredSpeedKmh: number | null,
-  accuracyM: number | null,
-): number | null {
-  if (sensorSpeedKmh == null && inferredSpeedKmh == null) return null;
-  if (sensorSpeedKmh == null) return inferredSpeedKmh;
-  if (inferredSpeedKmh == null) return sensorSpeedKmh;
-  let sensorWeight = 0.62;
-  if (accuracyM != null) {
-    if (accuracyM <= 12) sensorWeight = 0.76;
-    else if (accuracyM >= 40) sensorWeight = 0.4;
-  }
-  const delta = Math.abs(sensorSpeedKmh - inferredSpeedKmh);
-  if (delta >= 24) {
-    sensorWeight = Math.min(sensorWeight, 0.35);
-  }
-  return sensorSpeedKmh * sensorWeight + inferredSpeedKmh * (1 - sensorWeight);
-}
-
-function smoothSpeedKmh(
-  prevSpeedKmh: number | null,
-  nextSpeedKmh: number | null,
-  accuracyM: number | null,
-): number | null {
-  if (nextSpeedKmh == null) return null;
-  if (prevSpeedKmh == null) return nextSpeedKmh;
-  let alpha = 0.34;
-  if (accuracyM != null) {
-    if (accuracyM <= 10) alpha = 0.46;
-    else if (accuracyM >= 35) alpha = 0.22;
-  }
-  return prevSpeedKmh + alpha * (nextSpeedKmh - prevSpeedKmh);
-}
 
 // Helpers to find open sessions
 function getOpenRestSessionId(events: AppEvent[]): string | null {
@@ -173,36 +111,12 @@ export default function HomeScreen() {
   const [quickSetupMessage, setQuickSetupMessage] = useState<string | null>(null);
   const [apkUrlCopied, setApkUrlCopied] = useState(false);
   const [nativeSettingsOpen, setNativeSettingsOpen] = useState(false);
-  const [autoExpresswayConfig, setAutoExpresswayConfigState] = useState<AutoExpresswayConfig>(DEFAULT_AUTO_EXPRESSWAY_CONFIG);
-  const [autoExpresswaySettingsOpen, setAutoExpresswaySettingsOpen] = useState(false);
-  const [autoExpresswaySettingsError, setAutoExpresswaySettingsError] = useState<string | null>(null);
-  const [autoExpresswayDraft, setAutoExpresswayDraft] = useState({
-    speedKmh: String(DEFAULT_AUTO_EXPRESSWAY_CONFIG.speedKmh),
-    durationSec: String(DEFAULT_AUTO_EXPRESSWAY_CONFIG.durationSec),
-    endSpeedKmh: String(DEFAULT_AUTO_EXPRESSWAY_CONFIG.endSpeedKmh),
-    endDurationSec: String(DEFAULT_AUTO_EXPRESSWAY_CONFIG.endDurationSec),
-  });
-  const [autoExpresswayToast, setAutoExpresswayToast] = useState<null | { eventId: string; speedKmh: number }>(null);
-  const [autoExpresswayEndToast, setAutoExpresswayEndToast] = useState<null | { speedKmh: number; geo: Geo }>(null);
   const [voiceAvailable, setVoiceAvailable] = useState(false);
   const [voiceListening, setVoiceListening] = useState(false);
   const [voiceLastText, setVoiceLastText] = useState<string | null>(null);
   const [voiceResult, setVoiceResult] = useState<string | null>(null);
   const [voiceError, setVoiceError] = useState<string | null>(null);
   const breakReminderTimer = useRef<number | null>(null);
-  const speedWatchId = useRef<number | null>(null);
-  const autoExpresswayInFlight = useRef(false);
-  const lastAutoExpresswayAt = useRef<number | null>(null);
-  const speedAboveSince = useRef<number | null>(null);
-  const speedBelowSince = useRef<number | null>(null);
-  const lastSpeedSample = useRef<{ speedMs: number; at: number } | null>(null);
-  const lastCoordSample = useRef<{ lat: number; lng: number; at: number } | null>(null);
-  const smoothedSpeedKmhRef = useRef<number | null>(null);
-  const lastStrongAccelAt = useRef<number | null>(null);
-  const lastStrongDecelAt = useRef<number | null>(null);
-  const lastEndPromptNotifyAt = useRef<number>(0);
-  const autoExpresswayEndSuppressed = useRef(false);
-  const autoExpresswayToastTimer = useRef<number | null>(null);
   const apkUrlCopyTimer = useRef<number | null>(null);
 
   const openRestSessionId = useMemo(() => getOpenRestSessionId(events), [events]);
@@ -249,9 +163,6 @@ export default function HomeScreen() {
       if (active) {
         const ev = await getEventsByTripId(active);
         setEvents(ev);
-        const hasOpenExpressway = !!getOpenToggle(ev, 'expressway_start', 'expressway_end', 'expresswaySessionId');
-        void syncPendingExpresswayEndPrompt(active, hasOpenExpressway);
-        void applyPendingExpresswayEndDecision(active, hasOpenExpressway);
         void backfillAddresses(active);
         // Re-schedule break reminder based on open break session
         const openBreakId = getOpenToggle(ev, 'break_start', 'break_end', 'breakSessionId');
@@ -265,210 +176,12 @@ export default function HomeScreen() {
         }
       } else {
         setEvents([]);
-        void syncPendingExpresswayEndPrompt(null, false);
-        void applyPendingExpresswayEndDecision(null, false);
         void backfillAddresses(null);
         cancelBreakReminder();
       }
     } finally {
       setLoading(false);
     }
-  }
-
-  function showAutoExpresswayToast(eventId: string, speedKmh: number) {
-    if (autoExpresswayToastTimer.current != null) {
-      window.clearTimeout(autoExpresswayToastTimer.current);
-    }
-    setAutoExpresswayToast({ eventId, speedKmh });
-    autoExpresswayToastTimer.current = window.setTimeout(() => {
-      dismissAutoExpresswayToast();
-    }, 3000);
-  }
-
-  function dismissAutoExpresswayToast() {
-    if (autoExpresswayToastTimer.current != null) {
-      window.clearTimeout(autoExpresswayToastTimer.current);
-      autoExpresswayToastTimer.current = null;
-    }
-    setAutoExpresswayToast(null);
-  }
-
-  async function cancelAutoExpressway(eventId: string) {
-    dismissAutoExpresswayToast();
-    try {
-      await deleteEvent(eventId);
-      await refresh();
-    } catch (e: any) {
-      alert(e?.message ?? '自動開始の取り消しに失敗しました');
-    }
-  }
-
-  function dismissAutoExpresswayEndToast(suppress = true) {
-    if (suppress) {
-      autoExpresswayEndSuppressed.current = true;
-    }
-    if (tripId) {
-      void clearPendingExpresswayEndPrompt(tripId);
-      void clearPendingExpresswayEndDecision(tripId);
-      void cancelNativeExpresswayEndPrompt(tripId);
-    } else {
-      void clearPendingExpresswayEndPrompt();
-      void clearPendingExpresswayEndDecision();
-      void cancelNativeExpresswayEndPrompt();
-    }
-    setAutoExpresswayEndToast(null);
-  }
-
-  async function confirmAutoExpresswayEnd() {
-    if (!autoExpresswayEndToast || !tripId) return;
-    const geo = autoExpresswayEndToast.geo;
-    setAutoExpresswayEndToast(null);
-    try {
-      await endExpressway({ tripId, geo });
-      await clearPendingExpresswayEndPrompt(tripId);
-      await clearPendingExpresswayEndDecision(tripId);
-      await cancelNativeExpresswayEndPrompt(tripId);
-      lastAutoExpresswayAt.current = Date.now();
-      autoExpresswayEndSuppressed.current = false;
-      await refresh();
-    } catch (e: any) {
-      alert(e?.message ?? '高速道路の終了に失敗しました');
-    }
-  }
-
-  async function showExpresswayEndNotification(speedKmh: number) {
-    if (typeof Notification === 'undefined') return;
-    try {
-      if (Notification.permission === 'default') {
-        await Notification.requestPermission();
-      }
-    } catch {
-      return;
-    }
-    if (Notification.permission !== 'granted') return;
-    const options: NotificationOptions & { vibrate?: number[]; renotify?: boolean } = {
-      body: `低速状態を検知しました（${Math.round(speedKmh)} km/h）。高速終了か継続かを選択してください。`,
-      requireInteraction: true,
-      tag: 'tracklog-expressway-end-confirm',
-      renotify: true,
-      vibrate: [250, 120, 250],
-    };
-    try {
-      new Notification('TrackLog運行アシスト: 高速道路終了確認', options);
-    } catch {
-      // ignore
-    }
-  }
-
-  async function syncPendingExpresswayEndPrompt(activeTripId: string | null, hasOpenExpressway: boolean) {
-    if (!activeTripId) {
-      setAutoExpresswayEndToast(null);
-      await clearPendingExpresswayEndPrompt();
-      await clearPendingExpresswayEndDecision();
-      return;
-    }
-    if (!hasOpenExpressway) {
-      setAutoExpresswayEndToast(null);
-      await clearPendingExpresswayEndPrompt(activeTripId);
-      await clearPendingExpresswayEndDecision(activeTripId);
-      return;
-    }
-    const pending = await getPendingExpresswayEndPrompt();
-    if (!pending) {
-      if (!autoExpresswayEndSuppressed.current) {
-        setAutoExpresswayEndToast(null);
-      }
-      return;
-    }
-    if (pending.tripId !== activeTripId) {
-      await clearPendingExpresswayEndPrompt(pending.tripId);
-      if (!autoExpresswayEndSuppressed.current) {
-        setAutoExpresswayEndToast(null);
-      }
-      return;
-    }
-    if (autoExpresswayEndSuppressed.current) return;
-    setAutoExpresswayEndToast({
-      speedKmh: pending.speedKmh,
-      geo: pending.geo,
-    });
-  }
-
-  async function applyPendingExpresswayEndDecision(activeTripId: string | null, hasOpenExpressway: boolean) {
-    const decision = await getPendingExpresswayEndDecision();
-    if (!decision) return;
-    if (!activeTripId || decision.tripId !== activeTripId) {
-      await clearPendingExpresswayEndDecision(decision.tripId);
-      return;
-    }
-    if (decision.action === 'keep') {
-      autoExpresswayEndSuppressed.current = true;
-      setAutoExpresswayEndToast(null);
-      await clearPendingExpresswayEndPrompt(activeTripId);
-      await cancelNativeExpresswayEndPrompt(activeTripId);
-      return;
-    }
-    await clearPendingExpresswayEndDecision(activeTripId);
-    if (!hasOpenExpressway) {
-      await clearPendingExpresswayEndPrompt(activeTripId);
-      await cancelNativeExpresswayEndPrompt(activeTripId);
-      return;
-    }
-    const pending = await getPendingExpresswayEndPrompt();
-    const geo = decision.geo ?? (pending?.tripId === activeTripId ? pending.geo : undefined);
-    if (!geo) return;
-    try {
-      await endExpressway({ tripId: activeTripId, geo });
-      await clearPendingExpresswayEndPrompt(activeTripId);
-      await cancelNativeExpresswayEndPrompt(activeTripId);
-      autoExpresswayEndSuppressed.current = false;
-      lastAutoExpresswayAt.current = Date.now();
-      await refresh();
-    } catch {
-      // retry on next decision cycle
-    }
-  }
-
-  function openAutoExpresswaySettings() {
-    setAutoExpresswaySettingsError(null);
-    setAutoExpresswayDraft({
-      speedKmh: String(autoExpresswayConfig.speedKmh),
-      durationSec: String(autoExpresswayConfig.durationSec),
-      endSpeedKmh: String(autoExpresswayConfig.endSpeedKmh),
-      endDurationSec: String(autoExpresswayConfig.endDurationSec),
-    });
-    setAutoExpresswaySettingsOpen(true);
-  }
-
-  async function saveAutoExpresswaySettings() {
-    const speed = Number(autoExpresswayDraft.speedKmh);
-    const duration = Number(autoExpresswayDraft.durationSec);
-    const endSpeed = Number(autoExpresswayDraft.endSpeedKmh);
-    const endDuration = Number(autoExpresswayDraft.endDurationSec);
-    if (!Number.isFinite(speed) || speed < 30 || speed > 160) {
-      setAutoExpresswaySettingsError('開始速度は30〜160km/hの範囲で入力してください。');
-      return;
-    }
-    if (!Number.isFinite(duration) || duration < 1 || duration > 60) {
-      setAutoExpresswaySettingsError('継続時間は1〜60秒の範囲で入力してください。');
-      return;
-    }
-    if (!Number.isFinite(endSpeed) || endSpeed < 10 || endSpeed > 120) {
-      setAutoExpresswaySettingsError('終了速度は10〜120km/hの範囲で入力してください。');
-      return;
-    }
-    if (!Number.isFinite(endDuration) || endDuration < 5 || endDuration > 300) {
-      setAutoExpresswaySettingsError('終了判定は5〜300秒の範囲で入力してください。');
-      return;
-    }
-    const saved = await setAutoExpresswayConfig({
-      speedKmh: Math.round(speed),
-      durationSec: Math.round(duration),
-      endSpeedKmh: Math.round(endSpeed),
-      endDurationSec: Math.round(endDuration),
-    });
-    setAutoExpresswayConfigState(saved);
-    setAutoExpresswaySettingsOpen(false);
   }
 
   async function updateRouteTrackingMode(next: RouteTrackingMode) {
@@ -699,9 +412,7 @@ export default function HomeScreen() {
       await clearPendingExpresswayEndPrompt(tripId);
       await clearPendingExpresswayEndDecision(tripId);
       await cancelNativeExpresswayEndPrompt(tripId);
-      autoExpresswayEndSuppressed.current = true;
-      setAutoExpresswayEndToast(null);
-      return '高速継続として扱いました。';
+      return '高速の自動終了判定は無効です。手動の開始/終了を使ってください。';
     }
 
     if (command.kind === 'boarding') {
@@ -764,263 +475,13 @@ export default function HomeScreen() {
     return () => window.removeEventListener('online', handler);
   }, [tripId]);
 
-  // Speed watcher for高速道路の自動記録（一定速度を一定時間キープで開始）
-  useEffect(() => {
-    if (isNative || restActive || !tripId || !navigator.geolocation) return;
-    if (speedWatchId.current != null) {
-      navigator.geolocation.clearWatch(speedWatchId.current);
-      speedWatchId.current = null;
-    }
-    const tripIdForWatch = tripId;
-    const thresholdKmh = autoExpresswayConfig.speedKmh;
-    const durationMs = autoExpresswayConfig.durationSec * 1000;
-    const endThresholdKmh = autoExpresswayConfig.endSpeedKmh;
-    const endDurationMs = autoExpresswayConfig.endDurationSec * 1000;
-    const endResetMargin = 5;
-    speedAboveSince.current = null;
-    speedBelowSince.current = null;
-    lastSpeedSample.current = null;
-    lastCoordSample.current = null;
-    smoothedSpeedKmhRef.current = null;
-    lastStrongAccelAt.current = null;
-    lastStrongDecelAt.current = null;
-    const id = navigator.geolocation.watchPosition(
-      pos => {
-        const nowMs = pos.timestamp ? pos.timestamp : Date.now();
-        const lat = pos.coords.latitude;
-        const lng = pos.coords.longitude;
-        const accuracy = Number.isFinite(pos.coords.accuracy) ? pos.coords.accuracy : null;
-        const sensorSpeedKmh =
-          pos.coords.speed != null && !Number.isNaN(pos.coords.speed) ? pos.coords.speed * 3.6 : null;
-        let inferredSpeedKmh: number | null = null;
-        const prevCoord = lastCoordSample.current;
-        if (prevCoord) {
-          const dt = nowMs - prevCoord.at;
-          if (dt > 0) {
-            const dist = distanceMeters({ lat: prevCoord.lat, lng: prevCoord.lng }, { lat, lng });
-            inferredSpeedKmh = dist / (dt / 3600000);
-          }
-        }
-        lastCoordSample.current = { lat, lng, at: nowMs };
-        const fusedSpeedKmh = fuseSpeedKmh(sensorSpeedKmh, inferredSpeedKmh, accuracy);
-        const smoothedSpeedKmh = smoothSpeedKmh(smoothedSpeedKmhRef.current, fusedSpeedKmh, accuracy);
-        smoothedSpeedKmhRef.current = smoothedSpeedKmh;
-        if (smoothedSpeedKmh == null) {
-          speedAboveSince.current = null;
-          speedBelowSince.current = null;
-          lastSpeedSample.current = null;
-          return;
-        }
-
-        const prev = lastSpeedSample.current;
-        let accelMs2: number | null = null;
-        if (prev) {
-          const dtSec = (nowMs - prev.at) / 1000;
-          if (Number.isFinite(dtSec) && dtSec >= 1 && dtSec <= 20) {
-            accelMs2 = ((smoothedSpeedKmh / 3.6) - prev.speedMs) / dtSec;
-          }
-        }
-        lastSpeedSample.current = { speedMs: smoothedSpeedKmh / 3.6, at: nowMs };
-        if (accelMs2 != null) {
-          if (accelMs2 >= AUTO_EXPRESSWAY_ACCEL_PROFILE.startAccelMs2) {
-            lastStrongAccelAt.current = nowMs;
-          }
-          if (accelMs2 <= AUTO_EXPRESSWAY_ACCEL_PROFILE.endDecelMs2) {
-            lastStrongDecelAt.current = nowMs;
-          }
-        }
-        const kmh = smoothedSpeedKmh;
-        if (expresswayActive) {
-          if (autoExpresswayEndToast) return;
-          if (autoExpresswayEndSuppressed.current) {
-            if (kmh >= endThresholdKmh + endResetMargin) {
-              autoExpresswayEndSuppressed.current = false;
-              speedBelowSince.current = null;
-            }
-            return;
-          }
-          if (kmh >= endThresholdKmh) {
-            speedBelowSince.current = null;
-            return;
-          }
-          if (speedBelowSince.current == null) {
-            speedBelowSince.current = nowMs;
-          }
-          if (nowMs - speedBelowSince.current < endDurationMs) return;
-          const strongDecelRecent =
-            lastStrongDecelAt.current != null &&
-            nowMs - lastStrongDecelAt.current <= AUTO_EXPRESSWAY_ACCEL_PROFILE.endDecelWindowMs;
-          const stopLikeSustained = kmh <= 20;
-          if (!strongDecelRecent && !stopLikeSustained) return;
-          if (nowMs - lastEndPromptNotifyAt.current < AUTO_EXPRESSWAY_ACCEL_PROFILE.endPromptCooldownMs) return;
-          const geo = {
-            lat,
-            lng,
-            accuracy: accuracy ?? undefined,
-          };
-          if (autoExpresswayInFlight.current) return;
-          autoExpresswayInFlight.current = true;
-          void (async () => {
-            try {
-              const signal = await detectExpresswaySignal(geo.lat, geo.lng);
-              const allowEnd =
-                !signal.resolved ||
-                signal.nearIc ||
-                signal.nearEtcGate ||
-                !signal.onExpresswayRoad;
-              if (!allowEnd) {
-                speedBelowSince.current = nowMs;
-                return;
-              }
-              const prompt = {
-                tripId: tripIdForWatch,
-                speedKmh: Math.round(kmh),
-                detectedAt: new Date(nowMs).toISOString(),
-                geo,
-              };
-              await setPendingExpresswayEndPrompt(prompt);
-              if (document.visibilityState !== 'visible') {
-                await showExpresswayEndNotification(prompt.speedKmh);
-              }
-              setAutoExpresswayEndToast({ speedKmh: prompt.speedKmh, geo: prompt.geo });
-              lastEndPromptNotifyAt.current = nowMs;
-              speedBelowSince.current = null;
-            } finally {
-              autoExpresswayInFlight.current = false;
-            }
-          })();
-          return;
-        }
-        if (kmh < thresholdKmh) {
-          speedAboveSince.current = null;
-          if (kmh < thresholdKmh * 0.8) {
-            lastStrongAccelAt.current = null;
-          }
-          return;
-        }
-        if (speedAboveSince.current == null) {
-          speedAboveSince.current = nowMs;
-        }
-        const strongAccelRecent =
-          lastStrongAccelAt.current != null &&
-          nowMs - lastStrongAccelAt.current <= AUTO_EXPRESSWAY_ACCEL_PROFILE.startAccelWindowMs;
-        if (!strongAccelRecent) return;
-        const last = lastAutoExpresswayAt.current ?? 0;
-        if (autoExpresswayInFlight.current || nowMs - last < 60 * 1000) return;
-        if (nowMs - speedAboveSince.current < durationMs) return;
-
-        autoExpresswayInFlight.current = true;
-        const geo = {
-          lat,
-          lng,
-          accuracy: accuracy ?? undefined,
-        };
-        void (async () => {
-          try {
-            const signal = await detectExpresswaySignal(geo.lat, geo.lng);
-            const allowStart = signal.onExpresswayRoad || signal.nearEtcGate;
-            if (!allowStart) {
-              speedAboveSince.current = nowMs;
-              return;
-            }
-            const { eventId } = await startExpressway({ tripId: tripIdForWatch, geo });
-            await clearPendingExpresswayEndPrompt(tripIdForWatch);
-            await clearPendingExpresswayEndDecision(tripIdForWatch);
-            await cancelNativeExpresswayEndPrompt(tripIdForWatch);
-            showAutoExpresswayToast(eventId, Math.round(kmh));
-            const resolvedIc = signal.nearestIc ?? (await resolveNearestIC(geo.lat, geo.lng));
-            if (resolvedIc) {
-              await updateExpresswayResolved({
-                eventId,
-                status: 'resolved',
-                icName: resolvedIc.icName,
-                icDistanceM: resolvedIc.distanceM,
-              });
-            }
-            lastAutoExpresswayAt.current = nowMs;
-            await refresh();
-          } catch {
-            // ignore auto-start errors
-          } finally {
-            autoExpresswayInFlight.current = false;
-          }
-        })();
-      },
-      () => {
-        // ignore errors
-      },
-      { enableHighAccuracy: true, maximumAge: 2000, timeout: 3000 },
-    );
-    speedWatchId.current = id;
-    return () => {
-      if (id != null) navigator.geolocation.clearWatch(id);
-      speedWatchId.current = null;
-      speedAboveSince.current = null;
-      speedBelowSince.current = null;
-      lastSpeedSample.current = null;
-      lastCoordSample.current = null;
-      smoothedSpeedKmhRef.current = null;
-      lastStrongAccelAt.current = null;
-      lastStrongDecelAt.current = null;
-      autoExpresswayInFlight.current = false;
-    };
-  }, [
-    isNative,
-    restActive,
-    tripId,
-    expresswayActive,
-    autoExpresswayConfig.speedKmh,
-    autoExpresswayConfig.durationSec,
-    autoExpresswayConfig.endSpeedKmh,
-    autoExpresswayConfig.endDurationSec,
-    autoExpresswayEndToast,
-  ]);
-
-  useEffect(() => {
-    if (!expresswayActive) {
-      speedBelowSince.current = null;
-      autoExpresswayEndSuppressed.current = false;
-      setAutoExpresswayEndToast(null);
-      if (tripId) {
-        void clearPendingExpresswayEndPrompt(tripId);
-        void clearPendingExpresswayEndDecision(tripId);
-        void cancelNativeExpresswayEndPrompt(tripId);
-      }
-    }
-  }, [expresswayActive, tripId]);
-
-  useEffect(() => {
-    if (!tripId) return;
-    const sync = () => {
-      void syncPendingExpresswayEndPrompt(tripId, expresswayActive);
-      void applyPendingExpresswayEndDecision(tripId, expresswayActive);
-    };
-    sync();
-    const timer = window.setInterval(sync, 15000);
-    const onVisible = () => {
-      if (document.visibilityState === 'visible') {
-        sync();
-      }
-    };
-    document.addEventListener('visibilitychange', onVisible);
-    return () => {
-      window.clearInterval(timer);
-      document.removeEventListener('visibilitychange', onVisible);
-    };
-  }, [tripId, expresswayActive]);
-
   useEffect(() => {
     refresh();
     void refreshStartupDiagnostics();
     void (async () => {
-      const config = await getAutoExpresswayConfig();
-      setAutoExpresswayConfigState(config);
-      setAutoExpresswayDraft({
-        speedKmh: String(config.speedKmh),
-        durationSec: String(config.durationSec),
-        endSpeedKmh: String(config.endSpeedKmh),
-        endDurationSec: String(config.endDurationSec),
-      });
+      await clearPendingExpresswayEndPrompt();
+      await clearPendingExpresswayEndDecision();
+      await cancelNativeExpresswayEndPrompt();
       const mode = await getRouteTrackingMode();
       setRouteTrackingModeState(mode);
     })();
@@ -1183,47 +644,6 @@ export default function HomeScreen() {
     }, remaining);
   }
 
-  const autoExpresswayToastView = autoExpresswayToast ? (
-    <div className="auto-expressway-overlay" onClick={dismissAutoExpresswayToast}>
-      <div className="auto-expressway-card" onClick={e => e.stopPropagation()}>
-        <div className="auto-expressway-title">高速道路を自動で開始しました</div>
-        <div className="auto-expressway-speed">{autoExpresswayToast.speedKmh} km/h</div>
-        <div className="auto-expressway-note">誤検知のときは取り消してください。</div>
-        <div className="auto-expressway-actions">
-          <button
-            className="trip-detail__button trip-detail__button--danger"
-            onClick={() => cancelAutoExpressway(autoExpresswayToast.eventId)}
-          >
-            取り消す
-          </button>
-          <button className="trip-detail__button" onClick={dismissAutoExpresswayToast}>
-            閉じる
-          </button>
-        </div>
-      </div>
-    </div>
-  ) : null;
-
-  const autoExpresswayEndToastView = autoExpresswayEndToast ? (
-    <div className="auto-expressway-overlay">
-      <div className="auto-expressway-card" onClick={e => e.stopPropagation()}>
-        <div className="auto-expressway-title">高速道路を終了しますか？</div>
-        <div className="auto-expressway-speed">{autoExpresswayEndToast.speedKmh} km/h</div>
-        <div className="auto-expressway-note">
-          低速が続いたため終了候補です。渋滞などで終了しない場合は「まだ高速中」を選んでください。
-        </div>
-        <div className="auto-expressway-actions">
-          <button className="trip-detail__button trip-detail__button--danger" onClick={confirmAutoExpresswayEnd}>
-            終了する
-          </button>
-          <button className="trip-detail__button" onClick={() => dismissAutoExpresswayEndToast(true)}>
-            まだ高速中
-          </button>
-        </div>
-      </div>
-    </div>
-  ) : null;
-
   const routeTrackingModeNote =
     routeTrackingMode === 'precision'
       ? '精度重視: 更新頻度を高めて記録します（電池消費は大きめ）。'
@@ -1254,7 +674,7 @@ export default function HomeScreen() {
           運行中は自動でルート記録し、休息中はGPS記録を自動停止します。
         </div>
         <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.7)', marginTop: 4 }}>
-          Androidでは画面OFF/バックグラウンド中も高速道路の自動開始/終了判定を継続します。
+          Androidでは画面OFF/バックグラウンド中もルート記録を継続します。高速道路の開始/終了は手動です。
         </div>
       </div>
       <div>
@@ -1348,88 +768,6 @@ export default function HomeScreen() {
     </div>
   ) : null;
 
-  const autoExpresswaySettingsDialog = autoExpresswaySettingsOpen ? (
-    <div
-      style={{
-        position: 'fixed',
-        inset: 0,
-        background: 'rgba(0,0,0,.6)',
-        display: 'grid',
-        placeItems: 'center',
-        zIndex: 10000,
-      }}
-    >
-      <div style={{ width: 'min(520px, 92vw)', background: '#111', color: '#fff', borderRadius: 16, padding: 16 }}>
-        <div style={{ fontSize: 18, fontWeight: 800, marginBottom: 6 }}>高速自動開始/終了設定</div>
-        <div style={{ opacity: 0.8, fontSize: 13, marginBottom: 12 }}>
-          指定速度が指定秒数続いたら開始を記録します。終了判定はポップアップで継続/終了を確認します。
-        </div>
-        <div style={{ display: 'grid', gap: 12 }}>
-          <div style={{ fontWeight: 800, fontSize: 14 }}>開始条件</div>
-          <label style={{ display: 'grid', gap: 6 }}>
-            開始速度（km/h）
-            <input
-              type="number"
-              min={30}
-              max={160}
-              value={autoExpresswayDraft.speedKmh}
-              onChange={e => setAutoExpresswayDraft(prev => ({ ...prev, speedKmh: e.target.value }))}
-              style={{ padding: '10px 12px', borderRadius: 10, border: '1px solid #334155', background: '#0f172a', color: '#fff' }}
-            />
-          </label>
-          <label style={{ display: 'grid', gap: 6 }}>
-            継続時間（秒）
-            <input
-              type="number"
-              min={1}
-              max={60}
-              value={autoExpresswayDraft.durationSec}
-              onChange={e => setAutoExpresswayDraft(prev => ({ ...prev, durationSec: e.target.value }))}
-              style={{ padding: '10px 12px', borderRadius: 10, border: '1px solid #334155', background: '#0f172a', color: '#fff' }}
-            />
-          </label>
-          <div style={{ fontWeight: 800, fontSize: 14, marginTop: 4 }}>終了候補</div>
-          <label style={{ display: 'grid', gap: 6 }}>
-            終了速度（km/h）
-            <input
-              type="number"
-              min={10}
-              max={120}
-              value={autoExpresswayDraft.endSpeedKmh}
-              onChange={e => setAutoExpresswayDraft(prev => ({ ...prev, endSpeedKmh: e.target.value }))}
-              style={{ padding: '10px 12px', borderRadius: 10, border: '1px solid #334155', background: '#0f172a', color: '#fff' }}
-            />
-          </label>
-          <label style={{ display: 'grid', gap: 6 }}>
-            継続時間（秒）
-            <input
-              type="number"
-              min={5}
-              max={300}
-              value={autoExpresswayDraft.endDurationSec}
-              onChange={e => setAutoExpresswayDraft(prev => ({ ...prev, endDurationSec: e.target.value }))}
-              style={{ padding: '10px 12px', borderRadius: 10, border: '1px solid #334155', background: '#0f172a', color: '#fff' }}
-            />
-          </label>
-          {autoExpresswaySettingsError && (
-            <div style={{ color: '#fca5a5', fontSize: 13 }}>{autoExpresswaySettingsError}</div>
-          )}
-        </div>
-        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 16 }}>
-          <button
-            onClick={() => setAutoExpresswaySettingsOpen(false)}
-            style={{ padding: '10px 14px', borderRadius: 12 }}
-          >
-            閉じる
-          </button>
-          <button onClick={saveAutoExpresswaySettings} style={{ padding: '10px 14px', borderRadius: 12, fontWeight: 800 }}>
-            保存
-          </button>
-        </div>
-      </div>
-    </div>
-  ) : null;
-
   // Render when no trip is active
   if (!tripId) {
     return (
@@ -1449,9 +787,6 @@ export default function HomeScreen() {
                 ⚙
               </button>
             )}
-            <button className="pill-link" onClick={openAutoExpresswaySettings}>
-              高速自動設定
-            </button>
               <Link to="/history" className="pill-link">
                 運行履歴
               </Link>
@@ -1532,9 +867,6 @@ export default function HomeScreen() {
             }}
           />
         </div>
-        {autoExpresswaySettingsDialog}
-        {autoExpresswayToastView}
-        {autoExpresswayEndToastView}
       </div>
     );
   }
@@ -1577,9 +909,6 @@ export default function HomeScreen() {
           <Link to={`/trip/${tripId}/route`} className="pill-link">
             ルート表示
           </Link>
-          <button className="pill-link" onClick={openAutoExpresswaySettings}>
-            高速自動設定
-          </button>
           <Link to="/history" className="pill-link">
             運行履歴
           </Link>
@@ -1689,7 +1018,7 @@ export default function HomeScreen() {
             <div className="card" style={{ color: '#fff', padding: 12, borderRadius: 14 }}>
               <div style={{ fontWeight: 900, marginBottom: 6 }}>音声コマンド</div>
               <div style={{ fontSize: 13, opacity: 0.8, marginBottom: 8 }}>
-                例: 「積込開始」「荷卸終了」「高速道路開始」「高速継続」
+                例: 「積込開始」「荷卸終了」「高速道路開始」「高速道路終了」
               </div>
               <button
                 onClick={() => void runVoiceCommand()}
@@ -2003,9 +1332,6 @@ export default function HomeScreen() {
           }
         }}
       />
-      {autoExpresswaySettingsDialog}
-      {autoExpresswayToastView}
-      {autoExpresswayEndToastView}
       </div>
     </div>
   );
