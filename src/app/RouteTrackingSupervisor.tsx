@@ -50,9 +50,15 @@ export default function RouteTrackingSupervisor() {
         const tripId = await getActiveTripId();
         if (!tripId) {
           await stopRouteTracking();
-          await clearPendingExpresswayEndPrompt();
-          await clearPendingExpresswayEndDecision();
-          await cancelNativeExpresswayEndPrompt();
+          const pendingPrompt = await getPendingExpresswayEndPrompt();
+          const pendingDecision = await getPendingExpresswayEndDecision();
+          if (pendingPrompt) {
+            await clearPendingExpresswayEndPrompt(pendingPrompt.tripId);
+            await cancelNativeExpresswayEndPrompt(pendingPrompt.tripId);
+          }
+          if (pendingDecision) {
+            await clearPendingExpresswayEndDecision(pendingDecision.tripId);
+          }
           return;
         }
         const events = await getEventsByTripId(tripId);

@@ -490,8 +490,6 @@ export default function HomeScreen() {
     refresh();
     void refreshStartupDiagnostics();
     void (async () => {
-      await clearPendingExpresswayEndPrompt();
-      await clearPendingExpresswayEndDecision();
       await cancelNativeExpresswayEndPrompt();
       const mode = await getRouteTrackingMode();
       setRouteTrackingModeState(mode);
@@ -505,13 +503,9 @@ export default function HomeScreen() {
         void refreshStartupDiagnostics();
       }
     };
-    const timer = window.setInterval(() => {
-      void refreshStartupDiagnostics();
-    }, 30000);
     window.addEventListener('online', onActive);
     document.addEventListener('visibilitychange', onActive);
     return () => {
-      window.clearInterval(timer);
       window.removeEventListener('online', onActive);
       document.removeEventListener('visibilitychange', onActive);
     };
