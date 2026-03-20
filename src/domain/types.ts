@@ -11,6 +11,7 @@ export type EventType =
   | 'unload_end'
   | 'refuel'
   | 'boarding'
+  | 'disembark'
   | 'expressway'
   | 'expressway_start'
   | 'expressway_end'
@@ -42,7 +43,7 @@ export type RoutePoint = {
   accuracy?: number;
   speed?: number | null;
   heading?: number | null;
-  source?: 'foreground' | 'background';
+  source?: 'foreground' | 'background' | 'event';
 };
 
 export type TripStartEvent = BaseEvent & {

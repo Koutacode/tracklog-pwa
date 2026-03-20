@@ -1,3 +1,4 @@
+import { Suspense, lazy } from 'react';
 import { BrowserRouter, Routes, Route } from 'react-router-dom';
 import IcResolverJob from './IcResolverJob';
 import LocalRecoveryBootstrap from './LocalRecoveryBootstrap';
@@ -5,12 +6,11 @@ import NativeUpdateNotice from './NativeUpdateNotice';
 import RouteTrackingSupervisor from './RouteTrackingSupervisor';
 import { APP_VERSION } from './version';
 
-// Screens
-import HomeScreen from '../ui/screens/HomeScreen';
-import TripDetail from '../ui/screens/TripDetail';
-import HistoryScreen from '../ui/screens/HistoryScreen';
-import RouteMapScreen from '../ui/screens/RouteMapScreen';
-import ReportDashboard from '../ui/screens/ReportDashboard';
+const HomeScreen = lazy(() => import('../ui/screens/HomeScreen'));
+const TripDetail = lazy(() => import('../ui/screens/TripDetail'));
+const HistoryScreen = lazy(() => import('../ui/screens/HistoryScreen'));
+const RouteMapScreen = lazy(() => import('../ui/screens/RouteMapScreen'));
+const ReportDashboard = lazy(() => import('../ui/screens/ReportDashboard'));
 
 // Keep routing aligned with the Vite base URL.
 const routerBase = import.meta.env.BASE_URL;
@@ -28,13 +28,15 @@ export default function App() {
       <LocalRecoveryBootstrap />
       <NativeUpdateNotice />
       <RouteTrackingSupervisor />
-      <Routes>
-        <Route path="/" element={<HomeScreen />} />
-        <Route path="/trip/:tripId" element={<TripDetail />} />
-        <Route path="/trip/:tripId/route" element={<RouteMapScreen />} />
-        <Route path="/history" element={<HistoryScreen />} />
-        <Route path="/report" element={<ReportDashboard />} />
-      </Routes>
+      <Suspense fallback={<div style={{ padding: 24, color: '#fff' }}>読み込み中…</div>}>
+        <Routes>
+          <Route path="/" element={<HomeScreen />} />
+          <Route path="/trip/:tripId" element={<TripDetail />} />
+          <Route path="/trip/:tripId/route" element={<RouteMapScreen />} />
+          <Route path="/history" element={<HistoryScreen />} />
+          <Route path="/report" element={<ReportDashboard />} />
+        </Routes>
+      </Suspense>
       <div
         style={{
           position: 'fixed',

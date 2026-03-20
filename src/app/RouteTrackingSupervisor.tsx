@@ -12,6 +12,7 @@ import {
 import type { AppEvent } from '../domain/types';
 import { startRouteTracking, stopRouteTracking } from '../services/routeTracking';
 import { cancelNativeExpresswayEndPrompt } from '../services/nativeExpresswayPrompt';
+import { ROUTE_TRACKING_SYNC_EVENT } from './routeTrackingSignal';
 
 function hasOpenRest(events: AppEvent[]) {
   const starts = events.filter(e => e.type === 'rest_start').sort((a, b) => a.ts.localeCompare(b.ts));
@@ -34,6 +35,19 @@ function hasOpenExpressway(events: AppEvent[]) {
     const sid = (starts[i] as any).extras?.expresswaySessionId as string | undefined;
     if (!sid) continue;
     const hasEnd = ends.some(en => (en as any).extras?.expresswaySessionId === sid);
+    if (!hasEnd) return true;
+  }
+  return false;
+}
+
+function hasOpenFerry(events: AppEvent[]) {
+  const starts = events.filter(e => e.type === 'boarding').sort((a, b) => a.ts.localeCompare(b.ts));
+  if (starts.length === 0) return false;
+  const ends = events.filter(e => e.type === 'disembark');
+  for (let i = starts.length - 1; i >= 0; i--) {
+    const sid = (starts[i] as any).extras?.ferrySessionId as string | undefined;
+    if (!sid) continue;
+    const hasEnd = ends.some(en => (en as any).extras?.ferrySessionId === sid);
     if (!hasEnd) return true;
   }
   return false;
@@ -90,7 +104,7 @@ export default function RouteTrackingSupervisor() {
         } else if (pendingDecision && pendingDecision.tripId !== tripId) {
           await clearPendingExpresswayEndDecision(pendingDecision.tripId);
         }
-        if (hasOpenRest(events)) {
+        if (hasOpenRest(events) || hasOpenFerry(events)) {
           await stopRouteTracking();
           return;
         }
@@ -108,6 +122,9 @@ export default function RouteTrackingSupervisor() {
         void sync();
       }
     };
+    const onSyncRequest = () => {
+      void sync();
+    };
 
     void sync();
     const timer = window.setInterval(() => {
@@ -115,11 +132,13 @@ export default function RouteTrackingSupervisor() {
     }, 15000);
     window.addEventListener('online', onVisible);
     document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener(ROUTE_TRACKING_SYNC_EVENT, onSyncRequest);
     return () => {
       disposed = true;
       window.clearInterval(timer);
       window.removeEventListener('online', onVisible);
       document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener(ROUTE_TRACKING_SYNC_EVENT, onSyncRequest);
     };
   }, []);
 

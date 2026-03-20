@@ -165,7 +165,9 @@ export function buildTimeline(events: AppEvent[]): TimelineItem[] {
       case 'expressway_end':
         return '高速終了';
       case 'boarding':
-        return '乗船';
+        return 'フェリー乗船';
+      case 'disembark':
+        return 'フェリー下船';
       case 'point_mark':
         return '地点マーク';
       default:
@@ -179,6 +181,7 @@ export function buildTimeline(events: AppEvent[]): TimelineItem[] {
     { start: 'load_start', end: 'load_end', key: 'loadSessionId', label: '積込' },
     { start: 'unload_start', end: 'unload_end', key: 'unloadSessionId', label: '荷卸' },
     { start: 'expressway_start', end: 'expressway_end', key: 'expresswaySessionId', label: '高速道路' },
+    { start: 'boarding', end: 'disembark', key: 'ferrySessionId', label: 'フェリー' },
   ];
   const toggleMap = new Map<string, { start: AppEvent; def: any }>();
   const timeline: TimelineItem[] = [];

@@ -10,6 +10,7 @@ import type {
   RoutePoint,
 } from '../domain/types';
 import { computeTotals } from '../domain/metrics';
+import { parseJsonInput } from '../domain/jsonInput';
 import { reverseGeocode } from '../services/geo';
 
 /*
@@ -439,7 +440,14 @@ export async function updateEventAddress(eventId: string, address?: string) {
 export async function updateEventTimestamp(eventId: string, ts: string) {
   const ev = await db.events.get(eventId);
   if (!ev) throw new Error('イベントが見つかりません');
-  await db.events.update(eventId, { ts, syncStatus: 'pending' });
+  await db.transaction('rw', db.events, db.routePoints, async () => {
+    await db.events.update(eventId, { ts, syncStatus: 'pending' });
+    const anchorId = getRoutePointAnchorId(eventId);
+    const existingAnchor = await db.routePoints.get(anchorId);
+    if (existingAnchor) {
+      await db.routePoints.update(anchorId, { ts });
+    }
+  });
   await rebalanceDayCloseIndices(ev.tripId);
 }
 
@@ -449,6 +457,7 @@ const SESSION_KEYS = [
   'loadSessionId',
   'unloadSessionId',
   'expresswaySessionId',
+  'ferrySessionId',
 ] as const;
 
 type SessionKey = (typeof SESSION_KEYS)[number];
@@ -464,6 +473,8 @@ const SESSION_KEY_BY_TYPE: Partial<Record<EventType, SessionKey>> = {
   unload_end: 'unloadSessionId',
   expressway_start: 'expresswaySessionId',
   expressway_end: 'expresswaySessionId',
+  boarding: 'ferrySessionId',
+  disembark: 'ferrySessionId',
 };
 
 const TOGGLE_GROUPS = [
@@ -472,6 +483,7 @@ const TOGGLE_GROUPS = [
   { start: 'load_start', end: 'load_end', key: 'loadSessionId', label: '積込' },
   { start: 'unload_start', end: 'unload_end', key: 'unloadSessionId', label: '荷卸' },
   { start: 'expressway_start', end: 'expressway_end', key: 'expresswaySessionId', label: '高速道路' },
+  { start: 'boarding', end: 'disembark', key: 'ferrySessionId', label: 'フェリー' },
 ] as const;
 
 type ToggleGroup = (typeof TOGGLE_GROUPS)[number];
@@ -676,8 +688,35 @@ export async function updateEventLiters(eventId: string, liters: number) {
   await db.events.update(eventId, { extras, syncStatus: 'pending' });
 }
 
-export async function addEvent(event: AppEvent) {
+function getRoutePointAnchorId(eventId: string) {
+  return `event-anchor-${eventId}`;
+}
+
+function buildRoutePointAnchorFromEvent(event: AppEvent): RoutePoint | null {
+  if (!event.geo) return null;
+  return {
+    id: getRoutePointAnchorId(event.id),
+    tripId: event.tripId,
+    ts: event.ts,
+    lat: event.geo.lat,
+    lng: event.geo.lng,
+    ...(Number.isFinite(event.geo.accuracy) ? { accuracy: event.geo.accuracy } : {}),
+    source: 'event',
+  };
+}
+
+async function putEventWithRoutePointTx(event: AppEvent) {
   await db.events.put(event);
+  const routePoint = buildRoutePointAnchorFromEvent(event);
+  if (routePoint) {
+    await db.routePoints.put(routePoint);
+  }
+}
+
+export async function addEvent(event: AppEvent) {
+  await db.transaction('rw', db.events, db.routePoints, async () => {
+    await putEventWithRoutePointTx(event);
+  });
 }
 
 export async function addRoutePoint(point: Omit<RoutePoint, 'id'> & { id?: string }): Promise<RoutePoint> {
@@ -786,8 +825,8 @@ export async function startTrip(params: {
     syncStatus: 'pending',
     extras: { odoKm: params.odoKm },
   };
-  await db.transaction('rw', db.events, db.meta, async () => {
-    await db.events.put(e);
+  await db.transaction('rw', db.events, db.meta, db.routePoints, async () => {
+    await putEventWithRoutePointTx(e);
     await setMeta(META_ACTIVE_TRIP_ID, tripId);
     await setMeta(META_PENDING_EXPRESSWAY_END_PROMPT, null);
     await setMeta(META_PENDING_EXPRESSWAY_END_DECISION, null);
@@ -832,8 +871,8 @@ export async function endTrip(params: {
       lastLegKm: totals.lastLegKm,
     },
   };
-  await db.transaction('rw', db.events, db.meta, async () => {
-    await db.events.put(e);
+  await db.transaction('rw', db.events, db.meta, db.routePoints, async () => {
+    await putEventWithRoutePointTx(e);
     await clearActiveTripId();
     await clearPendingExpresswayEndPrompt(params.tripId);
     await clearPendingExpresswayEndDecision(params.tripId);
@@ -866,7 +905,7 @@ export async function startRest(params: {
     syncStatus: 'pending',
     extras: { restSessionId, odoKm: params.odoKm },
   };
-  await db.events.put(e);
+  await addEvent(e);
   return { restSessionId, event: e };
 }
 
@@ -886,11 +925,13 @@ export async function endRest(params: {
   if (params.dayClose) {
     dayIndex = getNextDayIndexFromTripEvents(events);
   }
+  const ts = nowIso();
+  const openFerrySessionId = findOpenToggleSessionId(events, 'boarding', 'disembark', 'ferrySessionId');
   const e: RestEndEvent = {
     id: uuid(),
     tripId: params.tripId,
     type: 'rest_end',
-    ts: nowIso(),
+    ts,
     geo: params.geo,
     address: params.address,
     syncStatus: 'pending',
@@ -900,7 +941,21 @@ export async function endRest(params: {
       ...(dayIndex != null ? { dayIndex } : {}),
     },
   };
-  await db.events.put(e);
+  await db.transaction('rw', db.events, db.routePoints, async () => {
+    if (openFerrySessionId) {
+      await putEventWithRoutePointTx({
+        id: uuid(),
+        tripId: params.tripId,
+        type: 'disembark',
+        ts,
+        geo: params.geo,
+        address: params.address,
+        syncStatus: 'pending',
+        extras: openFerrySessionId === '__legacy__' ? undefined : { ferrySessionId: openFerrySessionId },
+      } as AppEvent);
+    }
+    await putEventWithRoutePointTx(e);
+  });
   return { event: e };
 }
 
@@ -1086,13 +1141,72 @@ export async function addRefuel(params: {
   await addEvent(e);
 }
 
-// Boarding (乗船)
-export async function addBoarding(params: { tripId: string; geo?: Geo; address?: string }) {
+// Ferry boarding / disembark (フェリー乗船 / 下船)
+export async function addBoarding(
+  params: { tripId: string; geo?: Geo; address?: string },
+): Promise<{ ferrySessionId: string; autoRestStarted: boolean }> {
+  const events = await getTripEventsCached(params.tripId);
+  const openBreak = findOpenToggleSessionId(events, 'break_start', 'break_end', 'breakSessionId');
+  const openLoad = findOpenToggleSessionId(events, 'load_start', 'load_end', 'loadSessionId');
+  const openUnload = findOpenToggleSessionId(events, 'unload_start', 'unload_end', 'unloadSessionId');
+  if (openBreak || openLoad || openUnload) {
+    throw new Error('進行中の休憩・積込・荷卸を終了してからフェリー乗船を記録してください');
+  }
+
+  const openRest = findOpenToggleSessionId(events, 'rest_start', 'rest_end', 'restSessionId');
+  const open = findOpenToggleSessionId(events, 'boarding', 'disembark', 'ferrySessionId');
+  if (open) throw new Error('フェリー乗船が開始済みです（下船を押してください）');
+
+  const autoRestStarted = !openRest;
+  const fallbackOdoKm = findLatestOdoCheckpoint(events);
+  if (autoRestStarted && fallbackOdoKm == null) {
+    throw new Error('休息開始に必要なODO基準がありません。運行開始後に記録してください');
+  }
+
+  const ts = nowIso();
+  const ferrySessionId = uuid();
+  await db.transaction('rw', db.events, db.routePoints, async () => {
+    if (autoRestStarted) {
+      const restStart: RestStartEvent = {
+        id: uuid(),
+        tripId: params.tripId,
+        type: 'rest_start',
+        ts,
+        geo: params.geo,
+        address: params.address,
+        syncStatus: 'pending',
+        extras: {
+          restSessionId: uuid(),
+          odoKm: fallbackOdoKm!,
+        },
+      };
+      await putEventWithRoutePointTx(restStart);
+    }
+
+    await putEventWithRoutePointTx({
+      id: uuid(),
+      tripId: params.tripId,
+      type: 'boarding',
+      ts,
+      geo: params.geo,
+      address: params.address,
+      syncStatus: 'pending',
+      extras: { ferrySessionId },
+    } as AppEvent);
+  });
+  return { ferrySessionId, autoRestStarted };
+}
+
+export async function addDisembark(params: { tripId: string; geo?: Geo; address?: string }) {
+  const events = await getTripEventsCached(params.tripId);
+  const open = findOpenToggleSessionId(events, 'boarding', 'disembark', 'ferrySessionId');
+  if (!open) throw new Error('フェリー乗船が開始されていません');
   const e = baseEvent({
     tripId: params.tripId,
-    type: 'boarding',
+    type: 'disembark',
     geo: params.geo,
     address: params.address,
+    extras: open === '__legacy__' ? undefined : { ferrySessionId: open },
   });
   await addEvent(e);
 }
@@ -1135,12 +1249,12 @@ export async function startExpressway(params: {
       ...(autoDecision ? { autoDecision } : {}),
     },
   });
-  await db.transaction('rw', db.events, db.meta, async () => {
+  await db.transaction('rw', db.events, db.meta, db.routePoints, async () => {
     const events = await db.events.where('tripId').equals(params.tripId).toArray();
     events.sort((a, b) => a.ts.localeCompare(b.ts));
     const open = findOpenToggleSessionId(events, 'expressway_start', 'expressway_end', 'expresswaySessionId');
     if (open) throw new Error('高速道路が開始済みです（終了を押してください）');
-    await db.events.put(e);
+    await putEventWithRoutePointTx(e);
     await clearPendingExpresswayEndPrompt(params.tripId);
     await clearPendingExpresswayEndDecision(params.tripId);
   });
@@ -1155,7 +1269,7 @@ export async function endExpressway(params: {
 }) {
   let eventId = '';
   const autoDecision = normalizeAutoExpresswayDecisionReason(params.autoDecision);
-  await db.transaction('rw', db.events, db.meta, async () => {
+  await db.transaction('rw', db.events, db.meta, db.routePoints, async () => {
     const events = await db.events.where('tripId').equals(params.tripId).toArray();
     events.sort((a, b) => a.ts.localeCompare(b.ts));
     const open = findOpenToggleSessionId(events, 'expressway_start', 'expressway_end', 'expresswaySessionId');
@@ -1179,7 +1293,7 @@ export async function endExpressway(params: {
               ...(autoDecision ? { autoDecision } : {}),
             },
     });
-    await db.events.put(e);
+    await putEventWithRoutePointTx(e);
     await clearPendingExpresswayEndPrompt(params.tripId);
     await clearPendingExpresswayEndDecision(params.tripId);
     eventId = e.id;
@@ -1374,6 +1488,7 @@ const RESTORE_EVENT_TYPES: Set<EventType> = new Set([
   'unload_end',
   'refuel',
   'boarding',
+  'disembark',
   'expressway',
   'expressway_start',
   'expressway_end',
@@ -1436,7 +1551,9 @@ function normalizeRestoreRoutePoint(raw: unknown): RoutePoint | null {
   const speed = Number(raw.speed);
   const heading = Number(raw.heading);
   const source =
-    raw.source === 'foreground' || raw.source === 'background' ? raw.source : undefined;
+    raw.source === 'foreground' || raw.source === 'background' || raw.source === 'event'
+      ? raw.source
+      : undefined;
   return {
     id,
     tripId,
@@ -1716,6 +1833,43 @@ function buildOperationLogEvents(payload: RestoreSnapshotPayload): AppEvent[] {
         });
         break;
       }
+      case 'フェリー':
+      case '乗船':
+      case 'フェリー乗船': {
+        const ferrySessionId = makeRecoveryEventId('ferry-session', item.ts, String(pairIndex));
+        events.push({
+          id: makeRecoveryEventId('boarding', item.ts),
+          tripId,
+          type: 'boarding',
+          ts: item.ts,
+          syncStatus: 'pending',
+          ...(address ? { address } : {}),
+          extras: { ferrySessionId },
+        });
+        if (endTs) {
+          events.push({
+            id: makeRecoveryEventId('disembark', endTs),
+            tripId,
+            type: 'disembark',
+            ts: endTs,
+            syncStatus: 'pending',
+            ...(address ? { address } : {}),
+            extras: { ferrySessionId },
+          });
+        }
+        break;
+      }
+      case '下船':
+      case 'フェリー下船':
+        events.push({
+          id: makeRecoveryEventId('disembark', item.ts),
+          tripId,
+          type: 'disembark',
+          ts: item.ts,
+          syncStatus: 'pending',
+          ...(address ? { address } : {}),
+        });
+        break;
       default:
         break;
     }
@@ -1734,12 +1888,7 @@ function findActiveTripIdFromEvents(events: AppEvent[]): string | null {
 }
 
 export async function restoreSnapshotJson(jsonText: string): Promise<RestoreSnapshotResult> {
-  let parsed: RestoreSnapshotPayload;
-  try {
-    parsed = JSON.parse(jsonText) as RestoreSnapshotPayload;
-  } catch {
-    throw new Error('JSON の解析に失敗しました');
-  }
+  const parsed = parseJsonInput<RestoreSnapshotPayload>(jsonText, 'JSON の解析に失敗しました');
   const events = Array.isArray(parsed.events)
     ? parsed.events.map(normalizeRestoreEvent).filter((event): event is AppEvent => event !== null)
     : parsed.recordType === 'operation_log'
@@ -1784,7 +1933,10 @@ export async function deleteEvent(eventId: string): Promise<void> {
   const ev = await db.events.get(eventId);
   if (!ev) return;
   if (ev.type === 'trip_start') throw new Error('運行開始イベントは削除できません（運行ごと削除してください）');
-  await db.events.delete(eventId);
+  await db.transaction('rw', db.events, db.routePoints, async () => {
+    await db.events.delete(eventId);
+    await db.routePoints.delete(getRoutePointAnchorId(eventId));
+  });
   await rebalanceDayCloseIndices(ev.tripId);
 }
 

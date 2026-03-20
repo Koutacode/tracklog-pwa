@@ -16,8 +16,3 @@ export async function listReportTrips(): Promise<Trip[]> {
 export async function deleteReportTrip(id: string): Promise<void> {
   await db.reportTrips.delete(id);
 }
-
-export async function getReportTripsByMonth(month: string): Promise<Trip[]> {
-  const all = await db.reportTrips.toArray();
-  return all.filter(t => t.days.some(d => d.dateKey.startsWith(month)));
-}

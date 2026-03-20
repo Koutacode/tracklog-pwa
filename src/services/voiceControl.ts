@@ -16,6 +16,7 @@ export type VoiceCommandKind =
   | 'expressway_end'
   | 'expressway_keep'
   | 'boarding'
+  | 'disembark'
   | 'point_mark'
   | 'geo_refresh';
 
@@ -199,6 +200,9 @@ export function parseVoiceCommand(raw: string): VoiceCommand | null {
   if (includesAny(text, ['運行開始', '出発'])) {
     const odoKm = extractOdoKmAfterKeywords(text, ['運行開始', '出発']);
     return { kind: 'trip_start', raw, odoKm };
+  }
+  if (includesAny(text, ['フェリー下船', '下船'])) {
+    return { kind: 'disembark', raw };
   }
   if (includesAny(text, ['乗船'])) {
     return { kind: 'boarding', raw };

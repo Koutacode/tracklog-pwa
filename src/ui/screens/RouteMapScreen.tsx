@@ -2,8 +2,8 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
-import { listRoutePointsByTripId } from '../../db/repositories';
-import type { RoutePoint } from '../../domain/types';
+import { getEventsByTripId, listRoutePointsByTripId } from '../../db/repositories';
+import type { AppEvent, RoutePoint } from '../../domain/types';
 import { getJstDateInfo } from '../../domain/jst';
 import { mapMatchRoutePoints, type LatLng, type MatchProvider } from '../../services/mapMatching';
 
@@ -18,6 +18,7 @@ type RouteSegment = {
   dateLabel: string;
   dayStamp: number;
   partIndex: number;
+  sourceKind: 'recorded' | 'eventFallback';
   color: string;
   path: LatLng[];
   distanceKm: number;
@@ -119,6 +120,7 @@ function buildSegments(points: RoutePoint[]): RouteSegment[] {
           dateLabel: info.dateLabel,
           dayStamp: info.dayStamp,
           partIndex,
+          sourceKind: 'recorded' as const,
           color: COLOR_PALETTE[idx % COLOR_PALETTE.length],
           path: part.points.map(pt => ({ lat: pt.lat, lng: pt.lng })),
           distanceKm: Math.round((dist / 1000) * 10) / 10,
@@ -132,6 +134,60 @@ function buildSegments(points: RoutePoint[]): RouteSegment[] {
       });
     })
     .sort((a, b) => a.dayStamp - b.dayStamp);
+}
+
+function buildEventFallbackSegments(events: AppEvent[]): RouteSegment[] {
+  const grouped = new Map<string, { dateLabel: string; dayStamp: number; points: RoutePoint[] }>();
+  for (const event of events) {
+    if (!event.geo) continue;
+    const info = getJstDateInfo(event.ts);
+    const point: RoutePoint = {
+      id: `event-${event.id}`,
+      tripId: event.tripId,
+      ts: event.ts,
+      lat: event.geo.lat,
+      lng: event.geo.lng,
+      ...(Number.isFinite(event.geo.accuracy) ? { accuracy: event.geo.accuracy } : {}),
+      source: 'event',
+    };
+    const entry = grouped.get(info.dateKey);
+    if (entry) {
+      entry.points.push(point);
+    } else {
+      grouped.set(info.dateKey, {
+        dateLabel: info.dateLabel,
+        dayStamp: info.dayStamp,
+        points: [point],
+      });
+    }
+  }
+
+  return [...grouped.entries()]
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([dateKey, info], idx) => {
+      const points = [...info.points].sort((a, b) => a.ts.localeCompare(b.ts));
+      let dist = 0;
+      for (let i = 1; i < points.length; i++) {
+        dist += distanceMeters(points[i - 1], points[i]);
+      }
+      return {
+        segmentKey: `fallback-${dateKey}`,
+        dateKey,
+        dateLabel: info.dateLabel,
+        dayStamp: info.dayStamp,
+        partIndex: 0,
+        sourceKind: 'eventFallback',
+        color: COLOR_PALETTE[idx % COLOR_PALETTE.length],
+        path: points.map(point => ({ lat: point.lat, lng: point.lng })),
+        distanceKm: Math.round((dist / 1000) * 10) / 10,
+        pointCount: points.length,
+        startTs: points[0]?.ts,
+        endTs: points[points.length - 1]?.ts,
+        points,
+        gapFromPrevMs: 0,
+        gapFromPrevMeters: 0,
+      } satisfies RouteSegment;
+    });
 }
 
 function distanceKm(path: LatLng[]) {
@@ -153,9 +209,14 @@ function fmtDateTime(ts?: string) {
   }).format(new Date(ts));
 }
 
+function shouldUseRouteCorrection(segment: RouteSegment) {
+  return segment.sourceKind === 'eventFallback';
+}
+
 export default function RouteMapScreen() {
   const { tripId } = useParams();
   const [points, setPoints] = useState<RoutePoint[]>([]);
+  const [events, setEvents] = useState<AppEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [hiddenDates, setHiddenDates] = useState<Set<string>>(new Set());
@@ -168,7 +229,16 @@ export default function RouteMapScreen() {
   const layerGroupRef = useRef<L.LayerGroup | null>(null);
   const fitBoundsRef = useRef<(() => void) | null>(null);
 
-  const segments = useMemo(() => buildSegments(points), [points]);
+  const trackedPoints = useMemo(() => points.filter(point => point.source !== 'event'), [points]);
+  const recordedSegments = useMemo(() => buildSegments(trackedPoints), [trackedPoints]);
+  const fallbackSegments = useMemo(() => buildEventFallbackSegments(events), [events]);
+  const segments = useMemo(() => {
+    const daysWithRecordedPolyline = new Set(
+      recordedSegments.filter(segment => segment.path.length >= 2).map(segment => segment.dateKey),
+    );
+    return [...recordedSegments, ...fallbackSegments.filter(segment => !daysWithRecordedPolyline.has(segment.dateKey))]
+      .sort((a, b) => a.dayStamp - b.dayStamp || a.partIndex - b.partIndex);
+  }, [fallbackSegments, recordedSegments]);
   const displaySegments = useMemo(() => {
     return segments.map(seg => {
       if (!useMapMatching) {
@@ -194,9 +264,14 @@ export default function RouteMapScreen() {
     [displaySegments, hiddenDates],
   );
   const visiblePoints = useMemo(() => {
-    if (hiddenDates.size === 0) return points;
-    return points.filter(pt => !hiddenDates.has(getJstDateInfo(pt.ts).dateKey));
-  }, [points, hiddenDates]);
+    const items = visibleSegments.flatMap(segment => segment.points);
+    const deduped = new Map<string, RoutePoint>();
+    for (const point of items) {
+      const key = `${point.id}-${point.ts}`;
+      deduped.set(key, point);
+    }
+    return [...deduped.values()].sort((a, b) => a.ts.localeCompare(b.ts));
+  }, [visibleSegments]);
   const totalDistanceKm = useMemo(() => {
     return displaySegments.reduce((sum, seg) => sum + seg.displayDistanceKm, 0);
   }, [displaySegments]);
@@ -233,6 +308,10 @@ export default function RouteMapScreen() {
     () => displaySegments.filter(seg => seg.matchProvider === 'osrm-route').length,
     [displaySegments],
   );
+  const routeMatchedCount = useMemo(
+    () => displaySegments.filter(seg => seg.matchProvider === 'osrm-match').length,
+    [displaySegments],
+  );
   const brokenSegmentCount = useMemo(
     () => segments.filter(seg => seg.partIndex > 0).length,
     [segments],
@@ -259,9 +338,13 @@ export default function RouteMapScreen() {
     setError(null);
     void (async () => {
       try {
-        const arr = await listRoutePointsByTripId(tripId);
+        const [routePointRows, eventRows] = await Promise.all([
+          listRoutePointsByTripId(tripId),
+          getEventsByTripId(tripId),
+        ]);
         if (cancelled) return;
-        setPoints(arr);
+        setPoints(routePointRows);
+        setEvents(eventRows);
       } catch (e: any) {
         if (cancelled) return;
         setError(e?.message ?? 'ルート取得に失敗しました');
@@ -318,17 +401,27 @@ export default function RouteMapScreen() {
       return;
     }
     let cancelled = false;
+    setMatchedBySegment({});
+    const segmentsToCorrect = segments.filter(seg => shouldUseRouteCorrection(seg) && seg.points.length >= 2);
+    if (segmentsToCorrect.length === 0) {
+      setMatchingStatus('done');
+      return () => {
+        cancelled = true;
+      };
+    }
     setMatchingStatus('running');
     void (async () => {
-      const next: Record<string, { path: LatLng[]; provider: MatchProvider }> = {};
-      for (const seg of segments) {
-        if (seg.points.length < 2) continue;
-        const matched = await mapMatchRoutePoints(seg.points);
+      for (const seg of segmentsToCorrect) {
+        const matched = await mapMatchRoutePoints(seg.points, {
+          preferRoute: seg.sourceKind === 'eventFallback',
+        });
         if (cancelled) return;
-        next[seg.segmentKey] = matched;
+        setMatchedBySegment(prev => ({
+          ...prev,
+          [seg.segmentKey]: matched,
+        }));
       }
       if (cancelled) return;
-      setMatchedBySegment(next);
       setMatchingStatus('done');
     })().catch(() => {
       if (!cancelled) {
@@ -415,9 +508,9 @@ export default function RouteMapScreen() {
       <div className="card" style={{ padding: 12, color: '#fff', marginBottom: 12 }}>
         <div style={{ fontWeight: 900, marginBottom: 6 }}>ルート概要</div>
         <div style={{ display: 'grid', gap: 6, fontSize: 13 }}>
-          <div>記録点: {points.length} 件 / 日数: {daySummaries.length} 日</div>
+          <div>記録点: {trackedPoints.length} 件 / 補助地点: {fallbackSegments.reduce((sum, segment) => sum + segment.pointCount, 0)} 件 / 日数: {daySummaries.length} 日</div>
           <div>推定距離: {totalDistanceKm.toFixed(1)} km {useMapMatching ? '(補正後)' : '(生データ)'}</div>
-          <div>開始: {fmtDateTime(points[0]?.ts)} / 終了: {fmtDateTime(points[points.length - 1]?.ts)}</div>
+          <div>開始: {fmtDateTime(visiblePoints[0]?.ts ?? trackedPoints[0]?.ts)} / 終了: {fmtDateTime(visiblePoints[visiblePoints.length - 1]?.ts ?? trackedPoints[trackedPoints.length - 1]?.ts)}</div>
           <div>欠損区間で分割: {brokenSegmentCount} 区間</div>
           {useMapMatching && (
             <div style={{ opacity: 0.85 }}>
@@ -431,11 +524,11 @@ export default function RouteMapScreen() {
           )}
           {useMapMatching && (
             <div style={{ opacity: 0.75 }}>
-              補正内訳: OSRM経路補完 {routeFallbackCount} 区間 / 生データ {rawSegmentCount} 区間
+              補正内訳: OSRMマッチ {routeMatchedCount} 区間 / OSRM経路補完 {routeFallbackCount} 区間 / 生データ {rawSegmentCount} 区間
             </div>
           )}
           <div style={{ opacity: 0.75 }}>
-            記録点が長時間欠けた区間は、誤って一直線で結ばないように分割表示します。
+            GPS 記録が弱い日はイベント地点から道路沿いの補助ルートを描画し、長い欠損は誤って一直線で結ばないよう分割表示します。
           </div>
         </div>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 10 }}>
@@ -512,7 +605,7 @@ export default function RouteMapScreen() {
             ))}
           </div>
         ) : (
-          <div style={{ fontSize: 13, opacity: 0.8 }}>ルート記録がありません。</div>
+          <div style={{ fontSize: 13, opacity: 0.8 }}>ルート記録がありません。イベント地点のみでも地図に出るよう補完しています。</div>
         )}
       </div>
 

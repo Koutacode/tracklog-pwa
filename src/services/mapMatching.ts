@@ -35,6 +35,22 @@ function splitIntoChunks(points: RoutePoint[]): RoutePoint[][] {
   return chunks;
 }
 
+function normalizePointsForMatching(points: RoutePoint[]): RoutePoint[] {
+  if (points.length <= 1) return points;
+  const normalized: RoutePoint[] = [points[0]];
+  for (let i = 1; i < points.length; i++) {
+    const current = points[i];
+    const prev = normalized[normalized.length - 1];
+    const gapMs = Math.max(0, new Date(current.ts).getTime() - new Date(prev.ts).getTime());
+    if (distanceMeters(prev, current) < 8 && gapMs < 20 * 60 * 1000) {
+      normalized[normalized.length - 1] = current;
+      continue;
+    }
+    normalized.push(current);
+  }
+  return normalized;
+}
+
 async function fetchOsrmMatch(points: RoutePoint[]): Promise<LatLng[] | null> {
   if (points.length < 2) {
     return points.map(p => ({ lat: p.lat, lng: p.lng }));
@@ -120,23 +136,29 @@ async function fetchOsrmRoute(points: RoutePoint[]): Promise<LatLng[] | null> {
   }
 }
 
-export async function mapMatchRoutePoints(points: RoutePoint[]): Promise<{
+export async function mapMatchRoutePoints(
+  points: RoutePoint[],
+  options?: { preferRoute?: boolean },
+): Promise<{
   path: LatLng[];
   provider: MatchProvider;
 }> {
-  if (points.length < 2) {
-    return { path: points.map(p => ({ lat: p.lat, lng: p.lng })), provider: 'raw' };
+  const normalized = normalizePointsForMatching(points);
+  if (normalized.length < 2) {
+    return { path: normalized.map(p => ({ lat: p.lat, lng: p.lng })), provider: 'raw' };
   }
-  const chunks = splitIntoChunks(points);
+  const chunks = splitIntoChunks(normalized);
   const merged: LatLng[] = [];
   let usedMatch = false;
   let usedRoute = false;
   for (const chunk of chunks) {
-    const matched = await fetchOsrmMatch(chunk);
-    const routed = matched ? null : await fetchOsrmRoute(chunk);
-    const part = matched ?? routed ?? chunk.map(p => ({ lat: p.lat, lng: p.lng }));
+    const routedFirst = options?.preferRoute === true;
+    const routed = routedFirst ? await fetchOsrmRoute(chunk) : null;
+    const matched = routed ? null : await fetchOsrmMatch(chunk);
+    const fallbackRouted = matched || routed ? null : await fetchOsrmRoute(chunk);
+    const part = matched ?? routed ?? fallbackRouted ?? chunk.map(p => ({ lat: p.lat, lng: p.lng }));
     if (matched) usedMatch = true;
-    else if (routed) usedRoute = true;
+    else if (routed || fallbackRouted) usedRoute = true;
     if (merged.length === 0) {
       merged.push(...part);
       continue;

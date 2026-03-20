@@ -1,22 +1,22 @@
 import { useState, useEffect, useMemo } from 'react';
-import { Link } from 'react-router-dom';
-import type { Trip, DayRecord, DayMetrics, MonthSummary, JobInfo } from '../../domain/reportTypes';
+import { Link, useLocation, useSearchParams } from 'react-router-dom';
+import type { Trip, DayRecord, DayMetrics, JobInfo, TimeSegmentDetail } from '../../domain/reportTypes';
 import {
+  buildReportTripFromAppEvents,
   parseJsonToTrip,
-  computeDayMetrics,
+  computeTripDayMetrics,
   computeMonthSummary,
   formatMinutes,
   formatMinutesShort,
-  formatJstTime,
-  jstDateKey,
+  formatRoundedJstTime,
 } from '../../domain/reportLogic';
 import {
   saveReportTrip,
   listReportTrips,
   deleteReportTrip,
-  getReportTripsByMonth,
 } from '../../db/reportRepository';
-import { restoreSnapshotJson, uuid } from '../../db/repositories';
+import { getEventsByTripId, restoreSnapshotJson, uuid } from '../../db/repositories';
+import { buildTripViewModel } from '../../state/selectors';
 
 // --- Status colors ---
 const STATUS_COLORS: Record<string, string> = {
@@ -42,22 +42,47 @@ const MAIN_TABS: { key: MainTab; label: string; icon: string }[] = [
 // --- Report sub-tabs ---
 type ReportSubTab = 'daily' | 'jobs' | 'timeline';
 
+type ReportLocationState = {
+  initialReportTrip?: Trip;
+};
+
+function upsertTrip(trips: Trip[], nextTrip: Trip): Trip[] {
+  const remaining = trips.filter(trip => trip.id !== nextTrip.id);
+  return [nextTrip, ...remaining];
+}
+
 export default function ReportDashboard() {
+  const location = useLocation();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [mainTab, setMainTab] = useState<MainTab>('list');
   const [trips, setTrips] = useState<Trip[]>([]);
   const [selectedTripId, setSelectedTripId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const requestedTripId = searchParams.get('tripId');
+  const initialReportTrip = (location.state as ReportLocationState | null)?.initialReportTrip ?? null;
 
   async function loadTrips() {
     try {
       const list = await listReportTrips();
-      setTrips(list);
+      setTrips(initialReportTrip ? upsertTrip(list, initialReportTrip) : list);
     } catch (e: any) {
       setError(e?.message ?? 'Failed to load trips');
     }
   }
 
   useEffect(() => { void loadTrips(); }, []);
+  useEffect(() => {
+    if (!initialReportTrip) return;
+    setTrips(prev => upsertTrip(prev, initialReportTrip));
+    setSelectedTripId(initialReportTrip.id);
+    setMainTab('report');
+    setError(null);
+  }, [initialReportTrip]);
+  useEffect(() => {
+    if (!requestedTripId) return;
+    setSelectedTripId(requestedTripId);
+    setMainTab('report');
+  }, [requestedTripId]);
 
   const selectedTrip = useMemo(
     () => trips.find(t => t.id === selectedTripId) ?? null,
@@ -74,9 +99,36 @@ export default function ReportDashboard() {
     return months.size;
   }, [trips]);
 
-  function openTrip(tripId: string) {
+  function selectTrip(tripId: string) {
+    const next = new URLSearchParams(searchParams);
+    next.set('tripId', tripId);
+    setSearchParams(next, { replace: true });
     setSelectedTripId(tripId);
+  }
+
+  function openTrip(tripId: string) {
+    selectTrip(tripId);
     setMainTab('report');
+  }
+
+  async function refreshTripFromLive(tripId: string) {
+    const liveEvents = await getEventsByTripId(tripId);
+    if (liveEvents.length === 0) {
+      throw new Error('元の運行データが見つかりません。運行詳細から再作成してください。');
+    }
+    const liveVm = buildTripViewModel(tripId, liveEvents);
+    const currentLabel = trips.find(item => item.id === tripId)?.label;
+    const nextTrip = buildReportTripFromAppEvents({
+      tripId,
+      events: liveEvents,
+      dayRuns: liveVm.dayRuns,
+      label: currentLabel,
+    });
+    await saveReportTrip(nextTrip);
+    await loadTrips();
+    selectTrip(tripId);
+    setMainTab('report');
+    setError(null);
   }
 
   return (
@@ -121,8 +173,7 @@ export default function ReportDashboard() {
         {mainTab === 'new' && (
           <NewTripTab onSaved={(trip) => {
             void loadTrips().then(() => {
-              setSelectedTripId(trip.id);
-              setMainTab('report');
+              openTrip(trip.id);
             });
           }} />
         )}
@@ -130,7 +181,9 @@ export default function ReportDashboard() {
           <ReportTab
             trip={selectedTrip}
             trips={trips}
-            onSelectTrip={setSelectedTripId}
+            requestedTripId={requestedTripId}
+            onSelectTrip={selectTrip}
+            onRefreshLiveTrip={refreshTripFromLive}
           />
         )}
         {mainTab === 'monthly' && (
@@ -302,7 +355,7 @@ function NewTripTab({ onSaved }: { onSaved: (trip: Trip) => void }) {
         {saving ? '復元中...' : '現行運行へ復元する'}
       </button>
       <div className="report-section-caption" style={{ marginTop: 10 }}>
-        `events` 付きスナップショットか `operation_log` 形式を復元できます。`operation_log` は運行開始・休憩・休息・積込・荷卸・給油の時刻を再構成し、未終了の `trip_start` があれば運行中として戻します。
+        `登録する` は `events` / `dayRuns` / `operation_log` に対応します。`運行履歴データ:` 付きの共有テキストもそのまま貼り付け可能です。`現行運行へ復元する` は `events` 付きスナップショットか `operation_log` を受け付けます。
       </div>
     </div>
   );
@@ -311,13 +364,17 @@ function NewTripTab({ onSaved }: { onSaved: (trip: Trip) => void }) {
 // =============================================
 // Tab: Daily Report
 // =============================================
-function ReportTab({ trip, trips, onSelectTrip }: {
+function ReportTab({ trip, trips, requestedTripId, onSelectTrip, onRefreshLiveTrip }: {
   trip: Trip | null;
   trips: Trip[];
+  requestedTripId: string | null;
   onSelectTrip: (id: string) => void;
+  onRefreshLiveTrip: (id: string) => Promise<void>;
 }) {
   const [subTab, setSubTab] = useState<ReportSubTab>('daily');
   const [dayIdx, setDayIdx] = useState(0);
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshError, setRefreshError] = useState<string | null>(null);
 
   useEffect(() => { setDayIdx(0); }, [trip?.id]);
 
@@ -325,7 +382,14 @@ function ReportTab({ trip, trips, onSelectTrip }: {
     return (
       <div className="report-card" style={{ textAlign: 'center', padding: 32 }}>
         <div style={{ fontSize: 36, marginBottom: 8 }}>{'\u{1F4CB}'}</div>
-        <div style={{ fontWeight: 800, marginBottom: 12 }}>運行を選択してください</div>
+        <div style={{ fontWeight: 800, marginBottom: 12 }}>
+          {requestedTripId ? '日報を読み込み中です' : '運行を選択してください'}
+        </div>
+        {requestedTripId && (
+          <div style={{ color: 'var(--muted)', fontSize: 14, marginBottom: 12 }}>
+            保存した日報を開いています。数秒待っても切り替わらない場合は「最新状態へ更新」を試してください。
+          </div>
+        )}
         <select
           className="report-select"
           value=""
@@ -343,7 +407,10 @@ function ReportTab({ trip, trips, onSelectTrip }: {
   }
 
   const day = trip.days[dayIdx];
+  const metricsList = useMemo(() => computeTripDayMetrics(trip), [trip]);
+  const metrics = metricsList[dayIdx];
   if (!day) return null;
+  if (!metrics) return null;
 
   const subTabs: { key: ReportSubTab; label: string; icon: string }[] = [
     { key: 'daily', label: '日報', icon: '\u{1F4CA}' },
@@ -361,6 +428,28 @@ function ReportTab({ trip, trips, onSelectTrip }: {
           <span>{trip.jobs.length}案件</span>
           <span>#{trip.id.slice(0, 8)}</span>
         </div>
+        <div style={{ display: 'flex', gap: 10, marginTop: 14, flexWrap: 'wrap' }}>
+          <button
+            className="report-btn report-btn--primary"
+            disabled={refreshing}
+            onClick={() => {
+              setRefreshing(true);
+              setRefreshError(null);
+              void onRefreshLiveTrip(trip.id)
+                .catch((error: any) => {
+                  setRefreshError(error?.message ?? '最新状態への更新に失敗しました');
+                })
+                .finally(() => setRefreshing(false));
+            }}
+          >
+            {refreshing ? '更新中...' : '最新状態へ更新'}
+          </button>
+        </div>
+        {refreshError && (
+          <div className="report-alert report-alert--danger" style={{ marginTop: 12 }}>
+            {refreshError}
+          </div>
+        )}
       </div>
       {/* Trip selector + Day selector */}
       <div className="report-selectors">
@@ -403,7 +492,7 @@ function ReportTab({ trip, trips, onSelectTrip }: {
         ))}
       </div>
 
-      {subTab === 'daily' && <DailyView day={day} />}
+      {subTab === 'daily' && <DailyView day={day} metrics={metrics} />}
       {subTab === 'jobs' && <JobsView jobs={trip.jobs} />}
       {subTab === 'timeline' && <TimelineView day={day} />}
     </div>
@@ -413,8 +502,13 @@ function ReportTab({ trip, trips, onSelectTrip }: {
 // =============================================
 // Sub-view: Daily Report (metrics cards)
 // =============================================
-function DailyView({ day }: { day: DayRecord }) {
-  const metrics = useMemo(() => computeDayMetrics(day), [day]);
+function DailyView({ day, metrics }: { day: DayRecord; metrics: DayMetrics }) {
+  const businessMinutes = getBusinessMinutes(metrics);
+  const totalMinutes = metrics.driveMinutes
+    + businessMinutes
+    + metrics.breakMinutes
+    + metrics.ferryMinutes
+    + metrics.restMinutes;
 
   return (
     <div className="report-daily">
@@ -422,7 +516,7 @@ function DailyView({ day }: { day: DayRecord }) {
       <div className="report-date-header">
         <span className="report-date-header__day">{day.dayIndex}日目</span>
         <span className="report-date-header__date">{day.dateKey}</span>
-        {day.km > 0 && <span className="report-date-header__km">{day.km} km</span>}
+        <span className="report-date-header__km">{day.km} km</span>
       </div>
 
       {/* Alerts */}
@@ -433,24 +527,54 @@ function DailyView({ day }: { day: DayRecord }) {
       ))}
 
       {/* 3 Big Metric Cards */}
-      <div className="report-section-caption">その日の拘束・実働・翌日余力を上段に集約しています。</div>
+      <div className="report-section-caption">その日の拘束・実働・48時間運転余力を上段に集約しています。</div>
       <div className="report-big-cards">
-        <ConstraintCard minutes={metrics.constraintMinutes} overLimit={metrics.constraintOverLimit} />
+        <ConstraintCard metrics={metrics} />
         <WorkloadCard metrics={metrics} />
-        <DriveRemainingCard metrics={metrics} />
+        <RollingDriveCard metrics={metrics} />
       </div>
+
+      <ComplianceCard metrics={metrics} />
 
       {/* Activity breakdown */}
       <div className="report-card" style={{ padding: 16 }}>
         <div className="report-section-title">項目別集計</div>
+        <div className="report-section-caption" style={{ marginBottom: 12 }}>
+          表示時刻と集計は 15 分単位に丸め、業務には積込・荷卸などを含めています。休息中のフェリーは別行として表示し、休息はフェリー前後のみを計上します。通常日は 1 日合計が 24:00 ですが、初日の運行開始前と最終日の運行終了後は集計しません。休息が日をまたぐ場合は、当日 00:00 以降の継続分を当日に計上します。
+        </div>
         <div className="report-breakdown">
           <BreakdownRow label="運転" minutes={metrics.driveMinutes} color={STATUS_COLORS.drive} />
-          <BreakdownRow label="業務" minutes={metrics.workMinutes} color={STATUS_COLORS.work} />
+          <BreakdownRow label="業務" minutes={businessMinutes} color={STATUS_COLORS.work} />
           <BreakdownRow label="休憩" minutes={metrics.breakMinutes} color={STATUS_COLORS.break} />
+          <BreakdownRow label="フェリー" minutes={metrics.ferryMinutes} color="#0f766e" />
           <BreakdownRow label="休息" minutes={metrics.restMinutes} color={STATUS_COLORS.rest} />
-          <BreakdownRow label="待機" minutes={metrics.waitMinutes} color={STATUS_COLORS.wait} />
+          <BreakdownTotalRow label="合計" minutes={totalMinutes} />
         </div>
       </div>
+
+      {metrics.restSegments.length > 0 && (
+        <div className="report-card" style={{ padding: 16 }}>
+          <div className="report-section-title">休息内訳</div>
+          <div className="report-section-caption" style={{ marginBottom: 12 }}>
+            フェリー前後の休息のみを表示します。初日の運行開始前と最終日の運行終了後は含めず、日をまたぐ休息は当日 00:00 以降の継続分と当日開始分を分けて表示します。
+          </div>
+          {metrics.restSegments.map((segment, index) => (
+            <RestSegmentCard key={`rest-${index}`} segment={segment} />
+          ))}
+        </div>
+      )}
+
+      {metrics.ferrySegments.length > 0 && (
+        <div className="report-card" style={{ padding: 16 }}>
+          <div className="report-section-title">フェリー区間</div>
+          <div className="report-section-caption" style={{ marginBottom: 12 }}>
+            乗船から下船までをフェリー区間として扱い、日報では休息と分けて表示します。法令判定ではフェリー特例候補に回しています。
+          </div>
+          {metrics.ferrySegments.map((segment, index) => (
+            <FerrySegmentCard key={`ferry-${index}`} segment={segment} />
+          ))}
+        </div>
+      )}
 
       {/* Load/Unload details */}
       {(metrics.loads.length > 0 || metrics.unloads.length > 0) && (
@@ -466,46 +590,52 @@ function DailyView({ day }: { day: DayRecord }) {
       )}
 
       {/* Next day outlook */}
-      <NextDayCard metrics={metrics} />
+      <NextDayCard day={day} />
     </div>
   );
 }
 
+function getBusinessMinutes(metrics: DayMetrics) {
+  return metrics.workMinutes + metrics.loadMinutes + metrics.unloadMinutes + metrics.waitMinutes;
+}
+
 // --- Constraint time card ---
-function ConstraintCard({ minutes, overLimit }: { minutes: number; overLimit: boolean }) {
-  const limitMin = 13 * 60;
-  const pct = Math.min(100, (minutes / limitMin) * 100);
-  const barColor = overLimit ? '#ef4444' : '#38bdf8';
+function ConstraintCard({ metrics }: { metrics: DayMetrics }) {
+  const pct = Math.min(100, (metrics.constraintMinutes / metrics.effectiveConstraintLimitMinutes) * 100);
+  const barColor = metrics.constraintOverLimit ? '#ef4444' : '#38bdf8';
 
   return (
     <div className="report-metric-card">
       <div className="report-metric-card__header">
         <span className="report-metric-card__label">拘束時間</span>
-        <span className="report-metric-card__limit">上限 13:00</span>
+        <span className="report-metric-card__limit">上限 {formatMinutesShort(metrics.effectiveConstraintLimitMinutes)}</span>
       </div>
-      <div className="report-metric-card__value" style={{ color: overLimit ? '#ef4444' : '#e2e8f0' }}>
-        {formatMinutesShort(minutes)}
+      <div className="report-metric-card__value" style={{ color: metrics.constraintOverLimit ? '#ef4444' : '#e2e8f0' }}>
+        {formatMinutesShort(metrics.constraintMinutes)}
       </div>
       <div className="report-bar">
         <div className="report-bar__fill" style={{ width: `${pct}%`, background: barColor }} />
         <div className="report-bar__marker" style={{ left: '100%' }} />
       </div>
-      {overLimit && <div className="report-metric-card__warning">上限超過</div>}
+      <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 4 }}>
+        原則 13:00 / 適用 {formatMinutesShort(metrics.effectiveConstraintLimitMinutes)}
+      </div>
+      {metrics.constraintOverLimit && <div className="report-metric-card__warning">上限超過</div>}
     </div>
   );
 }
 
 // --- Workload card ---
 function WorkloadCard({ metrics }: { metrics: DayMetrics }) {
-  const total = metrics.driveMinutes + metrics.workMinutes + metrics.breakMinutes;
+  const businessMinutes = getBusinessMinutes(metrics);
+  const total = metrics.driveMinutes + businessMinutes;
   const drivePct = total > 0 ? (metrics.driveMinutes / total) * 100 : 0;
-  const workPct = total > 0 ? (metrics.workMinutes / total) * 100 : 0;
-  const breakPct = total > 0 ? (metrics.breakMinutes / total) * 100 : 0;
+  const workPct = total > 0 ? (businessMinutes / total) * 100 : 0;
 
   return (
     <div className="report-metric-card">
       <div className="report-metric-card__header">
-        <span className="report-metric-card__label">実働時間</span>
+        <span className="report-metric-card__label">稼働時間</span>
       </div>
       <div className="report-metric-card__value">{formatMinutesShort(total)}</div>
       <div className="report-stacked-bar">
@@ -515,30 +645,26 @@ function WorkloadCard({ metrics }: { metrics: DayMetrics }) {
         {workPct > 0 && (
           <div className="report-stacked-bar__seg" style={{ width: `${workPct}%`, background: STATUS_COLORS.work }} />
         )}
-        {breakPct > 0 && (
-          <div className="report-stacked-bar__seg" style={{ width: `${breakPct}%`, background: STATUS_COLORS.break }} />
-        )}
       </div>
       <div className="report-legend">
         <span><span className="report-legend__dot" style={{ background: STATUS_COLORS.drive }} />運転 {formatMinutesShort(metrics.driveMinutes)}</span>
-        <span><span className="report-legend__dot" style={{ background: STATUS_COLORS.work }} />業務 {formatMinutesShort(metrics.workMinutes)}</span>
-        <span><span className="report-legend__dot" style={{ background: STATUS_COLORS.break }} />休憩 {formatMinutesShort(metrics.breakMinutes)}</span>
+        <span><span className="report-legend__dot" style={{ background: STATUS_COLORS.work }} />業務 {formatMinutesShort(businessMinutes)}</span>
       </div>
     </div>
   );
 }
 
 // --- Drive remaining card ---
-function DriveRemainingCard({ metrics }: { metrics: DayMetrics }) {
-  const limitMin = 9 * 60;
-  const usedPct = Math.min(100, (metrics.driveMinutes / limitMin) * 100);
+function RollingDriveCard({ metrics }: { metrics: DayMetrics }) {
+  const limitMin = 18 * 60;
+  const usedPct = Math.min(100, (metrics.rollingTwoDayDriveMinutes / limitMin) * 100);
   const over = metrics.driveOverLimit;
 
   return (
     <div className="report-metric-card">
       <div className="report-metric-card__header">
-        <span className="report-metric-card__label">翌日残り運転</span>
-        <span className="report-metric-card__limit">上限 09:00</span>
+        <span className="report-metric-card__label">48時間残り運転</span>
+        <span className="report-metric-card__limit">上限 18:00</span>
       </div>
       <div className="report-metric-card__value" style={{ color: over ? '#ef4444' : '#22c55e' }}>
         {formatMinutesShort(metrics.nextDriveRemaining)}
@@ -547,7 +673,31 @@ function DriveRemainingCard({ metrics }: { metrics: DayMetrics }) {
         <div className="report-bar__fill" style={{ width: `${usedPct}%`, background: over ? '#ef4444' : '#22c55e' }} />
       </div>
       <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 4 }}>
-        使用: {formatMinutesShort(metrics.driveMinutes)} / 09:00
+        使用: {formatMinutesShort(metrics.rollingTwoDayDriveMinutes)} / 18:00
+      </div>
+    </div>
+  );
+}
+
+function ComplianceCard({ metrics }: { metrics: DayMetrics }) {
+  return (
+    <div className="report-card" style={{ padding: 16 }}>
+      <div className="report-section-title">法令チェック</div>
+      <div className="report-section-caption" style={{ marginBottom: 12 }}>
+        適用ルールは自動判定です。長距離特例は `450km以上区間`、フェリー特例は `乗船→下船` の検出を基準にしています。
+      </div>
+      <div className="report-load-item" style={{ borderLeftColor: '#38bdf8' }}>
+        <div className="report-load-item__header">
+          <span style={{ color: '#38bdf8' }}>{metrics.ruleModeLabel}</span>
+          <span className="mono">48h {formatMinutesShort(metrics.rollingTwoDayDriveMinutes)} / 18:00</span>
+        </div>
+        <div className="report-load-item__meta">
+          <span>2週平均 {formatMinutesShort(metrics.rollingTwoWeekWeeklyAverageMinutes)} / 44:00</span>
+          <span>連続運転 {formatMinutesShort(metrics.longestContinuousDriveMinutes)}</span>
+          <span>休息判定 {formatMinutesShort(metrics.restEquivalentMinutes)} / 最低 {formatMinutesShort(metrics.effectiveRestMinimumMinutes)}</span>
+          {metrics.ferryMinutes > 0 && <span>フェリー {formatMinutes(metrics.ferryMinutes)}</span>}
+        </div>
+        <div className="report-load-item__address">{metrics.ruleModeReason}</div>
       </div>
     </div>
   );
@@ -561,6 +711,47 @@ function BreakdownRow({ label, minutes, color }: { label: string; minutes: numbe
       <span className="report-breakdown__label">{label}</span>
       <span className="report-breakdown__value">{formatMinutesShort(minutes)}</span>
       <span className="report-breakdown__text">{formatMinutes(minutes)}</span>
+    </div>
+  );
+}
+
+function BreakdownTotalRow({ label, minutes }: { label: string; minutes: number }) {
+  return (
+    <div className="report-breakdown__row" style={{ marginTop: 8, paddingTop: 8, borderTop: '1px solid rgba(148, 163, 184, 0.18)' }}>
+      <span className="report-breakdown__dot" style={{ background: '#e2e8f0' }} />
+      <span className="report-breakdown__label" style={{ fontWeight: 800 }}>{label}</span>
+      <span className="report-breakdown__value" style={{ fontWeight: 800 }}>{formatMinutesShort(minutes)}</span>
+      <span className="report-breakdown__text" style={{ fontWeight: 700 }}>{formatMinutes(minutes)}</span>
+    </div>
+  );
+}
+
+function RestSegmentCard({ segment }: { segment: TimeSegmentDetail }) {
+  return (
+    <div className="report-load-item" style={{ borderLeftColor: STATUS_COLORS.rest }}>
+      <div className="report-load-item__header">
+        <span style={{ color: STATUS_COLORS.rest }}>休息</span>
+        <span className="mono">{formatRoundedJstTime(segment.startTs)} - {formatRoundedJstTime(segment.endTs)}</span>
+      </div>
+      <div className="report-load-item__meta">
+        <span>{formatMinutes(segment.durationMinutes)}</span>
+        {segment.continuesFromPreviousDay && <span className="report-badge">前日から継続</span>}
+        {segment.continuesToNextDay && <span className="report-badge">翌日へ継続</span>}
+      </div>
+    </div>
+  );
+}
+
+function FerrySegmentCard({ segment }: { segment: TimeSegmentDetail }) {
+  return (
+    <div className="report-load-item" style={{ borderLeftColor: '#0f766e' }}>
+      <div className="report-load-item__header">
+        <span style={{ color: '#0f766e' }}>フェリー</span>
+        <span className="mono">{formatRoundedJstTime(segment.startTs)} - {formatRoundedJstTime(segment.endTs)}</span>
+      </div>
+      <div className="report-load-item__meta">
+        <span>{formatMinutes(segment.durationMinutes)}</span>
+      </div>
     </div>
   );
 }
@@ -579,7 +770,7 @@ function LoadCard({ detail, type, index }: {
     <div className="report-load-item" style={{ borderLeftColor: color }}>
       <div className="report-load-item__header">
         <span style={{ color }}>{typeLabel}{index > 0 ? ` #${index + 1}` : ''}</span>
-        <span className="mono">{formatJstTime(detail.startTs)} - {formatJstTime(detail.endTs)}</span>
+        <span className="mono">{formatRoundedJstTime(detail.startTs)} - {formatRoundedJstTime(detail.endTs)}</span>
       </div>
       {detail.customer && <div className="report-load-item__customer">{detail.customer}</div>}
       <div className="report-load-item__meta">
@@ -591,26 +782,34 @@ function LoadCard({ detail, type, index }: {
   );
 }
 
-// --- Next day outlook card ---
-function NextDayCard({ metrics }: { metrics: DayMetrics }) {
+// --- Rest milestone card ---
+function NextDayCard({ day }: { day: DayRecord }) {
+  const restStart = [...day.events]
+    .sort((a, b) => a.ts.localeCompare(b.ts))
+    .reverse()
+    .find(event => event.type === 'rest_start');
+  const milestones = [8, 9, 10, 12].map(hours => ({
+    hours,
+    ts: restStart
+      ? new Date(new Date(restStart.ts).getTime() + hours * 60 * 60000).toISOString()
+      : null,
+  }));
+
   return (
     <div className="report-card report-next-day">
-      <div className="report-section-title">翌日運行見通し</div>
+      <div className="report-section-title">休息開始からの目安</div>
+      <div className="report-section-caption" style={{ marginBottom: 12 }}>
+        当日最後の休息開始時刻を基準に、8 / 9 / 10 / 12 時間後を 15 分単位で表示します。
+      </div>
       <div className="report-next-day__grid">
-        <div className="report-next-day__item">
-          <span className="report-next-day__label">最短運行再開</span>
-          <span className="report-next-day__value mono">
-            {metrics.earliestRestart ? formatJstTime(metrics.earliestRestart) : '--:--'}
-          </span>
-        </div>
-        <div className="report-next-day__item">
-          <span className="report-next-day__label">残り運転時間</span>
-          <span className="report-next-day__value mono">{formatMinutesShort(metrics.nextDriveRemaining)}</span>
-        </div>
-        <div className="report-next-day__item">
-          <span className="report-next-day__label">残り拘束時間</span>
-          <span className="report-next-day__value mono">{formatMinutesShort(metrics.nextConstraintRemaining)}</span>
-        </div>
+        {milestones.map(item => (
+          <div key={item.hours} className="report-next-day__item">
+            <span className="report-next-day__label">{item.hours}時間後</span>
+            <span className="report-next-day__value mono">
+              {item.ts ? formatRoundedJstTime(item.ts) : '--:--'}
+            </span>
+          </div>
+        ))}
       </div>
     </div>
   );
@@ -672,6 +871,11 @@ function TimelineView({ day }: { day: DayRecord }) {
     break_end: '休憩終了',
     rest_start: '休息開始',
     rest_end: '休息終了',
+    expressway_start: '高速開始',
+    expressway_end: '高速終了',
+    expressway: '高速道路',
+    boarding: 'フェリー乗船',
+    disembark: 'フェリー下船',
     wait_start: '待機開始',
     wait_end: '待機終了',
     drive_start: '運転開始',
@@ -693,6 +897,11 @@ function TimelineView({ day }: { day: DayRecord }) {
     break_end: STATUS_COLORS.break,
     rest_start: STATUS_COLORS.rest,
     rest_end: STATUS_COLORS.rest,
+    expressway_start: '#ec4899',
+    expressway_end: '#ec4899',
+    expressway: '#ec4899',
+    boarding: '#0f766e',
+    disembark: '#0f766e',
     wait_start: STATUS_COLORS.wait,
     wait_end: STATUS_COLORS.wait,
     work_start: STATUS_COLORS.work,
@@ -718,7 +927,7 @@ function TimelineView({ day }: { day: DayRecord }) {
               {i < sorted.length - 1 && <div className="report-timeline__connector" />}
             </div>
             <div className="report-timeline__content">
-              <div className="report-timeline__time mono">{formatJstTime(ev.ts)}</div>
+              <div className="report-timeline__time mono">{formatRoundedJstTime(ev.ts)}</div>
               <div className="report-timeline__label" style={{ color }}>
                 {typeLabels[ev.type] ?? ev.type}
               </div>

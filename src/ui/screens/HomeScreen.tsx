@@ -21,6 +21,7 @@ import {
   endBreak,
   addRefuel,
   addBoarding,
+  addDisembark,
   addPointMark,
   startExpressway,
   endExpressway,
@@ -35,11 +36,12 @@ import {
 import type { RouteTrackingMode } from '../../db/repositories';
 import type { AppEvent } from '../../domain/types';
 import { resolveNearestIC } from '../../services/icResolver';
-import { openNativeSettings, startRouteTracking, stopRouteTracking } from '../../services/routeTracking';
+import { openNativeSettings } from '../../services/routeTracking';
 import { cancelNativeExpresswayEndPrompt } from '../../services/nativeExpresswayPrompt';
 import { runStartupDiagnostics, type StartupDiagnosticItem } from '../../services/startupDiagnostics';
 import { runNativeQuickSetup as runNativeSetupWizard } from '../../services/nativeSetup';
 import { DEFAULT_APK_DOWNLOAD_URL, RELEASE_PAGE_URL } from '../../app/releaseInfo';
+import { requestRouteTrackingSync } from '../../app/routeTrackingSignal';
 import {
   checkVoiceRecognitionAvailable,
   findVoiceCommand,
@@ -141,6 +143,10 @@ export default function HomeScreen() {
     () => getOpenToggle(events, 'expressway_start', 'expressway_end', 'expresswaySessionId'),
     [events],
   );
+  const openFerrySessionId = useMemo(
+    () => getOpenToggle(events, 'boarding', 'disembark', 'ferrySessionId'),
+    [events],
+  );
   const isNative = Capacitor.isNativePlatform();
 
   const restActive = !!openRestSessionId;
@@ -148,12 +154,16 @@ export default function HomeScreen() {
   const unloadActive = !!openUnloadSessionId;
   const breakActive = !!openBreakSessionId;
   const expresswayActive = !!openExpresswaySessionId;
-  const canStartRest = !loadActive && !breakActive && !restActive && !unloadActive;
-  const canStartLoad = !restActive && !breakActive && !loadActive && !unloadActive;
-  const canStartUnload = !restActive && !breakActive && !unloadActive && !loadActive;
-  const canStartBreak = !restActive && !loadActive && !breakActive && !unloadActive;
+  const ferryActive = !!openFerrySessionId;
+  const canStartRest = !ferryActive && !loadActive && !breakActive && !restActive && !unloadActive;
+  const canStartLoad = !ferryActive && !restActive && !breakActive && !loadActive && !unloadActive;
+  const canStartUnload = !ferryActive && !restActive && !breakActive && !unloadActive && !loadActive;
+  const canStartBreak = !ferryActive && !restActive && !loadActive && !breakActive && !unloadActive;
   const expresswayStart = openExpresswaySessionId
     ? (events.find(e => e.type === 'expressway_start' && (e as any).extras?.expresswaySessionId === openExpresswaySessionId) as any)
+    : null;
+  const ferryStart = openFerrySessionId
+    ? (events.find(e => e.type === 'boarding' && (e as any).extras?.ferrySessionId === openFerrySessionId) as any)
     : null;
 
   // Fill missing addresses later whenオンラインになった際に補完する
@@ -428,9 +438,19 @@ export default function HomeScreen() {
 
     if (command.kind === 'boarding') {
       const { geo, address } = await getGeoWithAddress();
-      await addBoarding({ tripId, geo, address });
+      const { autoRestStarted } = await addBoarding({ tripId, geo, address });
       await refresh();
-      return '乗船記録を追加しました。';
+      return autoRestStarted
+        ? '休息を自動開始して乗船記録を追加しました。'
+        : '乗船記録を追加しました。';
+    }
+
+    if (command.kind === 'disembark') {
+      if (!ferryActive) throw new Error('フェリー乗船を記録中ではありません。');
+      const { geo, address } = await getGeoWithAddress();
+      await addDisembark({ tripId, geo, address });
+      await refresh();
+      return '下船記録を追加しました。';
     }
 
     if (command.kind === 'point_mark') {
@@ -569,28 +589,9 @@ export default function HomeScreen() {
   }, [tripId]);
 
   useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      if (!tripId || restActive) {
-        if (restActive) {
-          setRouteTrackingError(null);
-        }
-        await stopRouteTracking();
-        return;
-      }
-      try {
-        setRouteTrackingError(null);
-        await startRouteTracking(tripId, routeTrackingMode);
-      } catch (e: any) {
-        if (cancelled) return;
-        setRouteTrackingError(e?.message ?? 'ルート記録の開始に失敗しました');
-        await stopRouteTracking();
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [routeTrackingMode, tripId, restActive]);
+    setRouteTrackingError(null);
+    requestRouteTrackingSync();
+  }, [routeTrackingMode, tripId, restActive, ferryActive]);
 
   // Re-acquire wake lock when tab returns to foreground
   useEffect(() => {
@@ -956,14 +957,22 @@ export default function HomeScreen() {
       key: 'route',
       label: 'GPS記録',
       value: routeTrackingMode === 'precision' ? '精度重視' : '電池重視',
-      tone: 'info',
+      tone: 'route',
     },
     expresswayActive && expresswayStart
       ? {
           key: 'expressway',
           label: '高速',
           value: fmtDuration(now - new Date(expresswayStart.ts).getTime()),
-          tone: 'accent',
+          tone: 'expressway',
+        }
+      : null,
+    ferryActive && ferryStart
+      ? {
+          key: 'ferry',
+          label: 'フェリー',
+          value: fmtDuration(now - new Date(ferryStart.ts).getTime()),
+          tone: 'ferry',
         }
       : null,
     wakeLockAvailable
@@ -971,7 +980,7 @@ export default function HomeScreen() {
           key: 'wake-lock',
           label: '画面ON',
           value: wakeLockOn ? '維持中' : 'OFF',
-          tone: wakeLockOn ? 'accent' : 'muted',
+          tone: wakeLockOn ? 'wake' : 'muted',
         }
       : null,
   ].filter(Boolean) as Array<{ key: string; label: string; value: string; tone: string }>;
@@ -1309,21 +1318,42 @@ export default function HomeScreen() {
                     }}
                   />
                 )}
-                <BigButton
-                  label="乗船記録"
-                  hint="乗船イベントを追加"
-                  size="compact"
-                  variant="neutral"
-                  onClick={async () => {
-                    try {
-                      const { geo, address } = await getGeoWithAddress();
-                      await addBoarding({ tripId, geo, address });
-                      await refresh();
-                    } catch (e: any) {
-                      alert(e?.message ?? '乗船の記録に失敗しました');
-                    }
-                  }}
-                />
+                {ferryActive ? (
+                  <BigButton
+                    label="フェリー下船"
+                    hint="下船イベントを追加"
+                    size="compact"
+                    variant="neutral"
+                    onClick={async () => {
+                      try {
+                        const { geo, address } = await getGeoWithAddress();
+                        await addDisembark({ tripId, geo, address });
+                        await refresh();
+                      } catch (e: any) {
+                        alert(e?.message ?? '下船の記録に失敗しました');
+                      }
+                    }}
+                  />
+                ) : (
+                  <BigButton
+                    label="フェリー乗船"
+                    hint="未休息なら休息開始も同時に記録"
+                    size="compact"
+                    variant="neutral"
+                    onClick={async () => {
+                      try {
+                        const { geo, address } = await getGeoWithAddress();
+                        const { autoRestStarted } = await addBoarding({ tripId, geo, address });
+                        await refresh();
+                        if (autoRestStarted) {
+                          alert('休息を自動開始してフェリー乗船を記録しました。');
+                        }
+                      } catch (e: any) {
+                        alert(e?.message ?? '乗船の記録に失敗しました');
+                      }
+                    }}
+                  />
+                )}
                 <BigButton
                   label="地点マーク"
                   hint="現在地をメモ"

@@ -1,5 +1,10 @@
 apply plugin: 'com.android.application'
 
+def customAppBuildDir = findProperty('tracklogAppBuildDir')
+if (customAppBuildDir) {
+    layout.buildDirectory.set(file(customAppBuildDir))
+}
+
 android {
     namespace = "com.tracklog.assist"
     compileSdk = rootProject.ext.compileSdkVersion
