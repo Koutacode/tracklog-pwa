@@ -1,5 +1,33 @@
 # TrackLog Changelog
 
+## 2026-03-21
+
+### ルート直線化の修正と構成整理
+
+- ルート地図でイベント由来の補助地点を実 GPS ルート線へ混在させないよう修正し、一直線表示になりやすかった経路を改善。
+- 補助ルート側は OSRM の道路経路補完を優先し、補正前に近接重複点を間引くようにして、通過道路に沿った見え方へ寄せた。
+- `RouteMapScreen` で `GPS 実記録` と `イベント補助地点` を分離し、補完件数が分かる状態表示を追加。
+- 構成見直しとして、未使用だった `src/ui/components/ConfirmDialog.tsx` を削除。
+- `.gitignore` に `android/app/build-alt/`、`.codex-temp/`、`temp-debug/`、`temp_report_repro.mjs`、各種 `output` 一時生成物を追加し、作業ゴミが残りにくいよう整理。
+- `src/app/App.tsx` を route-level lazy load 化し、初回バンドルを単一大容量 chunk から分割。`index` は約 `396kB`、主要画面は個別 chunk 化。
+- 一連の整理と機能差分は `44302a1 Refine TrackLog route, report, and Obsidian workflows` としてコミット済み。
+
+### 検証
+
+- `npm run typecheck`
+- `npm run build`
+- `npx cap sync android`
+- `gradlew -PtracklogAppBuildDir=build-alt assembleDebug --no-daemon`
+- `adb install -r`
+- 実機 `RFCY70L6HTF` で起動確認。`am start -W -n com.tracklog.assist/.MainActivity` は `Status: ok`。
+- 直後の `logcat` に `FATAL EXCEPTION` / `ANR` なし。
+- ルート画面で `補正完了`、`OSRM経路補完 7 区間 / 生データ 2854 区間` を確認。
+
+### APK
+
+- 出力: `output/tracklog-assist-debug.apk`
+- SHA-256: `F46DB299EF11E4987AE15EF53954EDDE96867D62CA77C9905F182EA750B6BAFD`
+
 ## 2026-03-20
 
 ### ルート線表示・高速表示・Obsidian 復元 JSON
