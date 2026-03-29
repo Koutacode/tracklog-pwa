@@ -12,6 +12,7 @@ android/app/build-*/
 .env
 .env.*
 .dev.vars
+supabase/.temp/
 .codex-temp/
 temp-debug/
 temp_report_repro.mjs
