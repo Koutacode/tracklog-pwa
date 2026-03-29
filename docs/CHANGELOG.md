@@ -1,5 +1,74 @@
 # TrackLog Changelog
 
+## 2026-03-30
+
+### stable device / 初回プロフィール / 常時同期
+
+- クラウド同期の端末識別を `Supabase anonymous user.id` 依存から外し、Android では `ANDROID_ID` ベースの stable device id を使うよう変更
+- Supabase 側の stable device migration を適用し、`device_profiles` / `trip_headers` / `trip_events` / `trip_route_points` / `report_snapshots` の `device_id` を text 化
+- `claim_tracklog_device_profile` / `migrate_tracklog_device_records` を追加し、同じ端末なら再インストール後も同じ `device_id` を再利用できるよう変更
+- 初回起動時は `/setup` で `表示名` と `車番・識別名` の入力を必須化
+- `表示名` だけではなく `車番・識別名` も未設定なら通常画面へ入れないよう変更
+- `設定 > クラウド同期` の ON/OFF を廃止し、同期は常時有効に固定
+- Dexie hook で `events` / `routePoints` / `reportTrips` の変更を拾い、記録や更新のたびにデバウンス付きで即時同期するよう変更
+- Android 実機 `SCG34` (`RFCY70L6HTF`) で `アンインストール -> 再インストール` を2回実施し、2回目の再インストール後はプロフィール再入力なしでホームへ復帰することを確認
+- Supabase 上の端末一覧は最終的に `android:040861b7b0aaa9e0 / SCG34 メイン端末 / SCG34` の1件へ整理
+- Cloudflare Pages を再デプロイし、`https://tracklog-assist.pages.dev/` の本番バンドルを更新
+
+### 検証
+
+- `npm run typecheck`
+- `npm run build`
+- `npx cap sync android`
+- `android\\gradlew.bat -PtracklogAppBuildDir=build-stable-device assembleDebug --no-daemon`
+- `adb uninstall com.tracklog.assist`
+- `adb install -r android\\app\\build-stable-device\\outputs\\apk\\debug\\app-debug.apk`
+- `adb shell am start -W -n com.tracklog.assist/.MainActivity`
+- Android WebView DevTools で初回 `/setup?next=%2F` 表示を確認後、プロフィール保存で `/` へ遷移することを確認
+- 再インストール後は `/setup` に戻らず `https://localhost/` を開くことを確認
+- `Invoke-WebRequest https://tracklog-assist.pages.dev/` で本番 URL が最新バンドル `index-BN4B4Z-c.js` を返すことを確認
+
+### APK
+
+- File: `output/tracklog-assist-debug-stable-device.apk`
+- SHA-256: `A6CC81E551CC129859A556A8B090999211C576A20B52DB62A802B3C943AA4C20`
+- Device install: completed on `SCG34` (`RFCY70L6HTF`)
+- Launch check: `am start -W -n com.tracklog.assist/.MainActivity` returned `Status: ok` (`TotalTime: 281ms`)
+
+## 2026-03-29
+
+### クラウド同期・管理者画面・PWA 初回公開
+
+- Supabase を導入し、一般ドライバー向け `anonymous sign-in` と管理者向け `magic link` ログインを追加
+- `device_profiles`、`trip_headers`、`trip_events`、`trip_route_points`、`report_snapshots`、`admin_users` を含む初期 schema と RLS を追加
+- アプリ側に `設定 / 同期` 導線、端末ID保持、同期状態表示、手動同期、リモート同期ブートストラップを追加
+- 管理者向けに `/login`、`/admin`、`/admin/devices/:deviceId`、`/admin/trips/:tripId` を追加し、端末一覧・運行詳細・日報スナップショットを閲覧できるようにした
+- PWA 用 `manifest.webmanifest`、`sw.js`、`_redirects`、Apple touch icon メタデータを追加し、Cloudflare Pages へ初回公開
+- 本番 URL は `https://tracklog-assist.pages.dev/`
+- 管理画面 URL は `https://tracklog-assist.pages.dev/admin`
+- 管理者ログイン URL は `https://tracklog-assist.pages.dev/login`
+- Supabase Auth の `site_url` / `uri_allow_list` を本番 URL に更新し、公開環境でのメールリンク遷移に対応
+
+### 検証
+
+- `npm run typecheck`
+- `npm run build`
+- `npx wrangler whoami`
+- `npx wrangler pages project create tracklog-assist --production-branch main`
+- `npx wrangler pages deploy dist --project-name tracklog-assist --branch=main --commit-dirty=true`
+- `Invoke-WebRequest https://tracklog-assist.pages.dev/`
+- 実ブラウザ確認で `/` `/login` `/admin` を開き、未ログイン時 `/admin -> /login` 遷移を確認
+- `adb install -r output\\tracklog-assist-debug.apk`
+- `adb shell am start -W -n com.tracklog.assist/.MainActivity`
+- 起動直後の `logcat` に `FATAL EXCEPTION` / `ANR` なし
+
+### APK
+
+- File: `output/tracklog-assist-debug.apk`
+- SHA-256: `5A96F7E4E8A207AAFEF4E49CBF885EFF899902BB78CAF7259EDE67A2555610C6`
+- Device install: completed on `SCG34` (`RFCY70L6HTF`) with `adb install -r`
+- Launch check: `am start -W -n com.tracklog.assist/.MainActivity` returned `Status: ok` (`TotalTime: 326ms`)
+
 ## 2026-03-21
 
 ### ルート直線化の修正と構成整理

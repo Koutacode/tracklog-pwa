@@ -12,6 +12,22 @@ import com.getcapacitor.annotation.CapacitorPlugin;
 
 @CapacitorPlugin(name = "AppShare")
 public class AppSharePlugin extends Plugin {
+    private Intent buildTextShareIntent(String packageName, String title, String subject, String text) {
+        Intent intent = new Intent(Intent.ACTION_SEND);
+        intent.setType("text/plain");
+        if (packageName != null && !packageName.trim().isEmpty()) {
+            intent.setPackage(packageName);
+        }
+        intent.putExtra(Intent.EXTRA_TEXT, text);
+        if (subject != null && !subject.trim().isEmpty()) {
+            intent.putExtra(Intent.EXTRA_SUBJECT, subject);
+        } else if (title != null && !title.trim().isEmpty()) {
+            intent.putExtra(Intent.EXTRA_SUBJECT, title);
+        }
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        return intent;
+    }
+
     private Intent buildViewIntent(String url, String packageName) {
         Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
         intent.addCategory(Intent.CATEGORY_BROWSABLE);
@@ -50,16 +66,7 @@ public class AppSharePlugin extends Plugin {
             return;
         }
 
-        Intent intent = new Intent(Intent.ACTION_SEND);
-        intent.setType("text/plain");
-        intent.setPackage(packageName);
-        intent.putExtra(Intent.EXTRA_TEXT, text);
-        if (subject != null && !subject.trim().isEmpty()) {
-            intent.putExtra(Intent.EXTRA_SUBJECT, subject);
-        } else if (title != null && !title.trim().isEmpty()) {
-            intent.putExtra(Intent.EXTRA_SUBJECT, title);
-        }
-        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        Intent intent = buildTextShareIntent(packageName, title, subject, text);
 
         if (intent.resolveActivity(packageManager) == null) {
             call.reject("対象アプリでテキスト共有を処理できません。");
@@ -73,6 +80,37 @@ public class AppSharePlugin extends Plugin {
             call.resolve(result);
         } catch (Exception ex) {
             call.reject("対象アプリを開けませんでした。", ex);
+        }
+    }
+
+    @PluginMethod
+    public void shareText(PluginCall call) {
+        String title = call.getString("title");
+        String subject = call.getString("subject");
+        String text = call.getString("text");
+
+        if (text == null || text.trim().isEmpty()) {
+            call.reject("共有テキストが空です。");
+            return;
+        }
+
+        PackageManager packageManager = getContext().getPackageManager();
+        Intent shareIntent = buildTextShareIntent(null, title, subject, text);
+        Intent chooserIntent = Intent.createChooser(shareIntent, title != null && !title.trim().isEmpty() ? title : "共有");
+        chooserIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+
+        if (!canHandleIntent(shareIntent, packageManager)) {
+            call.reject("テキスト共有を処理できるアプリがありません。");
+            return;
+        }
+
+        try {
+            getContext().startActivity(chooserIntent);
+            JSObject result = new JSObject();
+            result.put("opened", true);
+            call.resolve(result);
+        } catch (Exception ex) {
+            call.reject("共有シートを開けませんでした。", ex);
         }
     }
 

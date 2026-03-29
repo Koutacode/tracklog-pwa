@@ -35,10 +35,69 @@ type RouteDaySummary = {
   dateLabel: string;
   color: string;
   pointCount: number;
+  recordedPointCount: number;
+  fallbackPointCount: number;
   gapCount: number;
   displayDistanceKm: number;
   providers: MatchProvider[];
+  rawSegmentCount: number;
+  routeFallbackCount: number;
+  routeMatchedCount: number;
+  quality: 'good' | 'watch' | 'poor';
+  qualityLabel: string;
+  qualityReason: string;
 };
+
+function summarizeRouteQuality(day: Omit<RouteDaySummary, 'quality' | 'qualityLabel' | 'qualityReason'>) {
+  if (day.recordedPointCount === 0 && day.fallbackPointCount > 0) {
+    return {
+      quality: 'poor' as const,
+      qualityLabel: '要確認',
+      qualityReason: 'GPS記録がなく、イベント補助地点のみです',
+    };
+  }
+  if (day.gapCount >= 3) {
+    return {
+      quality: 'poor' as const,
+      qualityLabel: '要確認',
+      qualityReason: `欠損分割が ${day.gapCount} 件あります`,
+    };
+  }
+  if (day.fallbackPointCount > 0 || day.routeFallbackCount > 0 || day.rawSegmentCount > 0 || day.gapCount > 0) {
+    return {
+      quality: 'watch' as const,
+      qualityLabel: '注意',
+      qualityReason: '補助ルートまたは欠損区間があります',
+    };
+  }
+  return {
+    quality: 'good' as const,
+    qualityLabel: '良好',
+    qualityReason: 'GPS実記録を中心にルートを描画できています',
+  };
+}
+
+function qualityBadgeStyle(quality: RouteDaySummary['quality']) {
+  if (quality === 'good') {
+    return {
+      border: '1px solid rgba(34, 197, 94, 0.3)',
+      background: 'rgba(21, 128, 61, 0.18)',
+      color: '#bbf7d0',
+    };
+  }
+  if (quality === 'watch') {
+    return {
+      border: '1px solid rgba(245, 158, 11, 0.3)',
+      background: 'rgba(180, 83, 9, 0.18)',
+      color: '#fde68a',
+    };
+  }
+  return {
+    border: '1px solid rgba(248, 113, 113, 0.3)',
+    background: 'rgba(127, 29, 29, 0.18)',
+    color: '#fecaca',
+  };
+}
 
 function distanceMeters(a: { lat: number; lng: number }, b: { lat: number; lng: number }) {
   const toRad = (v: number) => (v * Math.PI) / 180;
@@ -281,25 +340,54 @@ export default function RouteMapScreen() {
       const entry = byDay.get(seg.dateKey);
       if (entry) {
         entry.pointCount += seg.pointCount;
+        if (seg.sourceKind === 'recorded') {
+          entry.recordedPointCount += seg.pointCount;
+        } else {
+          entry.fallbackPointCount += seg.pointCount;
+        }
         entry.displayDistanceKm += seg.displayDistanceKm;
         if (seg.partIndex > 0) entry.gapCount += 1;
         if (!entry.providers.includes(seg.matchProvider)) {
           entry.providers.push(seg.matchProvider);
         }
+        if (seg.matchProvider === 'raw') entry.rawSegmentCount += 1;
+        if (seg.matchProvider === 'osrm-route') entry.routeFallbackCount += 1;
+        if (seg.matchProvider === 'osrm-match') entry.routeMatchedCount += 1;
       } else {
         byDay.set(seg.dateKey, {
           dateKey: seg.dateKey,
           dateLabel: seg.dateLabel,
           color: seg.color,
           pointCount: seg.pointCount,
+          recordedPointCount: seg.sourceKind === 'recorded' ? seg.pointCount : 0,
+          fallbackPointCount: seg.sourceKind === 'eventFallback' ? seg.pointCount : 0,
           gapCount: seg.partIndex > 0 ? 1 : 0,
           displayDistanceKm: seg.displayDistanceKm,
           providers: [seg.matchProvider],
+          rawSegmentCount: seg.matchProvider === 'raw' ? 1 : 0,
+          routeFallbackCount: seg.matchProvider === 'osrm-route' ? 1 : 0,
+          routeMatchedCount: seg.matchProvider === 'osrm-match' ? 1 : 0,
+          quality: 'watch',
+          qualityLabel: '',
+          qualityReason: '',
         });
       }
     }
-    return [...byDay.values()].sort((a, b) => a.dateKey.localeCompare(b.dateKey));
+    return [...byDay.values()]
+      .map(day => ({
+        ...day,
+        ...summarizeRouteQuality(day),
+      }))
+      .sort((a, b) => a.dateKey.localeCompare(b.dateKey));
   }, [displaySegments]);
+  const qualityCounts = useMemo(
+    () => ({
+      good: daySummaries.filter(day => day.quality === 'good').length,
+      watch: daySummaries.filter(day => day.quality === 'watch').length,
+      poor: daySummaries.filter(day => day.quality === 'poor').length,
+    }),
+    [daySummaries],
+  );
   const rawSegmentCount = useMemo(
     () => displaySegments.filter(seg => seg.matchProvider === 'raw').length,
     [displaySegments],
@@ -528,6 +616,9 @@ export default function RouteMapScreen() {
             </div>
           )}
           <div style={{ opacity: 0.75 }}>
+            品質目安: 良好 {qualityCounts.good} 日 / 注意 {qualityCounts.watch} 日 / 要確認 {qualityCounts.poor} 日
+          </div>
+          <div style={{ opacity: 0.75 }}>
             GPS 記録が弱い日はイベント地点から道路沿いの補助ルートを描画し、長い欠損は誤って一直線で結ばないよう分割表示します。
           </div>
         </div>
@@ -595,11 +686,30 @@ export default function RouteMapScreen() {
                   <span style={{ width: 12, height: 12, borderRadius: 999, background: day.color, display: 'inline-block' }} />
                   <span>{day.dateLabel}</span>
                 </span>
-                <span style={{ fontSize: 12, opacity: 0.8 }}>
-                  {day.pointCount}点 / {day.displayDistanceKm.toFixed(1)}km
-                  {day.gapCount > 0 ? ` / 分割 ${day.gapCount}` : ''}
-                  {useMapMatching && day.providers.includes('osrm-match') ? ' (マッチ)' : ''}
-                  {useMapMatching && !day.providers.includes('osrm-match') && day.providers.includes('osrm-route') ? ' (経路補完)' : ''}
+                <span style={{ display: 'grid', gap: 4, justifyItems: 'end' }}>
+                  <span
+                    style={{
+                      padding: '4px 8px',
+                      borderRadius: 999,
+                      fontSize: 11,
+                      fontWeight: 900,
+                      ...qualityBadgeStyle(day.quality),
+                    }}
+                  >
+                    {day.qualityLabel}
+                  </span>
+                  <span style={{ fontSize: 12, opacity: 0.8, textAlign: 'right' }}>
+                    {day.pointCount}点 / {day.displayDistanceKm.toFixed(1)}km
+                    {day.gapCount > 0 ? ` / 分割 ${day.gapCount}` : ''}
+                    {useMapMatching && day.providers.includes('osrm-match') ? ' / マッチ' : ''}
+                    {useMapMatching && !day.providers.includes('osrm-match') && day.providers.includes('osrm-route') ? ' / 経路補完' : ''}
+                  </span>
+                  <span style={{ fontSize: 11, opacity: 0.68, textAlign: 'right' }}>
+                    GPS {day.recordedPointCount}点 / 補助 {day.fallbackPointCount}点
+                  </span>
+                  <span style={{ fontSize: 11, opacity: 0.68, textAlign: 'right' }}>
+                    {day.qualityReason}
+                  </span>
                 </span>
               </button>
             ))}

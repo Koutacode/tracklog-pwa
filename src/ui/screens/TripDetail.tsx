@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { Capacitor } from '@capacitor/core';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import {
   deleteEvent,
@@ -25,7 +26,7 @@ import {
 } from '../../domain/reportLogic';
 import { buildTripViewModel, TripViewModel } from '../../state/selectors';
 import { DAY_MS, getJstDateInfo } from '../../domain/jst';
-import { openNoteInObsidian, saveMarkdownToObsidian, shareTextToPackage } from '../../services/nativeShare';
+import { openNoteInObsidian, saveMarkdownToObsidian, shareText, shareTextToPackage } from '../../services/nativeShare';
 
 const OBSIDIAN_VAULT_NAME = 'AI';
 const OBSIDIAN_NOTE_DIR = 'Inbox';
@@ -557,8 +558,13 @@ function getErrorMessage(error: unknown) {
 
 async function copyText(text: string) {
   if (navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(text);
-    return;
+    try {
+      await navigator.clipboard.writeText(text);
+      return;
+    } catch {
+      // Android WebView can deny clipboard writes even when the API exists.
+      // Fall back to a hidden textarea copy before surfacing an error.
+    }
   }
   const area = document.createElement('textarea');
   area.value = text;
@@ -763,18 +769,26 @@ export default function TripDetail() {
     try {
       const payload = buildAiPayload(tripId, vm, events);
       const text = buildAiShareText(payload);
-      if (navigator.share) {
+        if (navigator.share) {
+          try {
+            await navigator.share({ title: '運行記録', text });
+            return;
+          } catch (e: any) {
+            if (e?.name === 'AbortError') return;
+          }
+        }
+      if (Capacitor.isNativePlatform()) {
         try {
-          await navigator.share({ title: '運行記録', text });
-          return;
-        } catch (e: any) {
-          if (e?.name === 'AbortError') return;
+          const opened = await shareText({ title: '運行記録', subject: '運行記録', text });
+          if (opened) return;
+        } catch {
+          // Fall back to clipboard copy below.
         }
       }
       await copyText(text);
       alert('AI要約用テキストをコピーしました。ChatGPT/Geminiに貼り付けてください。');
     } catch (e: any) {
-      setErr(e?.message ?? 'AI要約の準備に失敗しました');
+      setErr('AI要約テキストを共有またはコピーできませんでした。共有先アプリを選ぶか、再度お試しください。');
     } finally {
       setSharing(false);
     }

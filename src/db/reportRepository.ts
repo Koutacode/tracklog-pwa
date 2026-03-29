@@ -1,8 +1,10 @@
 import { db } from './db';
+import { requestRemoteSync } from '../app/remoteSyncSignal';
 import type { Trip } from '../domain/reportTypes';
 
 export async function saveReportTrip(trip: Trip): Promise<void> {
   await db.reportTrips.put(trip);
+  requestRemoteSync('report-save');
 }
 
 export async function getReportTrip(id: string): Promise<Trip | undefined> {
@@ -15,4 +17,5 @@ export async function listReportTrips(): Promise<Trip[]> {
 
 export async function deleteReportTrip(id: string): Promise<void> {
   await db.reportTrips.delete(id);
+  requestRemoteSync('report-delete');
 }

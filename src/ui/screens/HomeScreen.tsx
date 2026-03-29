@@ -42,6 +42,9 @@ import { runStartupDiagnostics, type StartupDiagnosticItem } from '../../service
 import { runNativeQuickSetup as runNativeSetupWizard } from '../../services/nativeSetup';
 import { DEFAULT_APK_DOWNLOAD_URL, RELEASE_PAGE_URL } from '../../app/releaseInfo';
 import { requestRouteTrackingSync } from '../../app/routeTrackingSignal';
+import { buildTripViewModel } from '../../state/selectors';
+import { buildReportTripFromAppEvents, computeTripDayMetrics } from '../../domain/reportLogic';
+import { computeLiveDriveStatus } from '../../domain/liveDriveStatus';
 import {
   checkVoiceRecognitionAvailable,
   findVoiceCommand,
@@ -67,6 +70,15 @@ function fmtDateTime(ts?: string) {
     hour: '2-digit',
     minute: '2-digit',
   }).format(new Date(ts));
+}
+
+function fmtMinutesShort(minutes: number) {
+  const safe = Math.max(0, Math.round(minutes));
+  const h = Math.floor(safe / 60);
+  const m = safe % 60;
+  if (h === 0) return `${m}分`;
+  if (m === 0) return `${h}時間`;
+  return `${h}時間${m}分`;
 }
 
 const LATEST_APK_URL = DEFAULT_APK_DOWNLOAD_URL;
@@ -774,6 +786,24 @@ export default function HomeScreen() {
     </div>
   ) : null;
 
+  const liveVm = useMemo(() => {
+    if (!tripId) return null;
+    const hasTripStart = events.some(event => event.tripId === tripId && event.type === 'trip_start');
+    if (!hasTripStart) return null;
+    return buildTripViewModel(tripId, events);
+  }, [tripId, events]);
+  const liveReportTrip = useMemo(() => {
+    if (!tripId || !liveVm) return null;
+    return buildReportTripFromAppEvents({
+      tripId,
+      events,
+      dayRuns: liveVm.dayRuns,
+    });
+  }, [tripId, events, liveVm]);
+  const liveMetricsList = useMemo(() => (liveReportTrip ? computeTripDayMetrics(liveReportTrip) : []), [liveReportTrip]);
+  const activeDayMetrics = liveMetricsList[liveMetricsList.length - 1] ?? null;
+  const liveDrive = useMemo(() => computeLiveDriveStatus(events, new Date(now).toISOString()), [events, now]);
+
   // Render when no trip is active
   if (!tripId) {
     return (
@@ -793,6 +823,9 @@ export default function HomeScreen() {
                 ⚙
               </button>
             )}
+              <Link to="/settings" className="pill-link">
+                同期/端末
+              </Link>
               <Link to="/history" className="pill-link">
                 運行履歴
               </Link>
@@ -911,6 +944,55 @@ export default function HomeScreen() {
   const breakStart = openBreakSessionId
     ? (events.find(e => e.type === 'break_start' && (e as any).extras?.breakSessionId === openBreakSessionId) as any)
     : null;
+  const driveStartedAt = liveDrive.currentCategory === 'drive' ? liveDrive.currentCategoryStartedAt : null;
+  const liveContinuousMessage =
+    liveDrive.currentCategory === 'drive'
+      ? liveDrive.continuousDriveEmergencyExceeded
+        ? '4時間30分を超過しています'
+        : liveDrive.continuousDriveExceeded
+          ? `4時間超過 / 4時間30分まで残り ${fmtMinutesShort(liveDrive.remainingUntilEmergencyLimitMinutes)}`
+          : `4時間まで残り ${fmtMinutesShort(liveDrive.remainingUntilLimitMinutes)}`
+      : liveDrive.resetCompleted
+        ? `初期化済み${liveDrive.resetCompletedAt ? ` / ${fmtDateTime(liveDrive.resetCompletedAt)}` : ''}`
+        : liveDrive.currentNonDrivingMinutes > 0
+          ? liveDrive.currentNonDrivingMinutes < 10
+            ? `現在の中断 ${fmtMinutesShort(liveDrive.currentNonDrivingMinutes)} / 10分未満は未算入`
+            : `初期化進捗 ${fmtMinutesShort(30 - liveDrive.remainingUntilResetMinutes)} / 30分`
+          : '次の中断で30分確保すると初期化できます';
+  const legalSummaryRows = activeDayMetrics
+    ? [
+        {
+          key: 'rule',
+          label: '適用ルール',
+          value: activeDayMetrics.ruleModeLabel,
+          note: activeDayMetrics.ruleModeReason,
+        },
+        {
+          key: 'rolling-48h',
+          label: '直近48h運転',
+          value: `${fmtMinutesShort(activeDayMetrics.rollingTwoDayDriveMinutes)} / 18時間`,
+          note: `残り ${fmtMinutesShort(activeDayMetrics.nextDriveRemaining)}`,
+        },
+        {
+          key: 'rolling-14d',
+          label: '直近14日運転',
+          value: `${fmtMinutesShort(activeDayMetrics.rollingTwoWeekDriveMinutes)} / 88時間`,
+          note: `週平均 ${fmtMinutesShort(activeDayMetrics.rollingTwoWeekWeeklyAverageMinutes)}`,
+        },
+        {
+          key: 'constraint',
+          label: '拘束時間',
+          value: `${fmtMinutesShort(activeDayMetrics.constraintMinutes)} / ${fmtMinutesShort(activeDayMetrics.effectiveConstraintLimitMinutes)}`,
+          note: '当日累計',
+        },
+        {
+          key: 'rest-equivalent',
+          label: '休息相当',
+          value: `${fmtMinutesShort(activeDayMetrics.restEquivalentMinutes)} / 最低 ${fmtMinutesShort(activeDayMetrics.effectiveRestMinimumMinutes)}`,
+          note: activeDayMetrics.earliestRestart ? `次の再開目安 ${fmtDateTime(activeDayMetrics.earliestRestart)}` : '休息開始待ち',
+        },
+      ]
+    : [];
   const startMetaText = fmtDateTime(tripStart?.ts);
   const activeStatusRows = [
     {
@@ -919,6 +1001,14 @@ export default function HomeScreen() {
       value: tripElapsed != null ? fmtDuration(tripElapsed) : '-',
       tone: 'trip',
     },
+    ferryStart
+      ? {
+          key: 'ferry',
+          label: 'フェリー',
+          value: fmtDuration(now - new Date(ferryStart.ts).getTime()),
+          tone: 'ferry',
+        }
+      : null,
     restStart
       ? {
           key: 'rest',
@@ -949,6 +1039,14 @@ export default function HomeScreen() {
           label: '休憩',
           value: fmtDuration(now - new Date(breakStart.ts).getTime()),
           tone: 'break',
+        }
+      : null,
+    driveStartedAt
+      ? {
+          key: 'drive',
+          label: '運転',
+          value: fmtDuration(now - new Date(driveStartedAt).getTime()),
+          tone: 'drive',
         }
       : null,
   ].filter(Boolean) as Array<{ key: string; label: string; value: string; tone: string }>;
@@ -985,7 +1083,7 @@ export default function HomeScreen() {
       : null,
   ].filter(Boolean) as Array<{ key: string; label: string; value: string; tone: string }>;
   const currentActivity = activeStatusRows.find(row => row.key !== 'trip');
-  const currentActivityLabel = currentActivity ? `${currentActivity.label}進行中` : '通常運行';
+  const currentActivityLabel = currentActivity ? `${currentActivity.label}中` : '通常運行';
   const currentActivityTone = currentActivity?.tone ?? 'trip';
   return (
     <div className="home-backdrop">
@@ -1002,6 +1100,9 @@ export default function HomeScreen() {
                 ⚙
               </button>
             )}
+            <Link to="/settings" className="pill-link">
+              同期/端末
+            </Link>
             <Link to={`/trip/${tripId}`} className="pill-link">
               運行詳細
             </Link>
@@ -1068,6 +1169,63 @@ export default function HomeScreen() {
                   </div>
                 ))}
               </div>
+            </div>
+            <div className="card home-compliance-card">
+              <div className="home-section-label">運行状態と法令チェック</div>
+              <div className="home-compliance-hero">
+                <div className="home-compliance-hero__item">
+                  <span>現在状態</span>
+                  <strong>{currentActivityLabel}</strong>
+                  <small>
+                    {currentActivity?.value
+                      ? `継続 ${currentActivity.value}`
+                      : `運行 ${tripElapsed != null ? fmtDuration(tripElapsed) : '-'}`}
+                  </small>
+                </div>
+                <div className="home-compliance-hero__item">
+                  <span>純運転</span>
+                  <strong>{fmtMinutesShort(liveDrive.driveSinceResetMinutes)}</strong>
+                  <small>{liveContinuousMessage}</small>
+                </div>
+                <div className="home-compliance-hero__item">
+                  <span>初期化判定</span>
+                  <strong>
+                    {liveDrive.resetCompleted
+                      ? '初期化済み'
+                      : liveDrive.currentNonDrivingMinutes > 0
+                        ? `${fmtMinutesShort(30 - liveDrive.remainingUntilResetMinutes)} / 30分`
+                        : '待機中'}
+                  </strong>
+                  <small>
+                    {liveDrive.lastResetAt
+                      ? `前回 ${fmtDateTime(liveDrive.lastResetAt)}`
+                      : 'まだ初期化していません'}
+                  </small>
+                </div>
+              </div>
+              {legalSummaryRows.length > 0 && (
+                <div className="home-compliance-grid">
+                  {legalSummaryRows.map(row => (
+                    <div key={row.key} className="home-compliance-metric">
+                      <span>{row.label}</span>
+                      <strong>{row.value}</strong>
+                      <small>{row.note}</small>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {activeDayMetrics && activeDayMetrics.alerts.length > 0 && (
+                <div className="home-compliance-alerts">
+                  {activeDayMetrics.alerts.map((alert, index) => (
+                    <div
+                      key={`${alert.message}-${index}`}
+                      className={`home-alert ${alert.level === 'danger' ? 'home-alert--danger' : 'home-alert--warning'}`}
+                    >
+                      {alert.message}
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
             <div className="card home-info-card">
               <div className="home-section-label">現在地</div>

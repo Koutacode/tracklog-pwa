@@ -1,6 +1,11 @@
 import { Capacitor, registerPlugin } from '@capacitor/core';
 
 type AppSharePlugin = {
+  shareText(options: {
+    title?: string;
+    subject?: string;
+    text: string;
+  }): Promise<{ opened: boolean }>;
   shareTextToPackage(options: {
     packageName: string;
     title?: string;
@@ -14,6 +19,16 @@ type AppSharePlugin = {
 };
 
 const AppShare = registerPlugin<AppSharePlugin>('AppShare');
+
+export async function shareText(options: {
+  title?: string;
+  subject?: string;
+  text: string;
+}): Promise<boolean> {
+  if (!Capacitor.isNativePlatform()) return false;
+  const result = await AppShare.shareText(options);
+  return !!result.opened;
+}
 
 export async function shareTextToPackage(options: {
   packageName: string;

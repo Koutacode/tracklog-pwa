@@ -1,4 +1,5 @@
 import { db } from './db';
+import { requestRemoteSync } from '../app/remoteSyncSignal';
 import type {
   AppEvent,
   TripStartEvent,
@@ -42,6 +43,10 @@ async function setMeta(key: string, value: string | null) {
 async function getMeta(key: string): Promise<string | null> {
   const row = await db.meta.get(key);
   return row?.value ?? null;
+}
+
+function notifyRemoteMutation(reason: string) {
+  requestRemoteSync(reason);
 }
 
 const META_ACTIVE_TRIP_ID = 'activeTripId';
@@ -435,6 +440,7 @@ export async function clearActiveTripId() {
 
 export async function updateEventAddress(eventId: string, address?: string) {
   await db.events.update(eventId, { address });
+  notifyRemoteMutation('event-address-update');
 }
 
 export async function updateEventTimestamp(eventId: string, ts: string) {
@@ -449,6 +455,7 @@ export async function updateEventTimestamp(eventId: string, ts: string) {
     }
   });
   await rebalanceDayCloseIndices(ev.tripId);
+  notifyRemoteMutation('event-timestamp-update');
 }
 
 const SESSION_KEYS = [
@@ -646,6 +653,7 @@ export async function updateEventType(eventId: string, nextType: EventType) {
   if (needsTotals) {
     await recomputeTripEndTotals(ev.tripId);
   }
+  notifyRemoteMutation('event-type-update');
 }
 
 async function recomputeTripEndTotals(tripId: string) {
@@ -675,6 +683,7 @@ export async function updateEventOdo(eventId: string, odoKm: number) {
   const extras = { ...(ev as any).extras, odoKm };
   await db.events.update(eventId, { extras, syncStatus: 'pending' });
   await recomputeTripEndTotals(ev.tripId);
+  notifyRemoteMutation('event-odo-update');
 }
 
 export async function updateEventLiters(eventId: string, liters: number) {
@@ -686,6 +695,7 @@ export async function updateEventLiters(eventId: string, liters: number) {
   }
   const extras = { ...(ev as any).extras, liters };
   await db.events.update(eventId, { extras, syncStatus: 'pending' });
+  notifyRemoteMutation('event-liters-update');
 }
 
 function getRoutePointAnchorId(eventId: string) {
@@ -717,6 +727,7 @@ export async function addEvent(event: AppEvent) {
   await db.transaction('rw', db.events, db.routePoints, async () => {
     await putEventWithRoutePointTx(event);
   });
+  notifyRemoteMutation(`event-${event.type}`);
 }
 
 export async function addRoutePoint(point: Omit<RoutePoint, 'id'> & { id?: string }): Promise<RoutePoint> {
@@ -733,6 +744,7 @@ export async function addRoutePoint(point: Omit<RoutePoint, 'id'> & { id?: strin
     source: point.source,
   };
   await db.routePoints.put(row);
+  notifyRemoteMutation('route-point');
   return row;
 }
 
@@ -831,6 +843,7 @@ export async function startTrip(params: {
     await setMeta(META_PENDING_EXPRESSWAY_END_PROMPT, null);
     await setMeta(META_PENDING_EXPRESSWAY_END_DECISION, null);
   });
+  notifyRemoteMutation('trip-start');
   return { tripId, event: e };
 }
 
@@ -877,6 +890,7 @@ export async function endTrip(params: {
     await clearPendingExpresswayEndPrompt(params.tripId);
     await clearPendingExpresswayEndDecision(params.tripId);
   });
+  notifyRemoteMutation('trip-end');
   return { event: e };
 }
 
@@ -956,6 +970,7 @@ export async function endRest(params: {
     }
     await putEventWithRoutePointTx(e);
   });
+  notifyRemoteMutation('rest-end');
   return { event: e };
 }
 
@@ -1194,6 +1209,7 @@ export async function addBoarding(
       extras: { ferrySessionId },
     } as AppEvent);
   });
+  notifyRemoteMutation('ferry-boarding');
   return { ferrySessionId, autoRestStarted };
 }
 
@@ -1258,6 +1274,7 @@ export async function startExpressway(params: {
     await clearPendingExpresswayEndPrompt(params.tripId);
     await clearPendingExpresswayEndDecision(params.tripId);
   });
+  notifyRemoteMutation('expressway-start');
   return { expresswaySessionId, eventId: e.id };
 }
 
@@ -1298,6 +1315,7 @@ export async function endExpressway(params: {
     await clearPendingExpresswayEndDecision(params.tripId);
     eventId = e.id;
   });
+  notifyRemoteMutation('expressway-end');
   return { eventId };
 }
 
@@ -1333,6 +1351,7 @@ export async function updateExpresswayResolved(params: {
     delete extras.icResolveNextRetryAt;
   }
   await db.events.update(params.eventId, { extras });
+  notifyRemoteMutation('expressway-resolved');
 }
 
 export async function markExpresswayResolveFailure(params: {
@@ -1369,6 +1388,7 @@ export async function markExpresswayResolveFailure(params: {
     delete extras.icResolveError;
   }
   await db.events.update(params.eventId, { extras });
+  notifyRemoteMutation('expressway-resolve-failure');
   return { retryCount, exhausted, nextRetryAt };
 }
 
@@ -1455,6 +1475,7 @@ export async function deleteTrip(tripId: string): Promise<void> {
       await db.meta.delete(META_ACTIVE_TRIP_ID);
     }
   });
+  notifyRemoteMutation('trip-delete');
 }
 
 type RestoreSnapshotPayload = {
@@ -1916,6 +1937,7 @@ export async function restoreSnapshotJson(jsonText: string): Promise<RestoreSnap
     await clearPendingExpresswayEndDecision();
     await setMeta(META_ACTIVE_TRIP_ID, activeTripId);
   });
+  notifyRemoteMutation('snapshot-restore');
 
   return {
     importedEvents: events.length,
@@ -1938,6 +1960,7 @@ export async function deleteEvent(eventId: string): Promise<void> {
     await db.routePoints.delete(getRoutePointAnchorId(eventId));
   });
   await rebalanceDayCloseIndices(ev.tripId);
+  notifyRemoteMutation('event-delete');
 }
 
 /**
@@ -1948,6 +1971,7 @@ export async function updateEventAddressManual(eventId: string, address: string)
   const ev = await db.events.get(eventId);
   if (!ev) throw new Error('イベントが見つかりません');
   await db.events.update(eventId, { address: address.trim(), syncStatus: 'pending' });
+  notifyRemoteMutation('event-address-manual');
 }
 
 /**
@@ -1962,6 +1986,7 @@ export async function refreshEventAddressFromGeo(eventId: string): Promise<strin
   const addr = await reverseGeocode(geo);
   if (addr) {
     await db.events.update(eventId, { address: addr, syncStatus: 'pending' });
+    notifyRemoteMutation('event-address-refresh');
   }
   return addr;
 }
