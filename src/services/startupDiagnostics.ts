@@ -1,6 +1,11 @@
 import { Capacitor } from '@capacitor/core';
 import { getNativeNotificationDiagnostic } from './nativeExpresswayPrompt';
-import { checkBatteryOptimizationStatus, checkLocationPermissionStatus, getNativePlatformInfo } from './nativeSetup';
+import {
+  checkBatteryOptimizationStatus,
+  checkLocationPermissionStatus,
+  checkNativeLocationPermissionDetail,
+  getNativePlatformInfo,
+} from './nativeSetup';
 
 export type StartupDiagnosticLevel = 'ok' | 'warn' | 'error';
 
@@ -24,12 +29,25 @@ async function checkGeoPermissionState(): Promise<PermissionState | 'unknown'> {
 export async function runStartupDiagnostics(): Promise<StartupDiagnosticItem[]> {
   const items: StartupDiagnosticItem[] = [];
   const geoPerm = Capacitor.isNativePlatform() ? await checkLocationPermissionStatus() : await checkGeoPermissionState();
-  if (geoPerm === 'granted') {
+  const nativeLocationDetail = Capacitor.isNativePlatform() ? await checkNativeLocationPermissionDetail() : null;
+  const backgroundLocationDenied =
+    !!nativeLocationDetail &&
+    nativeLocationDetail.backgroundRelevant &&
+    nativeLocationDetail.foreground === 'granted' &&
+    nativeLocationDetail.background !== 'granted';
+  if (geoPerm === 'granted' && !backgroundLocationDenied) {
     items.push({
       id: 'geo',
       label: '位置情報権限',
-      detail: '許可済み',
+      detail: nativeLocationDetail?.backgroundRelevant ? '常時許可済み' : '許可済み',
       level: 'ok',
+    });
+  } else if (backgroundLocationDenied) {
+    items.push({
+      id: 'geo',
+      label: '位置情報権限',
+      detail: '前景のみ許可されています。バックグラウンド記録には「常に許可」が必要です。',
+      level: 'error',
     });
   } else if (geoPerm === 'denied') {
     items.push({

@@ -1,15 +1,17 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Link, Navigate, useParams } from 'react-router-dom';
+import { Link, Navigate, useNavigate, useParams } from 'react-router-dom';
 import AdminMap from '../components/AdminMap';
-import { getAdminDeviceBundle } from '../../services/remoteAdmin';
+import { deleteAdminDevice, getAdminDeviceBundle } from '../../services/remoteAdmin';
 import { getAdminSession } from '../../services/remoteAuth';
 
 export default function AdminDeviceDetail() {
   const { deviceId = '' } = useParams();
+  const navigate = useNavigate();
   const [ready, setReady] = useState(false);
   const [authenticated, setAuthenticated] = useState(false);
   const [bundle, setBundle] = useState<Awaited<ReturnType<typeof getAdminDeviceBundle>> | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -44,6 +46,28 @@ export default function AdminDeviceDetail() {
     };
   }, [bundle]);
 
+  async function handleDeleteDevice() {
+    const profile = bundle?.profile;
+    if (!profile) return;
+    const displayName = profile.display_name || profile.device_id;
+    const confirmed = window.confirm(
+      `${displayName} を管理画面から消去します。\n\n` +
+      'クラウド上の端末プロフィールと同期済みの運行データが削除されます。端末内のローカルデータは削除されません。\n\n' +
+      'この操作を実行しますか？',
+    );
+    if (!confirmed) return;
+
+    setError(null);
+    setDeleting(true);
+    try {
+      await deleteAdminDevice(profile.device_id);
+      navigate('/admin', { replace: true });
+    } catch (err: any) {
+      setError(err?.message ?? '端末IDの消去に失敗しました');
+      setDeleting(false);
+    }
+  }
+
   if (!ready) return <div className="screen-shell"><div className="screen-card">読み込み中…</div></div>;
   if (!authenticated) return <Navigate to="/login" replace />;
 
@@ -57,6 +81,16 @@ export default function AdminDeviceDetail() {
           </div>
           <div className="screen-card__actions">
             <Link to="/admin" className="pill-link">一覧へ戻る</Link>
+            {bundle?.profile && (
+              <button
+                type="button"
+                className="pill-link pill-link--danger"
+                disabled={deleting}
+                onClick={() => void handleDeleteDevice()}
+              >
+                {deleting ? '消去中' : '端末IDを消去'}
+              </button>
+            )}
           </div>
         </div>
         {error && <div className="settings-toast">{error}</div>}

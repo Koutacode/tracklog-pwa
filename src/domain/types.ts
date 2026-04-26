@@ -38,6 +38,7 @@ export type RoutePoint = {
   id: string;
   tripId: string;
   ts: string; // ISO timestamp
+  updatedAt?: string; // local-only sync watermark timestamp
   lat: number;
   lng: number;
   accuracy?: number;

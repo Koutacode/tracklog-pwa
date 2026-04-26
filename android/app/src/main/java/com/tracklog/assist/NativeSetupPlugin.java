@@ -1,11 +1,15 @@
 package com.tracklog.assist;
 
+import android.Manifest;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.PowerManager;
 import android.provider.Settings;
+
+import androidx.core.content.ContextCompat;
 
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
@@ -15,6 +19,10 @@ import com.getcapacitor.annotation.CapacitorPlugin;
 
 @CapacitorPlugin(name = "NativeSetup")
 public class NativeSetupPlugin extends Plugin {
+    private boolean isPermissionGranted(String permission) {
+        return ContextCompat.checkSelfPermission(getContext(), permission) == PackageManager.PERMISSION_GRANTED;
+    }
+
     private boolean isBatteryOptimizationGranted() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
             return true;
@@ -92,5 +100,50 @@ public class NativeSetupPlugin extends Plugin {
         ret.put("androidSdkInt", Build.VERSION.SDK_INT);
         ret.put("exactAlarmRelevant", Build.VERSION.SDK_INT >= Build.VERSION_CODES.S);
         call.resolve(ret);
+    }
+
+    @PluginMethod
+    public void checkLocationPermissions(PluginCall call) {
+        JSObject ret = new JSObject();
+        boolean fine = isPermissionGranted(Manifest.permission.ACCESS_FINE_LOCATION);
+        boolean coarse = isPermissionGranted(Manifest.permission.ACCESS_COARSE_LOCATION);
+        boolean backgroundRelevant = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q;
+        boolean background = !backgroundRelevant || isPermissionGranted(Manifest.permission.ACCESS_BACKGROUND_LOCATION);
+
+        ret.put("fine", fine);
+        ret.put("coarse", coarse);
+        ret.put("foreground", fine || coarse);
+        ret.put("background", background);
+        ret.put("backgroundRelevant", backgroundRelevant);
+        call.resolve(ret);
+    }
+
+    @PluginMethod
+    public void openAppSettings(PluginCall call) {
+        try {
+            Intent intent = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
+            intent.setData(Uri.parse("package:" + getContext().getPackageName()));
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            getContext().startActivity(intent);
+            JSObject ret = new JSObject();
+            ret.put("opened", true);
+            call.resolve(ret);
+        } catch (Exception ex) {
+            call.reject("アプリ設定を開けませんでした。", ex);
+        }
+    }
+
+    @PluginMethod
+    public void openLocationSettings(PluginCall call) {
+        try {
+            Intent intent = new Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS);
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            getContext().startActivity(intent);
+            JSObject ret = new JSObject();
+            ret.put("opened", true);
+            call.resolve(ret);
+        } catch (Exception ex) {
+            call.reject("位置情報設定を開けませんでした。", ex);
+        }
     }
 }

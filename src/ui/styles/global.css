@@ -173,6 +173,11 @@ a:hover {
   border: 1px solid rgba(56, 189, 248, 0.22);
 }
 
+.settings-toast--success {
+  border-color: rgba(34, 197, 94, 0.3);
+  background: rgba(22, 101, 52, 0.18);
+}
+
 .settings-code {
   max-height: 360px;
   overflow: auto;
@@ -182,6 +187,158 @@ a:hover {
   background: rgba(2, 6, 23, 0.92);
   color: #bfdbfe;
   font-size: 12px;
+}
+
+.admin-dashboard-map {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin-bottom: 18px;
+}
+
+.admin-dashboard-map__header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.admin-dashboard-map__header p {
+  margin: 4px 0 0;
+  color: var(--muted);
+}
+
+.admin-status-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(104px, 1fr));
+  gap: 8px;
+}
+
+.admin-status-summary__item {
+  min-height: 68px;
+  padding: 10px 12px;
+  border-radius: 14px;
+  background: rgba(15, 23, 42, 0.62);
+  border: 1px solid rgba(148, 163, 184, 0.16);
+}
+
+.admin-status-summary__item span {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.admin-status-summary__item strong {
+  display: block;
+  margin-top: 2px;
+  font-size: 24px;
+  line-height: 1.15;
+}
+
+.admin-status-summary__item--active {
+  border-color: rgba(34, 197, 94, 0.34);
+}
+
+.admin-status-summary__item--recent {
+  border-color: rgba(56, 189, 248, 0.34);
+}
+
+.admin-status-summary__item--stale {
+  border-color: rgba(248, 113, 113, 0.34);
+}
+
+.admin-map {
+  border-radius: 18px;
+  overflow: hidden;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  background: rgba(15, 23, 42, 0.62);
+}
+
+.admin-map-marker {
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.74);
+  border: 2px solid rgba(226, 232, 240, 0.92);
+  box-shadow: 0 8px 22px rgba(2, 6, 23, 0.38);
+}
+
+.admin-map-marker span {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: #94a3b8;
+}
+
+.admin-map-marker--active span {
+  background: #22c55e;
+}
+
+.admin-map-marker--recent span {
+  background: #38bdf8;
+}
+
+.admin-map-marker--stale span {
+  background: #f87171;
+}
+
+.admin-map-marker--unknown span {
+  background: #94a3b8;
+}
+
+.admin-map .leaflet-tooltip,
+.admin-map .leaflet-popup-content-wrapper {
+  color: #0f172a;
+}
+
+.admin-status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  background: rgba(15, 23, 42, 0.64);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.admin-status-badge::before {
+  content: '';
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: #94a3b8;
+}
+
+.admin-status-badge--active::before {
+  background: #22c55e;
+}
+
+.admin-status-badge--recent::before {
+  background: #38bdf8;
+}
+
+.admin-status-badge--stale::before {
+  background: #f87171;
+}
+
+.admin-table__subtext {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.admin-action-cell {
+  width: 96px;
+}
+
+.admin-delete-button {
+  min-width: 70px;
+  justify-content: center;
 }
 
 .admin-table-wrap {
@@ -237,6 +394,11 @@ a:hover {
     padding: 18px;
   }
 
+  .admin-status-summary {
+    width: 100%;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .settings-info-row {
     flex-direction: column;
     align-items: flex-start;
@@ -281,6 +443,23 @@ a:hover {
   background: rgba(30, 41, 59, 0.85);
   color: #fff;
   transform: translateY(-1px);
+}
+
+.pill-link:disabled {
+  cursor: wait;
+  opacity: 0.64;
+  transform: none;
+}
+
+.pill-link--danger {
+  border-color: rgba(248, 113, 113, 0.34);
+  color: #fecaca;
+}
+
+.pill-link--danger:hover:not(:disabled) {
+  border-color: rgba(248, 113, 113, 0.72);
+  background: rgba(127, 29, 29, 0.42);
+  color: #fff;
 }
 
 .auto-expressway-overlay {
@@ -894,6 +1073,17 @@ a:hover {
   background: #1f2937;
   color: #fff;
   cursor: pointer;
+}
+
+.trip-btn--primary {
+  border-color: rgba(56, 189, 248, 0.52);
+  background: linear-gradient(135deg, rgba(14, 165, 233, 0.56), rgba(56, 189, 248, 0.28));
+  color: #e0f2fe;
+}
+
+.trip-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .trip-btn--ghost {
@@ -3516,6 +3706,96 @@ a:hover {
   gap: 8px;
   flex-wrap: wrap;
   justify-content: flex-end;
+}
+
+.home-cockpit {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  border-radius: 24px;
+  background: linear-gradient(145deg, rgba(8, 15, 27, 0.94), rgba(15, 23, 42, 0.86));
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  box-shadow: 0 24px 56px rgba(2, 6, 23, 0.42);
+}
+
+.home-cockpit__heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+  font-size: 12px;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #7dd3fc;
+}
+
+.home-cockpit__heading strong {
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: rgba(14, 165, 233, 0.14);
+  border: 1px solid rgba(56, 189, 248, 0.24);
+  color: #e0f2fe;
+}
+
+.home-cockpit__cards {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
+.home-cockpit-card {
+  display: grid;
+  gap: 6px;
+  min-height: 116px;
+  padding: 14px 16px;
+  border-radius: 18px;
+  background: rgba(2, 6, 23, 0.36);
+  border: 1px solid rgba(148, 163, 184, 0.14);
+}
+
+.home-cockpit-card span {
+  font-size: 12px;
+  font-weight: 900;
+  color: rgba(148, 163, 184, 0.88);
+}
+
+.home-cockpit-card strong {
+  font-size: 26px;
+  font-weight: 900;
+  line-height: 1.1;
+}
+
+.home-cockpit-card small {
+  color: rgba(226, 232, 240, 0.72);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.home-cockpit-card--drive,
+.home-cockpit-card--route,
+.home-cockpit-card--trip {
+  border-color: rgba(56, 189, 248, 0.24);
+}
+
+.home-cockpit-card--warning,
+.home-cockpit-card--break,
+.home-cockpit-card--expressway {
+  border-color: rgba(245, 158, 11, 0.34);
+  background: rgba(180, 83, 9, 0.16);
+}
+
+.home-cockpit-card--danger,
+.home-cockpit-card--rest {
+  border-color: rgba(248, 113, 113, 0.34);
+  background: rgba(127, 29, 29, 0.18);
+}
+
+.home-cockpit-card--load,
+.home-cockpit-card--unload,
+.home-cockpit-card--ferry {
+  border-color: rgba(167, 139, 250, 0.26);
 }
 
 .home-overview-card,

@@ -373,10 +373,25 @@ function ReportTab({ trip, trips, requestedTripId, onSelectTrip, onRefreshLiveTr
 }) {
   const [subTab, setSubTab] = useState<ReportSubTab>('daily');
   const [dayIdx, setDayIdx] = useState(0);
+  const [now, setNow] = useState(() => Date.now());
   const [refreshing, setRefreshing] = useState(false);
   const [refreshError, setRefreshError] = useState<string | null>(null);
 
   useEffect(() => { setDayIdx(0); }, [trip?.id]);
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 60000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  const tripEnded = useMemo(
+    () => trip?.days.some(day => day.events.some(event => event.type === 'trip_end')) ?? false,
+    [trip],
+  );
+  const currentTs = trip && !tripEnded ? new Date(now).toISOString() : undefined;
+  const metricsList = useMemo(
+    () => (trip ? computeTripDayMetrics(trip, { currentTs }) : []),
+    [trip, currentTs],
+  );
 
   if (!trip) {
     return (
@@ -407,7 +422,6 @@ function ReportTab({ trip, trips, requestedTripId, onSelectTrip, onRefreshLiveTr
   }
 
   const day = trip.days[dayIdx];
-  const metricsList = useMemo(() => computeTripDayMetrics(trip), [trip]);
   const metrics = metricsList[dayIdx];
   if (!day) return null;
   if (!metrics) return null;

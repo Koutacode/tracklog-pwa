@@ -21,11 +21,27 @@ export type AdminTripBundle = {
   report: RemoteReportSnapshot | null;
 };
 
+export type DeleteAdminDeviceResult = {
+  mode: 'deleted' | 'hidden';
+};
+
+const ADMIN_HIDDEN_PLATFORM = 'admin_hidden';
+const ADMIN_HIDDEN_STATUS = '管理画面で非表示';
+
 function assertAdminConfigured() {
   if (!SUPABASE_CONFIGURED || !adminSupabase) {
     throw new Error('Supabase が未設定です');
   }
   return adminSupabase;
+}
+
+function isMissingDeleteRpc(error: { code?: string; message?: string }) {
+  const message = error.message ?? '';
+  return error.code === 'PGRST202' || message.includes('delete_tracklog_device');
+}
+
+function isHiddenDeviceProfile(profile: RemoteDeviceProfile) {
+  return profile.platform === ADMIN_HIDDEN_PLATFORM || profile.latest_status === ADMIN_HIDDEN_STATUS;
 }
 
 export async function listAdminDevices(): Promise<RemoteDeviceProfile[]> {
@@ -35,7 +51,31 @@ export async function listAdminDevices(): Promise<RemoteDeviceProfile[]> {
     .select('*')
     .order('last_seen_at', { ascending: false });
   if (error) throw error;
-  return (data ?? []) as RemoteDeviceProfile[];
+  return ((data ?? []) as RemoteDeviceProfile[]).filter(profile => !isHiddenDeviceProfile(profile));
+}
+
+export async function deleteAdminDevice(deviceId: string): Promise<DeleteAdminDeviceResult> {
+  const client = assertAdminConfigured();
+  const { error } = await client.rpc('delete_tracklog_device', {
+    _device_id: deviceId,
+  });
+  if (!error) return { mode: 'deleted' };
+  if (!isMissingDeleteRpc(error)) throw error;
+
+  const { error: hideError } = await client
+    .from('device_profiles')
+    .update({
+      platform: ADMIN_HIDDEN_PLATFORM,
+      latest_status: ADMIN_HIDDEN_STATUS,
+      latest_trip_id: null,
+      latest_lat: null,
+      latest_lng: null,
+      latest_accuracy: null,
+      last_seen_at: new Date().toISOString(),
+    })
+    .eq('device_id', deviceId);
+  if (hideError) throw hideError;
+  return { mode: 'hidden' };
 }
 
 export async function getAdminDeviceBundle(deviceId: string): Promise<AdminDeviceBundle> {
@@ -77,4 +117,3 @@ export async function getAdminTripBundle(tripId: string): Promise<AdminTripBundl
     report: (reportResult.data as RemoteReportSnapshot | null) ?? null,
   };
 }
-

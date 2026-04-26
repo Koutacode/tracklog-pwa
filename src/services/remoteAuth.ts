@@ -236,6 +236,26 @@ export async function sendAdminMagicLink(email: string, redirectTo?: string): Pr
   if (error) throw error;
 }
 
+export async function getAdminGoogleSignInUrl(redirectTo?: string): Promise<string> {
+  if (!SUPABASE_CONFIGURED || !adminSupabase) {
+    throw new Error('Supabase が未設定です');
+  }
+  const { data, error } = await adminSupabase.auth.signInWithOAuth({
+    provider: 'google',
+    options: {
+      redirectTo: getAdminRedirectUrl(redirectTo),
+      queryParams: {
+        access_type: 'offline',
+        prompt: 'select_account',
+      },
+      skipBrowserRedirect: true,
+    },
+  });
+  if (error) throw error;
+  if (!data.url) throw new Error('GoogleログインURLの取得に失敗しました');
+  return data.url;
+}
+
 export async function signOutAdmin(): Promise<void> {
   if (!adminSupabase) return;
   const { error } = await adminSupabase.auth.signOut();

@@ -451,7 +451,8 @@ function buildObsidianActivityLine(item: GroupedItem) {
 
 function buildObsidianMarkdown(tripId: string, vm: TripViewModel, payload: AiSharePayload, events: AppEvent[]) {
   const reportTrip = parseJsonToTrip(JSON.stringify(payload), tripId);
-  const metricsList = computeTripDayMetrics(reportTrip);
+  const currentTs = payload.summary.endTs ? undefined : new Date().toISOString();
+  const metricsList = computeTripDayMetrics(reportTrip, { currentTs });
   const restoreJson = buildObsidianRestoreJson(payload);
   const grouped = buildGrouped(events);
   const tripStartTs = events.find(event => event.type === 'trip_start')?.ts ?? events[0]?.ts;
@@ -554,6 +555,90 @@ function getErrorMessage(error: unknown) {
   if (error instanceof Error && error.message) return error.message;
   if (typeof error === 'string' && error) return error;
   return 'unknown error';
+}
+
+type TripReviewCheck = {
+  key: string;
+  label: string;
+  detail: string;
+  level: 'ok' | 'warn' | 'danger';
+};
+
+function buildTripReviewChecks(vm: TripViewModel, events: AppEvent[]): TripReviewCheck[] {
+  const sorted = [...events].sort((a, b) => a.ts.localeCompare(b.ts));
+  const checks: TripReviewCheck[] = [];
+  checks.push({
+    key: 'validation',
+    label: '整合性',
+    detail: vm.validation.ok ? 'ODOと区間距離の検算は通っています。' : vm.validation.errors.join(' / '),
+    level: vm.validation.ok ? 'ok' : 'danger',
+  });
+
+  checks.push({
+    key: 'trip-end',
+    label: '運行終了',
+    detail: vm.hasTripEnd
+      ? '運行終了ODOまで確定済みです。'
+      : '運行中のため、共有・日報は現在時刻までの暫定確認になります。',
+    level: vm.hasTripEnd ? 'ok' : 'warn',
+  });
+
+  const openSessions = toggleDefs.flatMap(def => {
+    const starts = sorted.filter(event => event.type === def.start);
+    const ends = sorted.filter(event => event.type === def.end);
+    return starts.filter(start => {
+      const sid = (start as any).extras?.[def.key] as string | undefined;
+      if (!sid) {
+        return !ends.some(end => end.ts >= start.ts);
+      }
+      return !ends.some(end => (end as any).extras?.[def.key] === sid);
+    }).map(() => def.label);
+  });
+  checks.push({
+    key: 'open-sessions',
+    label: '未終了イベント',
+    detail: openSessions.length > 0
+      ? `${Array.from(new Set(openSessions)).join(' / ')} が継続中です。意図した状態か確認してください。`
+      : '積込・荷卸・休憩・休息・高速・フェリーの開始/終了は閉じています。',
+    level: openSessions.length > 0 ? 'warn' : 'ok',
+  });
+
+  const geoMissing = sorted.filter(event => !event.geo).length;
+  const addressMissing = sorted.filter(event => event.geo && !event.address).length;
+  checks.push({
+    key: 'location',
+    label: '位置・住所',
+    detail:
+      geoMissing === 0 && addressMissing === 0
+        ? '全イベントに位置/住所が入っています。'
+        : `GPS未保存 ${geoMissing}件 / 住所未補完 ${addressMissing}件。オンライン時の住所再取得で補えます。`,
+    level: geoMissing > 0 || addressMissing > 0 ? 'warn' : 'ok',
+  });
+
+  const unresolvedIc = sorted.filter(event => {
+    if (event.type !== 'expressway' && event.type !== 'expressway_start' && event.type !== 'expressway_end') {
+      return false;
+    }
+    const status = (event as any).extras?.icResolveStatus;
+    return status && status !== 'resolved';
+  });
+  checks.push({
+    key: 'expressway',
+    label: '高速道路IC',
+    detail: unresolvedIc.length > 0
+      ? `IC未解決または失敗が ${unresolvedIc.length}件あります。オンライン時に再解決されます。`
+      : '高速道路イベントのIC解決に未処理はありません。',
+    level: unresolvedIc.length > 0 ? 'warn' : 'ok',
+  });
+
+  checks.push({
+    key: 'ai-share',
+    label: 'AI確認用データ',
+    detail: 'AI共有は運行データのみを渡します。日報集計ロジックと固定プロンプトは変更していません。',
+    level: 'ok',
+  });
+
+  return checks;
 }
 
 async function copyText(text: string) {
@@ -904,6 +989,7 @@ export default function TripDetail() {
   const tripStartTs = tripStartEvent?.ts ?? events[0]?.ts;
   const groupedByDay = tripStartTs ? groupItemsByDay(grouped, tripStartTs) : [];
   const editingEvents = [...events].sort((a, b) => b.ts.localeCompare(a.ts));
+  const reviewChecks = vm ? buildTripReviewChecks(vm, events) : [];
   return (
     <div className="page-shell trip-detail">
       <div className="trip-detail__header">
@@ -966,6 +1052,33 @@ export default function TripDetail() {
             >
               {deleting ? '削除中…' : '運行を削除'}
             </button>
+          </div>
+          <div className="card trip-section">
+            <div className="trip-section__title">提出前チェック / AI確認メモ</div>
+            <div className="trip-section__note">
+              日報の集計内容は変更せず、共有前に確認したい不足や未確定だけを表示します。
+            </div>
+            <div className="trip-list">
+              {reviewChecks.map(check => (
+                <div key={check.key} className="trip-item trip-item--split">
+                  <div>
+                    <div className="trip-item__title">{check.label}</div>
+                    <div className="trip-item__meta">{check.detail}</div>
+                  </div>
+                  <div
+                    className={`metric-chip ${
+                      check.level === 'ok'
+                        ? 'metric-chip--strong'
+                        : check.level === 'danger'
+                          ? 'home-chip--danger'
+                          : 'home-chip--warning'
+                    }`}
+                  >
+                    {check.level === 'ok' ? 'OK' : check.level === 'danger' ? '要修正' : '確認'}
+                  </div>
+                </div>
+              ))}
+            </div>
           </div>
           <div className="trip-detail__layout">
             <div className="trip-detail__column">

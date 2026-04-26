@@ -544,7 +544,11 @@ type DayState = {
   tripActive: boolean;
 };
 
-function getReportWindow(day: DayRecord, events: TripEvent[]): { startMin: number; endMin: number } {
+function getReportWindow(
+  day: DayRecord,
+  events: TripEvent[],
+  currentTs?: string,
+): { startMin: number; endMin: number } {
   let startMin = 0;
   let endMin = DAY_TOTAL_MIN;
 
@@ -558,6 +562,8 @@ function getReportWindow(day: DayRecord, events: TripEvent[]): { startMin: numbe
   const tripEnd = [...events].reverse().find(event => event.type === 'trip_end');
   if (tripEnd) {
     endMin = roundToQuarterMinutes(minuteOfDayExactJst(day.dateKey, tripEnd.ts));
+  } else if (currentTs && jstDateKey(currentTs) === day.dateKey) {
+    endMin = roundToQuarterMinutes(minuteOfDayExactJst(day.dateKey, currentTs));
   }
 
   if (endMin < startMin) {
@@ -650,9 +656,9 @@ function categoryAfterEvent(
   }
 }
 
-function buildRoundedIntervals(day: DayRecord): RoundedInterval[] {
+function buildRoundedIntervals(day: DayRecord, currentTs?: string): RoundedInterval[] {
   const events = [...day.events].sort((a, b) => a.ts.localeCompare(b.ts));
-  const { startMin: windowStart, endMin: windowEnd } = getReportWindow(day, events);
+  const { startMin: windowStart, endMin: windowEnd } = getReportWindow(day, events, currentTs);
   if (windowEnd <= windowStart) {
     return [];
   }
@@ -870,8 +876,8 @@ type ContinuousDriveState = {
   continuousDriveEmergencyExceeded: boolean;
 };
 
-function buildAbsoluteIntervals(day: DayRecord): AbsoluteInterval[] {
-  return buildRoundedIntervals(day).map(interval => ({
+function buildAbsoluteIntervals(day: DayRecord, currentTs?: string): AbsoluteInterval[] {
+  return buildRoundedIntervals(day, currentTs).map(interval => ({
     ...interval,
     dayIndex: day.dayIndex,
     dateKey: day.dateKey,
@@ -880,10 +886,10 @@ function buildAbsoluteIntervals(day: DayRecord): AbsoluteInterval[] {
   }));
 }
 
-function summarizeContinuousDrive(days: DayRecord[]): Map<number, ContinuousDriveState> {
+function summarizeContinuousDrive(days: DayRecord[], currentTs?: string): Map<number, ContinuousDriveState> {
   const byDay = new Map<number, ContinuousDriveState>();
   const intervals = days
-    .flatMap(buildAbsoluteIntervals)
+    .flatMap(day => buildAbsoluteIntervals(day, currentTs))
     .sort((a, b) => a.startTs.localeCompare(b.startTs));
 
   let driveSinceReset = 0;
@@ -1067,9 +1073,9 @@ function computeEarliestRestart(day: DayRecord, restMinimumMinutes: number): str
   return utcFromJstMinute(day.dateKey, restartMin, false);
 }
 
-export function computeDayMetrics(day: DayRecord): DayMetrics {
+export function computeDayMetrics(day: DayRecord, currentTs?: string): DayMetrics {
   const alerts: ReportAlert[] = [];
-  const intervals = buildRoundedIntervals(day);
+  const intervals = buildRoundedIntervals(day, currentTs);
   const coveredMin = intervals.reduce((sum, interval) => sum + Math.max(0, interval.endMin - interval.startMin), 0);
   const isPartialDay = coveredMin < DAY_TOTAL_MIN;
   const driveMin = sumCategoryMinutes(intervals, 'drive');
@@ -1169,9 +1175,13 @@ export function computeDayMetrics(day: DayRecord): DayMetrics {
   };
 }
 
-export function computeTripDayMetrics(trip: Trip): DayMetrics[] {
-  const base = trip.days.map(day => computeDayMetrics(day));
-  const continuous = summarizeContinuousDrive(trip.days);
+export function computeTripDayMetrics(
+  trip: Trip,
+  options?: { currentTs?: string },
+): DayMetrics[] {
+  const currentTs = options?.currentTs;
+  const base = trip.days.map(day => computeDayMetrics(day, currentTs));
+  const continuous = summarizeContinuousDrive(trip.days, currentTs);
   const ferryByDay = buildTripFerrySegmentsByDay(trip.days);
 
   return base.map((metrics, index) => {
@@ -1179,7 +1189,7 @@ export function computeTripDayMetrics(trip: Trip): DayMetrics[] {
     const ferrySegments = ferryByDay.get(day.dayIndex) ?? metrics.ferrySegments;
     const ferryMinutes = ferrySegments.reduce((sum, segment) => sum + segment.durationMinutes, 0);
     const ruleProfile = getRuleProfile(day, ferryMinutes, trip);
-    const intervals = buildRoundedIntervals(day);
+    const intervals = buildRoundedIntervals(day, currentTs);
     const coveredMin = intervals.reduce((sum, interval) => sum + Math.max(0, interval.endMin - interval.startMin), 0);
     const baseRestSegments = buildCategorySegments(day, intervals, 'rest');
     const baseRestMinutes = baseRestSegments.reduce((sum, segment) => sum + segment.durationMinutes, 0);

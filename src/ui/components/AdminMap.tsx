@@ -6,6 +6,8 @@ type Point = {
   lat: number;
   lng: number;
   label?: string;
+  popup?: string;
+  statusKind?: 'active' | 'recent' | 'stale' | 'unknown';
 };
 
 export default function AdminMap(props: {
@@ -59,7 +61,23 @@ export default function AdminMap(props: {
 
     const markers = props.markers ?? (props.center ? [props.center] : []);
     for (const point of markers) {
-      L.marker([point.lat, point.lng]).bindPopup(point.label ?? '位置').addTo(layers);
+      const statusKind = point.statusKind ?? 'unknown';
+      const marker = L.marker([point.lat, point.lng], {
+        icon: L.divIcon({
+          className: `admin-map-marker admin-map-marker--${statusKind}`,
+          html: '<span></span>',
+          iconSize: [18, 18],
+          iconAnchor: [9, 9],
+          popupAnchor: [0, -10],
+        }),
+      });
+      marker.bindTooltip(point.label ?? '位置', {
+        direction: 'top',
+        offset: [0, -10],
+        opacity: 0.94,
+      });
+      marker.bindPopup(point.popup ?? point.label ?? '位置');
+      marker.addTo(layers);
       bounds.push([point.lat, point.lng]);
     }
 
@@ -70,13 +88,11 @@ export default function AdminMap(props: {
 
   return (
     <div
+      className="admin-map"
       ref={hostRef}
       style={{
         width: '100%',
         height: props.height ?? 280,
-        borderRadius: 18,
-        overflow: 'hidden',
-        border: '1px solid rgba(148, 163, 184, 0.22)',
       }}
     />
   );

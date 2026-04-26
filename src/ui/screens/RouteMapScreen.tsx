@@ -11,6 +11,8 @@ const COLOR_PALETTE = ['#0ea5e9', '#22c55e', '#f97316', '#e11d48', '#a855f7', '#
 const MAX_SEGMENT_GAP_MS = 4 * 60 * 1000;
 const MAX_SEGMENT_DISTANCE_M = 1500;
 const MAX_SEGMENT_SPEED_KMH = 135;
+const MAX_RENDER_POINTS_PER_SEGMENT = 900;
+const MAX_MATCH_POINTS_PER_SEGMENT = 240;
 
 type RouteSegment = {
   segmentKey: string;
@@ -257,6 +259,24 @@ function distanceKm(path: LatLng[]) {
   return Math.round((distM / 1000) * 10) / 10;
 }
 
+function thinByIndex<T>(items: T[], maxItems: number): T[] {
+  if (items.length <= maxItems || maxItems < 2) return items;
+  const result: T[] = [items[0]];
+  const lastIndex = items.length - 1;
+  for (let i = 1; i < maxItems - 1; i++) {
+    const index = Math.round((i * lastIndex) / (maxItems - 1));
+    const item = items[index];
+    if (item !== result[result.length - 1]) {
+      result.push(item);
+    }
+  }
+  const last = items[lastIndex];
+  if (last !== result[result.length - 1]) {
+    result.push(last);
+  }
+  return result;
+}
+
 function fmtDateTime(ts?: string) {
   if (!ts) return '-';
   return new Intl.DateTimeFormat('ja-JP', {
@@ -283,6 +303,7 @@ export default function RouteMapScreen() {
   const [useMapMatching, setUseMapMatching] = useState(true);
   const [matchingStatus, setMatchingStatus] = useState<'idle' | 'running' | 'done' | 'error' | 'offline'>('idle');
   const [matchedBySegment, setMatchedBySegment] = useState<Record<string, { path: LatLng[]; provider: MatchProvider }>>({});
+  const matchingRunRef = useRef(0);
   const mapRef = useRef<HTMLDivElement | null>(null);
   const mapInstanceRef = useRef<L.Map | null>(null);
   const layerGroupRef = useRef<L.LayerGroup | null>(null);
@@ -304,6 +325,7 @@ export default function RouteMapScreen() {
         return {
           ...seg,
           displayPath: seg.path,
+          renderPath: thinByIndex(seg.path, MAX_RENDER_POINTS_PER_SEGMENT),
           displayDistanceKm: seg.distanceKm,
           matchProvider: 'raw' as const,
         };
@@ -313,6 +335,7 @@ export default function RouteMapScreen() {
       return {
         ...seg,
         displayPath: path,
+        renderPath: thinByIndex(path, MAX_RENDER_POINTS_PER_SEGMENT),
         displayDistanceKm: distanceKm(path),
         matchProvider: matched?.provider ?? 'raw',
       };
@@ -321,6 +344,10 @@ export default function RouteMapScreen() {
   const visibleSegments = useMemo(
     () => displaySegments.filter(seg => !hiddenDates.has(seg.dateKey)),
     [displaySegments, hiddenDates],
+  );
+  const correctableVisibleSegments = useMemo(
+    () => visibleSegments.filter(seg => shouldUseRouteCorrection(seg) && seg.points.length >= 2),
+    [visibleSegments],
   );
   const visiblePoints = useMemo(() => {
     const items = visibleSegments.flatMap(segment => segment.points);
@@ -473,54 +500,50 @@ export default function RouteMapScreen() {
   }, []);
 
   useEffect(() => {
-    if (!useMapMatching) {
-      setMatchedBySegment({});
-      setMatchingStatus('idle');
-      return;
-    }
+    matchingRunRef.current += 1;
+    setMatchedBySegment(prev => {
+      const validKeys = new Set(segments.map(seg => seg.segmentKey));
+      const next = Object.fromEntries(Object.entries(prev).filter(([key]) => validKeys.has(key)));
+      return Object.keys(next).length === Object.keys(prev).length ? prev : next;
+    });
+    setMatchingStatus('idle');
+  }, [segments]);
+
+  const runCorrectionForVisibleSegments = async () => {
     if (!isOnline) {
-      setMatchedBySegment({});
       setMatchingStatus('offline');
       return;
     }
-    if (segments.length === 0) {
-      setMatchedBySegment({});
-      setMatchingStatus('idle');
+    const segmentsToCorrect = correctableVisibleSegments.filter(seg => !matchedBySegment[seg.segmentKey]);
+    if (segmentsToCorrect.length === 0) {
+      setMatchingStatus(correctableVisibleSegments.length > 0 ? 'done' : 'idle');
       return;
     }
-    let cancelled = false;
-    setMatchedBySegment({});
-    const segmentsToCorrect = segments.filter(seg => shouldUseRouteCorrection(seg) && seg.points.length >= 2);
-    if (segmentsToCorrect.length === 0) {
-      setMatchingStatus('done');
-      return () => {
-        cancelled = true;
-      };
-    }
+    const runId = matchingRunRef.current + 1;
+    matchingRunRef.current = runId;
+    setUseMapMatching(true);
     setMatchingStatus('running');
-    void (async () => {
+    try {
       for (const seg of segmentsToCorrect) {
-        const matched = await mapMatchRoutePoints(seg.points, {
+        const pointsForMatching = thinByIndex(seg.points, MAX_MATCH_POINTS_PER_SEGMENT);
+        const matched = await mapMatchRoutePoints(pointsForMatching, {
           preferRoute: seg.sourceKind === 'eventFallback',
         });
-        if (cancelled) return;
+        if (matchingRunRef.current !== runId) return;
         setMatchedBySegment(prev => ({
           ...prev,
           [seg.segmentKey]: matched,
         }));
       }
-      if (cancelled) return;
-      setMatchingStatus('done');
-    })().catch(() => {
-      if (!cancelled) {
-        setMatchedBySegment({});
+      if (matchingRunRef.current === runId) {
+        setMatchingStatus('done');
+      }
+    } catch {
+      if (matchingRunRef.current === runId) {
         setMatchingStatus('error');
       }
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [segments, useMapMatching, isOnline]);
+    }
+  };
 
   useEffect(() => {
     const map = mapInstanceRef.current;
@@ -531,8 +554,8 @@ export default function RouteMapScreen() {
     const bounds = L.latLngBounds([]);
 
     for (const seg of visibleSegments) {
-      if (seg.displayPath.length < 2) continue;
-      const path = seg.displayPath.map(pt => L.latLng(pt.lat, pt.lng));
+      if (seg.renderPath.length < 2) continue;
+      const path = seg.renderPath.map(pt => L.latLng(pt.lat, pt.lng));
       L.polyline(path, {
         color: seg.color,
         weight: 4,
@@ -597,7 +620,7 @@ export default function RouteMapScreen() {
         <div style={{ fontWeight: 900, marginBottom: 6 }}>ルート概要</div>
         <div style={{ display: 'grid', gap: 6, fontSize: 13 }}>
           <div>記録点: {trackedPoints.length} 件 / 補助地点: {fallbackSegments.reduce((sum, segment) => sum + segment.pointCount, 0)} 件 / 日数: {daySummaries.length} 日</div>
-          <div>推定距離: {totalDistanceKm.toFixed(1)} km {useMapMatching ? '(補正後)' : '(生データ)'}</div>
+          <div>推定距離: {totalDistanceKm.toFixed(1)} km {useMapMatching && (routeMatchedCount > 0 || routeFallbackCount > 0) ? '(補正反映あり)' : '(生データ)'}</div>
           <div>開始: {fmtDateTime(visiblePoints[0]?.ts ?? trackedPoints[0]?.ts)} / 終了: {fmtDateTime(visiblePoints[visiblePoints.length - 1]?.ts ?? trackedPoints[trackedPoints.length - 1]?.ts)}</div>
           <div>欠損区間で分割: {brokenSegmentCount} 区間</div>
           {useMapMatching && (
@@ -610,6 +633,9 @@ export default function RouteMapScreen() {
               {matchingStatus === 'idle' && ' 待機中'}
             </div>
           )}
+          <div style={{ opacity: 0.75 }}>
+            地図描画: 表示用に最大 {MAX_RENDER_POINTS_PER_SEGMENT} 点/区間へ軽量化（始点・終点は保持）
+          </div>
           {useMapMatching && (
             <div style={{ opacity: 0.75 }}>
               補正内訳: OSRMマッチ {routeMatchedCount} 区間 / OSRM経路補完 {routeFallbackCount} 区間 / 生データ {rawSegmentCount} 区間
@@ -646,7 +672,22 @@ export default function RouteMapScreen() {
             className="trip-detail__button trip-detail__button--small"
             onClick={() => setUseMapMatching(v => !v)}
           >
-            {useMapMatching ? '補正をOFF' : '補正をON'}
+            {useMapMatching ? '補正結果を非表示' : '補正結果を表示'}
+          </button>
+          <button
+            className="trip-detail__button trip-detail__button--small"
+            onClick={() => {
+              void runCorrectionForVisibleSegments();
+            }}
+            disabled={
+              matchingStatus === 'running' ||
+              !useMapMatching ||
+              !isOnline ||
+              correctableVisibleSegments.length === 0 ||
+              correctableVisibleSegments.every(seg => matchedBySegment[seg.segmentKey])
+            }
+          >
+            表示中の補助ルートを補正
           </button>
         </div>
       </div>

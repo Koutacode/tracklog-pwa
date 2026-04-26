@@ -55,6 +55,7 @@ const META_ROUTE_TRACKING_ENABLED = 'routeTrackingEnabled';
 const META_ROUTE_TRACKING_MODE = 'routeTrackingMode';
 const META_PENDING_EXPRESSWAY_END_PROMPT = 'pendingExpresswayEndPrompt';
 const META_PENDING_EXPRESSWAY_END_DECISION = 'pendingExpresswayEndDecision';
+const META_REMOTE_ROUTE_POINTS_UPLOADED_THROUGH = 'remoteRoutePointsUploadedThrough';
 const IC_RESOLVE_RETRY_LIMIT = 6;
 const IC_RESOLVE_BACKOFF_BASE_MS = 2 * 60 * 1000;
 const IC_RESOLVE_BACKOFF_CAP_MS = 60 * 60 * 1000;
@@ -436,6 +437,14 @@ export async function clearActiveTripId() {
   await setMeta(META_ACTIVE_TRIP_ID, null);
 }
 
+export async function getRemoteRoutePointsUploadedThrough(): Promise<string | null> {
+  return getMeta(META_REMOTE_ROUTE_POINTS_UPLOADED_THROUGH);
+}
+
+export async function setRemoteRoutePointsUploadedThrough(value: string | null): Promise<void> {
+  await setMeta(META_REMOTE_ROUTE_POINTS_UPLOADED_THROUGH, value);
+}
+
 // Event CRUD
 
 export async function updateEventAddress(eventId: string, address?: string) {
@@ -708,6 +717,7 @@ function buildRoutePointAnchorFromEvent(event: AppEvent): RoutePoint | null {
     id: getRoutePointAnchorId(event.id),
     tripId: event.tripId,
     ts: event.ts,
+    updatedAt: nowIso(),
     lat: event.geo.lat,
     lng: event.geo.lng,
     ...(Number.isFinite(event.geo.accuracy) ? { accuracy: event.geo.accuracy } : {}),
@@ -736,6 +746,7 @@ export async function addRoutePoint(point: Omit<RoutePoint, 'id'> & { id?: strin
     id,
     tripId: point.tripId,
     ts: point.ts,
+    updatedAt: nowIso(),
     lat: point.lat,
     lng: point.lng,
     accuracy: point.accuracy,
@@ -805,6 +816,19 @@ export async function getAllRoutePoints(): Promise<RoutePoint[]> {
   const arr = await db.routePoints.toArray();
   arr.sort((a, b) => a.ts.localeCompare(b.ts));
   return arr;
+}
+
+export async function listRoutePointsChangedSince(updatedThrough: string | null): Promise<RoutePoint[]> {
+  const arr = await db.routePoints
+    .filter(point => !updatedThrough || (!!point.updatedAt && point.updatedAt > updatedThrough))
+    .toArray();
+  arr.sort((a, b) => a.ts.localeCompare(b.ts));
+  return arr;
+}
+
+export async function getLatestRoutePoint(): Promise<RoutePoint | null> {
+  const point = await db.routePoints.orderBy('ts').last();
+  return point ?? null;
 }
 
 export async function getEventsByTripId(tripId: string): Promise<AppEvent[]> {

@@ -50,6 +50,12 @@ export async function openUrlInPackage(options: {
   return !!result.opened;
 }
 
+export async function openExternalUrl(url: string): Promise<boolean> {
+  if (!Capacitor.isNativePlatform()) return false;
+  const result = await AppShare.openUrl({ url });
+  return !!result.opened;
+}
+
 function encodeFlag(enabled?: boolean): string {
   return enabled ? 'true' : '';
 }

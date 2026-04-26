@@ -9,6 +9,10 @@ export type MetaRow = {
   updatedAt: string;
 };
 
+function nowIso(): string {
+  return new Date().toISOString();
+}
+
 /**
  * TrackLogDB encapsulates the IndexedDB schema using Dexie. It defines two
  * tables: events and meta. The events table stores all operation events
@@ -60,12 +64,13 @@ function installRemoteSyncHooks() {
     request('events-delete');
   });
 
-  db.routePoints.hook('creating', () => {
+  db.routePoints.hook('creating', (_primKey, obj) => {
+    obj.updatedAt = obj.updatedAt ?? nowIso();
     request('route-points-create');
   });
   db.routePoints.hook('updating', () => {
     request('route-points-update');
-    return undefined;
+    return { updatedAt: nowIso() };
   });
   db.routePoints.hook('deleting', () => {
     request('route-points-delete');

@@ -12,8 +12,8 @@ android {
         applicationId "com.tracklog.assist"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 1
-        versionName "1.0"
+        versionCode ((findProperty('tracklogVersionCode') ?: '1') as Integer)
+        versionName (findProperty('tracklogVersionName') ?: '1.0')
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.

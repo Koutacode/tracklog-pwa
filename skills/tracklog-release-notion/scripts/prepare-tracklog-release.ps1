@@ -1,11 +1,26 @@
 param(
   [switch]$Build,
   [switch]$SyncAndroid,
-  [switch]$AssembleDebug
+  [switch]$AssembleDebug,
+  [string]$AppBuildDir = "build-release"
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+
+function Invoke-CheckedCommand {
+  param(
+    [Parameter(Mandatory = $true)]
+    [scriptblock]$Command,
+    [Parameter(Mandatory = $true)]
+    [string]$Label
+  )
+
+  & $Command
+  if ($LASTEXITCODE -ne 0) {
+    throw "$Label failed with exit code $LASTEXITCODE"
+  }
+}
 
 $projectRoot = Resolve-Path (Join-Path $PSScriptRoot "..\..\..")
 $packageJsonPath = Join-Path $projectRoot "package.json"
@@ -30,7 +45,7 @@ $releaseAssetName = if ($releaseConfig -and $releaseConfig.apkAssetName) { [stri
 $localApkPath = if ($releaseConfig -and $releaseConfig.localApkPath) { [string]$releaseConfig.localApkPath } else { $defaultLocalApkPath }
 
 $androidDir = Join-Path $projectRoot "android"
-$debugApk = Join-Path $androidDir "app\build\outputs\apk\debug\app-debug.apk"
+$debugApk = Join-Path $androidDir "app\$AppBuildDir\outputs\apk\debug\app-debug.apk"
 $outputApk = Join-Path $projectRoot $localApkPath
 $outputDir = Split-Path -Parent $outputApk
 
@@ -39,7 +54,7 @@ if ($Build) {
   Write-Host "== npm run build =="
   Push-Location $projectRoot
   try {
-    & npm.cmd run build
+    Invoke-CheckedCommand { & npm.cmd run build } "npm run build"
   } finally {
     Pop-Location
   }
@@ -50,7 +65,8 @@ if ($SyncAndroid) {
   Write-Host "== npx cap sync android =="
   Push-Location $projectRoot
   try {
-    & npx.cmd cap sync android
+    Invoke-CheckedCommand { & npx.cmd cap sync android } "npx cap sync android"
+    Invoke-CheckedCommand { & powershell.exe -ExecutionPolicy Bypass -File (Join-Path $projectRoot "scripts\normalize-capacitor-assets.ps1") } "normalize-capacitor-assets"
   } finally {
     Pop-Location
   }
@@ -61,7 +77,7 @@ if ($AssembleDebug) {
   Write-Host "== gradlew assembleDebug =="
   Push-Location $androidDir
   try {
-    .\gradlew.bat --no-daemon assembleDebug
+    Invoke-CheckedCommand { .\gradlew.bat "-PtracklogAppBuildDir=$AppBuildDir" --no-daemon assembleDebug } "gradlew assembleDebug"
   } finally {
     Pop-Location
   }

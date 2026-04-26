@@ -26,6 +26,17 @@ export type RemoteSyncState = {
   profileComplete: boolean;
 };
 
+export type RemoteCloudMaintenanceResult = {
+  database_bytes?: number;
+  threshold_bytes?: number;
+  triggered?: boolean;
+  minimum_retention_days?: number;
+  detail_retention_cutoff?: string | null;
+  route_points_deleted?: number;
+  events_deleted?: number;
+  reports_deleted?: number;
+};
+
 export type RemoteDeviceProfile = {
   device_id: string;
   display_name: string;

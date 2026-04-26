@@ -1,5 +1,33 @@
 # TrackLog Changelog
 
+## 2026-04-25
+
+### PCソース本線化 / 権限診断 / 配布バージョン
+
+- PC上の `src` をビルド元の正として扱う運用に戻し、端末APK抽出物は一時復旧・バックアップ扱いに整理
+- Android の `versionCode` / `versionName` を `android/gradle.properties` で管理し、`versionCode=2` / `versionName=0.1.3` へ更新
+- `npm run normalize:android-assets` を追加し、OneDrive配下で Capacitor assets が `ReparsePoint` になって Gradle が失敗する問題を回避
+- Android ネイティブ権限診断で `ACCESS_BACKGROUND_LOCATION` を個別判定し、前景のみ許可の場合はエラーとして表示
+- ネイティブ設定に `権限設定を開く` / `位置情報設定を開く` を追加し、常時位置情報許可へ移動しやすくした
+- 進行中運行の日報・Obsidian出力で、運行終了前でも現在時刻までの集計を反映するよう改善
+
+### 検証
+
+- `npm run typecheck`
+- `npm run release:prepare`
+- `adb install -r output\\tracklog-assist-debug.apk`
+- `adb shell pm grant com.tracklog.assist android.permission.ACCESS_BACKGROUND_LOCATION`
+- `adb shell am start -W -n com.tracklog.assist/.MainActivity`
+- Home遷移後20秒待機しても `com.tracklog.assist` プロセスが維持されることを確認
+- 起動後ログに `FATAL EXCEPTION` / `ANR` なし
+
+### APK
+
+- File: `output/tracklog-assist-debug.apk`
+- Version: `versionCode=2` / `versionName=0.1.3`
+- SHA-256: `B654BA7B0F4A76ACCFD67281B3B05F122359DB3DA7AC7122272A0D6EF2B22E97`
+- Device install: completed on `SCG34` (`RFCY70L6HTF`) with `adb install -r`
+
 ## 2026-03-30
 
 ### stable device / 初回プロフィール / 常時同期

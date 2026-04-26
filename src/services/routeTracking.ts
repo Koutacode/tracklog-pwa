@@ -260,6 +260,7 @@ export async function startRouteTracking(tripId: string, mode: RouteTrackingMode
       },
       async (location, error) => {
         if (error) {
+          console.warn('[routeTracking] native watcher error', error);
           return;
         }
         if (!location) return;
@@ -291,8 +292,8 @@ export async function startRouteTracking(tripId: string, mode: RouteTrackingMode
         source: 'foreground',
       });
     },
-    () => {
-      // ignore
+    err => {
+      console.warn('[routeTracking] web watcher error', err);
     },
     config.webOptions,
   );

@@ -6,6 +6,15 @@ const BackgroundGeolocation = registerPlugin<BackgroundGeolocationPlugin>('Backg
 
 type NativeSetupPlugin = {
   checkBatteryOptimization(): Promise<{ supported: boolean; granted: boolean }>;
+  checkLocationPermissions(): Promise<{
+    fine?: boolean;
+    coarse?: boolean;
+    foreground?: boolean;
+    background?: boolean;
+    backgroundRelevant?: boolean;
+  }>;
+  openAppSettings(): Promise<{ opened: boolean }>;
+  openLocationSettings(): Promise<{ opened: boolean }>;
   requestBatteryOptimizationExemption(): Promise<{
     supported: boolean;
     granted: boolean;
@@ -34,8 +43,17 @@ export type NativePlatformInfo = {
   exactAlarmRelevant: boolean | null;
 };
 
+export type NativeLocationPermissionDetail = {
+  foreground: SimplePermissionState;
+  background: SimplePermissionState;
+  backgroundRelevant: boolean;
+  fine: boolean;
+  coarse: boolean;
+};
+
 const LOCATION_STATUS_CACHE_MS = 60000;
 let locationStatusCache: { value: SimplePermissionState; at: number } | null = null;
+let locationDetailCache: { value: NativeLocationPermissionDetail; at: number } | null = null;
 let nativePlatformInfoCache: { value: NativePlatformInfo; at: number } | null = null;
 
 function isNative() {
@@ -59,6 +77,21 @@ function toNotificationPermissionState(input: unknown): SimplePermissionState {
     (input as { receive?: unknown }).receive ??
     (input as { status?: unknown }).status;
   return toSimpleState(value);
+}
+
+function toLocationPermissionDetail(input: Awaited<ReturnType<NativeSetupPlugin['checkLocationPermissions']>>): NativeLocationPermissionDetail {
+  const fine = !!input.fine;
+  const coarse = !!input.coarse;
+  const foreground = !!input.foreground || fine || coarse;
+  const backgroundRelevant = input.backgroundRelevant !== false;
+  const background = backgroundRelevant ? !!input.background : true;
+  return {
+    fine,
+    coarse,
+    foreground: foreground ? 'granted' : 'denied',
+    background: background ? 'granted' : 'denied',
+    backgroundRelevant,
+  };
 }
 
 async function checkGeoPermissionByPermissionsApi(): Promise<SimplePermissionState> {
@@ -160,6 +193,34 @@ export async function checkLocationPermissionStatus(): Promise<SimplePermissionS
   return state;
 }
 
+export async function checkNativeLocationPermissionDetail(): Promise<NativeLocationPermissionDetail> {
+  const fallback: NativeLocationPermissionDetail = {
+    foreground: 'unknown',
+    background: 'unknown',
+    backgroundRelevant: true,
+    fine: false,
+    coarse: false,
+  };
+  if (!isNative()) return fallback;
+  const now = Date.now();
+  if (locationDetailCache && now - locationDetailCache.at < LOCATION_STATUS_CACHE_MS) {
+    return locationDetailCache.value;
+  }
+  try {
+    const detail = toLocationPermissionDetail(await NativeSetup.checkLocationPermissions());
+    locationDetailCache = { value: detail, at: now };
+    return detail;
+  } catch {
+    locationDetailCache = { value: fallback, at: now };
+    return fallback;
+  }
+}
+
+function clearLocationPermissionCache() {
+  locationStatusCache = null;
+  locationDetailCache = null;
+}
+
 export async function requestLocationPermission(): Promise<SimplePermissionState> {
   if (!isNative()) return 'unknown';
   let watcherId: string | null = null;
@@ -195,14 +256,17 @@ export async function requestLocationPermission(): Promise<SimplePermissionState
 
   const apiState = await checkGeoPermissionByPermissionsApi();
   if (apiState !== 'unknown') {
+    clearLocationPermissionCache();
     locationStatusCache = { value: apiState, at: Date.now() };
     return apiState;
   }
   if (deniedByPlugin) {
+    clearLocationPermissionCache();
     locationStatusCache = { value: 'denied', at: Date.now() };
     return 'denied';
   }
   const probed = await probeGeoPermissionByFix();
+  clearLocationPermissionCache();
   locationStatusCache = { value: probed, at: Date.now() };
   return probed;
 }
@@ -291,6 +355,27 @@ export async function openExactAlarmSettings(): Promise<boolean> {
   }
 }
 
+export async function openAppPermissionSettings(): Promise<boolean> {
+  if (!isNative()) return false;
+  try {
+    const result = await NativeSetup.openAppSettings();
+    clearLocationPermissionCache();
+    return !!result.opened;
+  } catch {
+    return false;
+  }
+}
+
+export async function openSystemLocationSettings(): Promise<boolean> {
+  if (!isNative()) return false;
+  try {
+    const result = await NativeSetup.openLocationSettings();
+    return !!result.opened;
+  } catch {
+    return false;
+  }
+}
+
 export async function checkBatteryOptimizationStatus(): Promise<SimplePermissionState> {
   if (!isNative()) return 'unknown';
   try {
@@ -333,13 +418,21 @@ export async function runNativeQuickSetup(): Promise<{
   }
 
   const geo = await requestLocationPermission();
+  const locationDetail = await checkNativeLocationPermissionDetail();
+  const backgroundDenied =
+    locationDetail.backgroundRelevant && locationDetail.foreground === 'granted' && locationDetail.background !== 'granted';
+  if (backgroundDenied) {
+    await openAppPermissionSettings();
+  }
   steps.push({
     id: 'geo',
     label: '位置情報権限',
-    level: geo === 'granted' ? 'ok' : geo === 'denied' ? 'error' : 'warn',
+    level: geo === 'granted' && !backgroundDenied ? 'ok' : geo === 'denied' || backgroundDenied ? 'error' : 'warn',
     detail:
-      geo === 'granted'
-        ? '許可済み'
+      geo === 'granted' && !backgroundDenied
+        ? '常時許可済み'
+        : backgroundDenied
+          ? '前景のみ許可されています。開いたアプリ設定で位置情報を「常に許可」に変更してください。'
         : geo === 'denied'
           ? '拒否されています。端末設定で「常に許可」に変更してください。'
           : '状態を確定できません。端末設定で確認してください。',

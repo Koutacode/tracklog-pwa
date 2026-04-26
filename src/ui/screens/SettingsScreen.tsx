@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { Capacitor } from '@capacitor/core';
 import { getDefaultAdminEmail, getDriverIdentity, setDriverProfileLocal } from '../../services/remoteAuth';
 import { getRemoteSyncState, hydrateRemoteSyncState, runRemoteSync, subscribeRemoteSyncState } from '../../services/remoteSync';
+import { openExternalUrl } from '../../services/nativeShare';
 
 function isStandaloneMode() {
   return window.matchMedia?.('(display-mode: standalone)').matches || (navigator as any).standalone === true;
@@ -136,6 +137,22 @@ export default function SettingsScreen() {
             <div className="settings-note">
               管理画面は同じ URL の <code>/admin</code> で開きます。
             </div>
+            {isNative && (
+              <button
+                className="trip-btn"
+                onClick={async () => {
+                  setMessage(null);
+                  try {
+                    await openExternalUrl(`${window.location.origin}/admin`);
+                    setMessage('既定ブラウザで管理画面を開きました');
+                  } catch (error: any) {
+                    setMessage(error?.message ?? 'ブラウザを開けませんでした');
+                  }
+                }}
+              >
+                ブラウザで管理画面を開く
+              </button>
+            )}
           </article>
         </section>
 

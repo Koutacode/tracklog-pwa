@@ -39,7 +39,11 @@ import { resolveNearestIC } from '../../services/icResolver';
 import { openNativeSettings } from '../../services/routeTracking';
 import { cancelNativeExpresswayEndPrompt } from '../../services/nativeExpresswayPrompt';
 import { runStartupDiagnostics, type StartupDiagnosticItem } from '../../services/startupDiagnostics';
-import { runNativeQuickSetup as runNativeSetupWizard } from '../../services/nativeSetup';
+import {
+  openAppPermissionSettings,
+  openSystemLocationSettings,
+  runNativeQuickSetup as runNativeSetupWizard,
+} from '../../services/nativeSetup';
 import { DEFAULT_APK_DOWNLOAD_URL, RELEASE_PAGE_URL } from '../../app/releaseInfo';
 import { requestRouteTrackingSync } from '../../app/routeTrackingSignal';
 import { buildTripViewModel } from '../../state/selectors';
@@ -277,6 +281,20 @@ export default function HomeScreen() {
       await openNativeSettings();
     } catch {
       setRouteTrackingError('設定を開けませんでした。端末設定からバッテリー最適化を解除してください。');
+    }
+  }
+
+  async function openAppPermissionSettingsSafe() {
+    const opened = await openAppPermissionSettings();
+    if (!opened) {
+      setRouteTrackingError('アプリ設定を開けませんでした。端末設定から TrackLog の権限を確認してください。');
+    }
+  }
+
+  async function openSystemLocationSettingsSafe() {
+    const opened = await openSystemLocationSettings();
+    if (!opened) {
+      setRouteTrackingError('位置情報設定を開けませんでした。端末設定から位置情報を有効にしてください。');
     }
   }
 
@@ -724,6 +742,14 @@ export default function HomeScreen() {
             <div style={{ fontSize: 12, color: '#93c5fd' }}>{quickSetupMessage}</div>
           )}
         </div>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 8 }}>
+          <button className="trip-btn trip-btn--ghost" onClick={() => void openAppPermissionSettingsSafe()}>
+            権限設定を開く
+          </button>
+          <button className="trip-btn trip-btn--ghost" onClick={() => void openSystemLocationSettingsSafe()}>
+            位置情報設定を開く
+          </button>
+        </div>
       </div>
       <div>
         <div style={{ fontWeight: 800, marginBottom: 6 }}>電池の最適化対策</div>
@@ -800,9 +826,14 @@ export default function HomeScreen() {
       dayRuns: liveVm.dayRuns,
     });
   }, [tripId, events, liveVm]);
-  const liveMetricsList = useMemo(() => (liveReportTrip ? computeTripDayMetrics(liveReportTrip) : []), [liveReportTrip]);
+  const metricsMinute = Math.floor(now / 60000);
+  const metricsNowIso = useMemo(() => new Date(metricsMinute * 60000).toISOString(), [metricsMinute]);
+  const liveMetricsList = useMemo(
+    () => (liveReportTrip ? computeTripDayMetrics(liveReportTrip, { currentTs: metricsNowIso }) : []),
+    [liveReportTrip, metricsNowIso],
+  );
   const activeDayMetrics = liveMetricsList[liveMetricsList.length - 1] ?? null;
-  const liveDrive = useMemo(() => computeLiveDriveStatus(events, new Date(now).toISOString()), [events, now]);
+  const liveDrive = useMemo(() => computeLiveDriveStatus(events, metricsNowIso), [events, metricsNowIso]);
 
   // Render when no trip is active
   if (!tripId) {
@@ -1085,6 +1116,42 @@ export default function HomeScreen() {
   const currentActivity = activeStatusRows.find(row => row.key !== 'trip');
   const currentActivityLabel = currentActivity ? `${currentActivity.label}中` : '通常運行';
   const currentActivityTone = currentActivity?.tone ?? 'trip';
+  const highestAlert = activeDayMetrics?.alerts[0] ?? null;
+  const driveTone = liveDrive.continuousDriveEmergencyExceeded
+    ? 'danger'
+    : liveDrive.continuousDriveExceeded
+      ? 'warning'
+      : 'drive';
+  const cockpitCards = [
+    {
+      key: 'current',
+      label: '現在',
+      value: currentActivityLabel,
+      note: currentActivity?.value
+        ? `${currentActivity.label} ${currentActivity.value}`
+        : `運行 ${tripElapsed != null ? fmtDuration(tripElapsed) : '-'}`,
+      tone: currentActivityTone,
+    },
+    {
+      key: 'drive',
+      label: '連続運転',
+      value: fmtMinutesShort(liveDrive.driveSinceResetMinutes),
+      note: liveContinuousMessage,
+      tone: driveTone,
+    },
+    {
+      key: 'next',
+      label: '次の確認',
+      value: highestAlert ? '警告あり' : expresswayActive ? '高速中' : restActive ? '休息中' : '記録継続',
+      note: highestAlert?.message
+        ?? (expresswayActive
+          ? '高速終了時は確認アクションで確定'
+          : restActive
+            ? '休息終了操作まで休息として扱います'
+            : '積込・荷卸・休憩は右側の主要操作から記録'),
+      tone: highestAlert ? (highestAlert.level === 'danger' ? 'danger' : 'warning') : expresswayActive ? 'expressway' : 'route',
+    },
+  ];
   return (
     <div className="home-backdrop">
       <div className="home-shell">
@@ -1137,6 +1204,21 @@ export default function HomeScreen() {
                 画面ON維持
               </button>
             )}
+          </div>
+        </div>
+        <div className="home-cockpit">
+          <div className="home-cockpit__heading">
+            <span>運行コックピット</span>
+            <strong>{routeTrackingMode === 'precision' ? 'GPS精度重視' : 'GPS電池重視'}</strong>
+          </div>
+          <div className="home-cockpit__cards">
+            {cockpitCards.map(card => (
+              <div key={card.key} className={`home-cockpit-card home-cockpit-card--${card.tone}`}>
+                <span>{card.label}</span>
+                <strong>{card.value}</strong>
+                <small>{card.note}</small>
+              </div>
+            ))}
           </div>
         </div>
         <div className="home-grid">

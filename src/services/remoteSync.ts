@@ -1,9 +1,19 @@
 import { db } from '../db/db';
-import { getActiveTripId, getAllEvents, getAllRoutePoints, getEventsByTripId, listTrips } from '../db/repositories';
+import {
+  getActiveTripId,
+  getAllEvents,
+  getEventsByTripId,
+  getLatestRoutePoint,
+  getRemoteRoutePointsUploadedThrough,
+  listRoutePointsChangedSince,
+  listTrips,
+  setRemoteRoutePointsUploadedThrough,
+} from '../db/repositories';
 import { listReportTrips } from '../db/reportRepository';
 import type { AppEvent, RoutePoint } from '../domain/types';
 import type {
   DriverIdentity,
+  RemoteCloudMaintenanceResult,
   RemoteReportSnapshot,
   RemoteRoutePoint,
   RemoteSyncState,
@@ -39,6 +49,10 @@ let state: RemoteSyncState = {
 
 let inFlight: Promise<RemoteSyncState> | null = null;
 
+const META_REMOTE_CLOUD_MAINTENANCE_CHECKED_AT = 'remoteCloudMaintenanceCheckedAt';
+const META_REMOTE_CLOUD_DETAIL_RETENTION_CUTOFF_AT = 'remoteCloudDetailRetentionCutoffAt';
+const CLOUD_MAINTENANCE_INTERVAL_MS = 6 * 60 * 60 * 1000;
+
 function emit(patch: Partial<RemoteSyncState>) {
   state = { ...state, ...patch };
   for (const listener of listeners) listener(state);
@@ -48,18 +62,103 @@ function nowIso() {
   return new Date().toISOString();
 }
 
-function getLatestPoint(routePoints: RoutePoint[], events: AppEvent[]) {
-  const point = [...routePoints].sort((a, b) => b.ts.localeCompare(a.ts))[0];
-  if (point) {
-    return {
-      lat: point.lat,
-      lng: point.lng,
-      accuracy: point.accuracy ?? null,
-    };
+async function getMeta(key: string): Promise<string | null> {
+  const row = await db.meta.get(key);
+  return row?.value ?? null;
+}
+
+async function setMeta(key: string, value: string | null): Promise<void> {
+  if (!value) {
+    await db.meta.delete(key);
+    return;
   }
+  await db.meta.put({
+    key,
+    value,
+    updatedAt: nowIso(),
+  });
+}
+
+function isMissingRpcError(error: any) {
+  const message = `${error?.message ?? error ?? ''}`.toLowerCase();
+  return error?.code === 'PGRST202' || message.includes('prune_tracklog_cloud_usage');
+}
+
+function normalizeIso(value: unknown): string | null {
+  if (typeof value !== 'string' || !value.trim()) return null;
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) return null;
+  return new Date(parsed).toISOString();
+}
+
+async function getSavedCloudDetailRetentionCutoff(): Promise<string | null> {
+  return normalizeIso(await getMeta(META_REMOTE_CLOUD_DETAIL_RETENTION_CUTOFF_AT));
+}
+
+async function maybeRunCloudMaintenance(): Promise<string | null> {
+  if (!driverSupabase) return getSavedCloudDetailRetentionCutoff();
+
+  const [lastCheckedAt, savedCutoff] = await Promise.all([
+    getMeta(META_REMOTE_CLOUD_MAINTENANCE_CHECKED_AT),
+    getSavedCloudDetailRetentionCutoff(),
+  ]);
+  const lastCheckedMs = lastCheckedAt ? Date.parse(lastCheckedAt) : NaN;
+  if (Number.isFinite(lastCheckedMs) && Date.now() - lastCheckedMs < CLOUD_MAINTENANCE_INTERVAL_MS) {
+    return savedCutoff;
+  }
+
+  try {
+    const { data, error } = await driverSupabase.rpc('prune_tracklog_cloud_usage');
+    await setMeta(META_REMOTE_CLOUD_MAINTENANCE_CHECKED_AT, nowIso());
+    if (error) {
+      if (!isMissingRpcError(error)) {
+        console.warn('[remoteSync] cloud maintenance skipped', error);
+      }
+      return savedCutoff;
+    }
+
+    const result = data as RemoteCloudMaintenanceResult | null;
+    const nextCutoff = normalizeIso(result?.detail_retention_cutoff);
+    const effectiveCutoff =
+      savedCutoff && nextCutoff
+        ? (savedCutoff > nextCutoff ? savedCutoff : nextCutoff)
+        : nextCutoff ?? savedCutoff;
+    if (effectiveCutoff) {
+      await setMeta(META_REMOTE_CLOUD_DETAIL_RETENTION_CUTOFF_AT, effectiveCutoff);
+    }
+    return effectiveCutoff;
+  } catch (error) {
+    console.warn('[remoteSync] cloud maintenance failed', error);
+    await setMeta(META_REMOTE_CLOUD_MAINTENANCE_CHECKED_AT, nowIso());
+    return savedCutoff;
+  }
+}
+
+function getCloudDetailPrunedTripIds(
+  tripHeaders: Array<{ tripId: string; endTs?: string; status: string }>,
+  cutoffIso: string | null,
+) {
+  if (!cutoffIso) return new Set<string>();
+  const cutoffMs = Date.parse(cutoffIso);
+  if (!Number.isFinite(cutoffMs)) return new Set<string>();
+  return new Set(
+    tripHeaders
+      .filter(trip => trip.status === 'closed' && !!trip.endTs && Date.parse(trip.endTs) < cutoffMs)
+      .map(trip => trip.tripId),
+  );
+}
+
+function getLatestPoint(routePoint: RoutePoint | null, events: AppEvent[]) {
   const event = [...events]
     .filter(item => !!item.geo)
     .sort((a, b) => b.ts.localeCompare(a.ts))[0];
+  if (routePoint && (!event?.geo || routePoint.ts >= event.ts)) {
+    return {
+      lat: routePoint.lat,
+      lng: routePoint.lng,
+      accuracy: routePoint.accuracy ?? null,
+    };
+  }
   if (!event?.geo) return null;
   return {
     lat: event.geo.lat,
@@ -129,9 +228,9 @@ async function markAllEventsSynced() {
 }
 
 async function claimDeviceProfile(identity: DriverIdentity) {
-  const [routePoints, activeTripId] = await Promise.all([getAllRoutePoints(), getActiveTripId()]);
+  const [routePoint, activeTripId] = await Promise.all([getLatestRoutePoint(), getActiveTripId()]);
   const activeTripEvents = activeTripId ? await getEventsByTripId(activeTripId) : [];
-  const latest = getLatestPoint(routePoints, activeTripEvents);
+  const latest = getLatestPoint(routePoint, activeTripEvents);
   return claimTracklogDeviceProfile({
     deviceId: identity.deviceId as string,
     displayName: identity.displayName || `端末-${(identity.deviceId as string).slice(0, 8)}`,
@@ -192,13 +291,20 @@ export async function runRemoteSync(reason = 'manual'): Promise<RemoteSyncState>
         profileComplete: identity.profileComplete,
       });
 
+      const cloudDetailRetentionCutoff = await maybeRunCloudMaintenance();
+      const routePointSyncStartedAt = nowIso();
+      const routePointsUploadedThrough = await getRemoteRoutePointsUploadedThrough();
       const [events, routePoints, reportTrips, tripHeaders] = await Promise.all([
         getAllEvents(),
-        getAllRoutePoints(),
+        listRoutePointsChangedSince(routePointsUploadedThrough),
         listReportTrips(),
         listTrips(),
       ]);
       const deviceId = identity.deviceId as string;
+      const cloudPrunedTripIds = getCloudDetailPrunedTripIds(tripHeaders, cloudDetailRetentionCutoff);
+      const uploadableEvents = events.filter(item => !cloudPrunedTripIds.has(item.tripId));
+      const uploadableRoutePoints = routePoints.filter(item => !cloudPrunedTripIds.has(item.tripId));
+      const uploadableReports = reportTrips.filter(item => !cloudPrunedTripIds.has(item.id));
 
       await claimDeviceProfile(identity);
       const normalizedTrips: RemoteTripHeader[] = tripHeaders.map(item => ({
@@ -213,9 +319,9 @@ export async function runRemoteSync(reason = 'manual'): Promise<RemoteSyncState>
         status: item.status,
         updated_at: nowIso(),
       }));
-      const normalizedEvents = events.map(item => normalizeTripEvent(deviceId, item));
-      const normalizedRoutePoints = routePoints.map(item => normalizeRoutePoint(deviceId, item));
-      const normalizedReports: RemoteReportSnapshot[] = reportTrips.map(item => ({
+      const normalizedEvents = uploadableEvents.map(item => normalizeTripEvent(deviceId, item));
+      const normalizedRoutePoints = uploadableRoutePoints.map(item => normalizeRoutePoint(deviceId, item));
+      const normalizedReports: RemoteReportSnapshot[] = uploadableReports.map(item => ({
         trip_id: item.id,
         device_id: deviceId,
         created_at: item.createdAt,
@@ -254,6 +360,13 @@ export async function runRemoteSync(reason = 'manual'): Promise<RemoteSyncState>
 
       await withRemoteSyncSignalsSuppressed(async () => {
         await markAllEventsSynced();
+        if (!routePointsUploadedThrough || routePoints.length > 0) {
+          const uploadedThrough = routePoints.reduce((latest, point) => {
+            const updatedAt = point.updatedAt ?? point.ts;
+            return updatedAt > latest ? updatedAt : latest;
+          }, routePointSyncStartedAt);
+          await setRemoteRoutePointsUploadedThrough(uploadedThrough);
+        }
       });
       const syncedAt = nowIso();
       await setRemoteLastSyncAt(syncedAt);
