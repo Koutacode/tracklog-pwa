@@ -119,6 +119,21 @@ export async function reverseGeocode(geo: Geo): Promise<string | undefined> {
     const data = await res.json();
     const rawDisplayName: string | undefined = typeof data?.display_name === 'string' ? data.display_name : undefined;
     const addr = data?.address ?? {};
+    
+    if (addr.country_code === 'jp' && rawDisplayName) {
+      const parts = rawDisplayName.split(',').map(s => s.trim()).reverse();
+      const filtered = parts.filter(p => p !== '日本' && !p.match(/^[0-9]{3}-[0-9]{4}$/));
+      const out: string[] = [];
+      for (const p of filtered) {
+        if (out.length > 0 && p.startsWith(out[out.length - 1])) {
+          out[out.length - 1] = p;
+          continue;
+        }
+        out.push(p);
+      }
+      return out.join('');
+    }
+
     const ordered = formatOrderedAddress({
       postalCode: addr.postcode,
       country: addr.country,

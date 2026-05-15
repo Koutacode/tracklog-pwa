@@ -1181,9 +1181,6 @@ export default function TripDetail() {
                                 {item.places.map((p, i) => {
                                   const hasCoord = p.lat != null && p.lng != null;
                                   const queryText = hasCoord ? `${p.lat},${p.lng}` : (p.address ?? '');
-                                  const mapUrl = hasCoord
-                                    ? `https://www.openstreetmap.org/?mlat=${p.lat}&mlon=${p.lng}#map=16/${p.lat}/${p.lng}`
-                                    : `https://www.openstreetmap.org/search?query=${encodeURIComponent(queryText)}`;
                                   const navUrl = hasCoord
                                     ? `geo:${p.lat},${p.lng}?q=${encodeURIComponent(queryText)}`
                                     : `https://www.openstreetmap.org/search?query=${encodeURIComponent(queryText)}`;
@@ -1191,25 +1188,16 @@ export default function TripDetail() {
                                   return (
                                     <div key={i} className="trip-event__action-pair">
                                       <a
-                                        href={mapUrl}
+                                        href={navUrl}
                                         target="_blank"
                                         rel="noreferrer"
                                         className="trip-detail__button trip-detail__button--small"
                                       >
                                         {label}を地図で開く
                                       </a>
-                                      <a
-                                        href={navUrl}
-                                        target="_blank"
-                                        rel="noreferrer"
-                                        className="trip-detail__button trip-detail__button--small"
-                                      >
-                                        ナビアプリで開く
-                                      </a>
                                     </div>
                                   );
-                                })}
-                              </div>
+                                })}                              </div>
                             )}
                           </div>
                         ))}
