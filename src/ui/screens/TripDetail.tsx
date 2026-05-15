@@ -17,19 +17,11 @@ import type { AppEvent, EventType } from '../../domain/types';
 import {
   buildImportableDayRunsFromAppEvents,
   buildReportTripFromAppEvents,
-  computeDayMetrics,
-  computeTripDayMetrics,
   formatMinutes,
-  formatMinutesShort,
-  formatRoundedJstTime,
-  parseJsonToTrip,
 } from '../../domain/reportLogic';
 import { buildTripViewModel, TripViewModel } from '../../state/selectors';
 import { DAY_MS, getJstDateInfo } from '../../domain/jst';
-import { openNoteInObsidian, saveMarkdownToObsidian, shareText, shareTextToPackage } from '../../services/nativeShare';
-
-const OBSIDIAN_VAULT_NAME = 'AI';
-const OBSIDIAN_NOTE_DIR = 'Inbox';
+import { shareText } from '../../services/nativeShare';
 
 function fmtLocal(ts?: string) {
   if (!ts) return '-';
@@ -367,196 +359,6 @@ function buildAiShareText(payload: AiSharePayload) {
   ].join('\n');
 }
 
-function buildObsidianRestoreJson(payload: AiSharePayload) {
-  return JSON.stringify(payload, null, 2);
-}
-
-function buildObsidianNoteTitle(payload: AiSharePayload) {
-  const startInfo = getJstDateInfo(payload.summary.startTs);
-  return `TrackLog運行記録 ${startInfo.dateKey} ${payload.tripId.slice(0, 8)}`;
-}
-
-function buildObsidianNotePath(title: string) {
-  const safeName = title
-    .replace(/[<>:"/\\|?*\u0000-\u001F]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-  return `${OBSIDIAN_NOTE_DIR}/${safeName || 'TrackLog運行記録'}.md`;
-}
-
-function getObsidianBusinessMinutes(metrics: ReturnType<typeof computeDayMetrics>) {
-  return metrics.workMinutes + metrics.loadMinutes + metrics.unloadMinutes + metrics.waitMinutes;
-}
-
-const OBSIDIAN_ACTIVITY_TITLES = new Set([
-  '運行開始',
-  '運行終了',
-  '積込',
-  '荷卸',
-  '休憩',
-  '休息',
-  'フェリー',
-  '給油',
-  '地点マーク',
-]);
-
-function compactLocationLabel(value: string) {
-  return value.replace(/\s+/g, ' ').trim();
-}
-
-function getItemLocationLabels(item: GroupedItem): string[] {
-  const values = [
-    ...(item.addresses ?? []),
-    ...((item.places ?? []).map(place => place.address).filter((address): address is string => !!address)),
-  ]
-    .map(compactLocationLabel)
-    .filter(Boolean);
-  const unique = Array.from(new Set(values));
-  if (unique.length > 0) return unique;
-  const coordinate = item.places?.find(place => Number.isFinite(place.lat) && Number.isFinite(place.lng));
-  if (!coordinate || coordinate.lat == null || coordinate.lng == null) return [];
-  return [`(${coordinate.lat.toFixed(5)}, ${coordinate.lng.toFixed(5)})`];
-}
-
-function summarizeLocationLabels(labels: string[], limit = 4) {
-  if (labels.length === 0) return '-';
-  if (labels.length <= limit) return labels.join(' / ');
-  return `${labels.slice(0, limit).join(' / ')} / ほか${labels.length - limit}箇所`;
-}
-
-function summarizeLocationsByTitle(items: GroupedItem[], title: string) {
-  const locations = items
-    .filter(item => item.title === title)
-    .flatMap(item => getItemLocationLabels(item));
-  return summarizeLocationLabels(Array.from(new Set(locations)));
-}
-
-function formatGroupedRange(item: GroupedItem) {
-  if (!item.range) return '';
-  return item.range.replace(/\s*→\s*-\s*$/, '');
-}
-
-function buildObsidianActivityLine(item: GroupedItem) {
-  const segments: string[] = [];
-  const range = formatGroupedRange(item);
-  if (range) segments.push(range);
-  if (item.duration && item.duration !== '0分') segments.push(item.duration);
-  const locations = getItemLocationLabels(item);
-  if (locations.length > 0) {
-    segments.push(`場所: ${summarizeLocationLabels(locations, 2)}`);
-  }
-  if (item.detail) segments.push(item.detail);
-  return `- ${item.title}: ${segments.join(' / ') || '-'}`;
-}
-
-function buildObsidianMarkdown(tripId: string, vm: TripViewModel, payload: AiSharePayload, events: AppEvent[]) {
-  const reportTrip = parseJsonToTrip(JSON.stringify(payload), tripId);
-  const currentTs = payload.summary.endTs ? undefined : new Date().toISOString();
-  const metricsList = computeTripDayMetrics(reportTrip, { currentTs });
-  const restoreJson = buildObsidianRestoreJson(payload);
-  const grouped = buildGrouped(events);
-  const tripStartTs = events.find(event => event.type === 'trip_start')?.ts ?? events[0]?.ts;
-  const groupedByDay = tripStartTs ? groupItemsByDay(grouped, tripStartTs) : [];
-  const startAddress = payload.summary.startAddress ?? summarizeLocationsByTitle(grouped, '運行開始');
-  const endAddress = payload.summary.endAddress ?? summarizeLocationsByTitle(grouped, '運行終了');
-  const routeSummaryLines = [
-    `- 出発地: ${startAddress || '-'}`,
-    `- 到着地: ${payload.summary.endTs ? (endAddress || '-') : '進行中'}`,
-    `- 積込地: ${summarizeLocationsByTitle(grouped, '積込')}`,
-    `- 荷卸地: ${summarizeLocationsByTitle(grouped, '荷卸')}`,
-    `- 休憩地: ${summarizeLocationsByTitle(grouped, '休憩')}`,
-    `- 休息地: ${summarizeLocationsByTitle(grouped, '休息')}`,
-    `- フェリー: ${summarizeLocationsByTitle(grouped, 'フェリー')}`,
-  ];
-  const dailySections = reportTrip.days.map((day, index) => {
-    const metrics = metricsList[index] ?? computeDayMetrics(day);
-    const businessMinutes = getObsidianBusinessMinutes(metrics);
-    const totalMinutes = metrics.driveMinutes
-      + businessMinutes
-      + metrics.breakMinutes
-      + metrics.ferryMinutes
-      + metrics.restMinutes;
-    const dayActivities = groupedByDay
-      .find(group => group.dayIndex === day.dayIndex)
-      ?.items.filter(item => OBSIDIAN_ACTIVITY_TITLES.has(item.title)) ?? [];
-
-    return [
-      `### ${day.dayIndex}日目 ${day.dateKey}`,
-      `- 距離: ${day.km} km`,
-      `- 運転: ${formatMinutesShort(metrics.driveMinutes)}`,
-      `- 業務: ${formatMinutesShort(businessMinutes)}`,
-      `- 休憩: ${formatMinutesShort(metrics.breakMinutes)}`,
-      ...(metrics.ferryMinutes > 0 ? [`- フェリー: ${formatMinutesShort(metrics.ferryMinutes)}`] : []),
-      `- 休息: ${formatMinutesShort(metrics.restMinutes)}`,
-      `- 合計: ${formatMinutesShort(totalMinutes)}`,
-      `- ルール: ${metrics.ruleModeLabel}`,
-      ...(metrics.ruleModeReason ? [`- 判定理由: ${metrics.ruleModeReason}`] : []),
-      ...(metrics.earliestRestart ? [`- 再開目安: ${formatRoundedJstTime(metrics.earliestRestart)}`] : []),
-      ...(metrics.alerts.length > 0
-        ? [`- 警告: ${metrics.alerts.map(alert => alert.message).join(' / ')}`]
-        : []),
-      ...(dayActivities.length > 0
-        ? [
-            '',
-            '#### 主な地点',
-            ...dayActivities.map(buildObsidianActivityLine),
-          ]
-        : []),
-      '',
-    ].join('\n');
-  });
-
-  return [
-    '---',
-    'tags: [tracklog, 運行記録]',
-    `tripId: ${tripId}`,
-    `generatedAt: ${payload.generatedAt}`,
-    'source: TrackLog運行アシスト',
-    '---',
-    '',
-    `# ${buildObsidianNoteTitle(payload)}`,
-    '',
-    '## サマリー',
-    `- 作成: ${fmtLocal(payload.generatedAt)}`,
-    `- 開始: ${fmtLocal(payload.summary.startTs)}`,
-    `- 終了: ${payload.summary.endTs ? fmtLocal(payload.summary.endTs) : '進行中'}`,
-    `- 日数: ${reportTrip.days.length}日`,
-    `- 総距離: ${vm.totalKm != null ? `${vm.totalKm} km` : '-'}`,
-    `- 最終区間: ${vm.lastLegKm != null ? `${vm.lastLegKm} km` : '-'}`,
-    `- 保存先: ${OBSIDIAN_VAULT_NAME}/${buildObsidianNotePath(buildObsidianNoteTitle(payload))}`,
-    '',
-    '## 運行内容',
-    ...routeSummaryLines,
-    '',
-    '## 日報',
-    ...dailySections,
-    '## 復元用JSON',
-    '`運行日報 > 現行運行へ復元する` に、そのまま貼り付けできます。',
-    '```json',
-    restoreJson,
-    '```',
-  ].join('\n');
-}
-
-function buildObsidianMinimalMarkdown(payload: AiSharePayload, vm: TripViewModel) {
-  return [
-    `# ${buildObsidianNoteTitle(payload)}`,
-    '',
-    `- 作成: ${fmtLocal(payload.generatedAt)}`,
-    `- 開始: ${fmtLocal(payload.summary.startTs)}`,
-    `- 終了: ${payload.summary.endTs ? fmtLocal(payload.summary.endTs) : '進行中'}`,
-    `- 日数: ${payload.dayRuns.length}日`,
-    `- 総距離: ${vm.totalKm != null ? `${vm.totalKm} km` : '-'}`,
-    `- tripId: ${payload.tripId}`,
-  ].join('\n');
-}
-
-function getErrorMessage(error: unknown) {
-  if (error instanceof Error && error.message) return error.message;
-  if (typeof error === 'string' && error) return error;
-  return 'unknown error';
-}
-
 type TripReviewCheck = {
   key: string;
   label: string;
@@ -678,7 +480,6 @@ export default function TripDetail() {
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [sharing, setSharing] = useState(false);
-  const [obsidianSending, setObsidianSending] = useState(false);
   const [reportOpening, setReportOpening] = useState(false);
   const [workingId, setWorkingId] = useState<string | null>(null);
   const [openEditorId, setOpenEditorId] = useState<string | null>(null);
@@ -879,84 +680,6 @@ export default function TripDetail() {
     }
   }
 
-  async function handleSendToObsidian() {
-    if (!tripId || !vm) return;
-    setObsidianSending(true);
-    setErr(null);
-    try {
-      const payload = buildAiPayload(tripId, vm, events);
-      const title = buildObsidianNoteTitle(payload);
-      const markdown = buildObsidianMarkdown(tripId, vm, payload, events);
-      const minimalMarkdown = buildObsidianMinimalMarkdown(payload, vm);
-      const notePath = buildObsidianNotePath(title);
-      const failureReasons: string[] = [];
-
-      for (const candidate of [
-        { content: markdown, mode: 'full' },
-        { content: minimalMarkdown, mode: 'minimal' },
-      ] as const) {
-        try {
-          const saved = await saveMarkdownToObsidian({
-            vault: OBSIDIAN_VAULT_NAME,
-            file: notePath,
-            content: candidate.content,
-            overwrite: true,
-            silent: true,
-          });
-          if (saved) {
-            const opened = await openNoteInObsidian({
-              vault: OBSIDIAN_VAULT_NAME,
-              file: notePath,
-            });
-            if (!opened) {
-              alert(`Obsidian に保存しました: ${notePath}`);
-            }
-            if (candidate.mode === 'minimal') {
-              setErr('Obsidian では簡易版を表示しています。詳細版は今後さらに詰めます。');
-            }
-            return;
-          }
-          failureReasons.push(`保存(${candidate.mode}) が opened=false`);
-        } catch (error) {
-          failureReasons.push(`保存(${candidate.mode}): ${getErrorMessage(error)}`);
-        }
-      }
-
-      try {
-        const opened = await shareTextToPackage({
-          packageName: 'md.obsidian',
-          title,
-          subject: title,
-          text: minimalMarkdown,
-        });
-        if (opened) {
-          return;
-        }
-        failureReasons.push('共有(minimal) が opened=false');
-      } catch (error) {
-        failureReasons.push(`共有(minimal): ${getErrorMessage(error)}`);
-      }
-
-      if (navigator.share) {
-        try {
-          await navigator.share({ title, text: minimalMarkdown });
-          return;
-        } catch (e: any) {
-          if (e?.name === 'AbortError') return;
-          failureReasons.push(`navigator.share: ${getErrorMessage(e)}`);
-        }
-      }
-
-      await copyText(minimalMarkdown);
-      const failureSummary = failureReasons.length > 0 ? `\n\n失敗理由:\n- ${failureReasons.join('\n- ')}` : '';
-      alert(`Obsidian 用の日報 Markdown をコピーしました。Obsidian に貼り付けて保存してください。${failureSummary}`);
-    } catch (e: any) {
-      setErr(e?.message ?? 'Obsidian 送信の準備に失敗しました');
-    } finally {
-      setObsidianSending(false);
-    }
-  }
-
   async function handleOpenReport() {
     if (!tripId || !vm) return;
     setReportOpening(true);
@@ -1007,13 +730,6 @@ export default function TripDetail() {
             className="trip-detail__button trip-detail__button--accent"
           >
             {sharing ? '作成中…' : 'AI要約'}
-          </button>
-          <button
-            onClick={handleSendToObsidian}
-            disabled={obsidianSending || !vm}
-            className="trip-detail__button trip-detail__button--accent"
-          >
-            {obsidianSending ? '送信中…' : 'Obsidian送信'}
           </button>
           <button
             onClick={handleOpenReport}

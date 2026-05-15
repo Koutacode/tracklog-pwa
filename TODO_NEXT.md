@@ -34,6 +34,9 @@ Notion API token がないため、GitHub Actions 自動同期は使わない運
 - [ ] `個人アプリ` 配下に `TrackLog更新 2026-05-16 v0.1.7 更新通知誤検知修正` を追加。
 - [ ] `TrackLog運行アシスト｜機能・アップデート・配布情報` 配下に `v0.1.7 配布情報 2026-05-16` を追加。
 - [ ] `改善点` 配下に `改善記録 2026-05-16 更新通知誤検知の是正` を追加。
+- [ ] `個人アプリ` 配下に `TrackLog更新 2026-05-16 v0.1.8 Obsidian送信削除` を追加。
+- [ ] `TrackLog運行アシスト｜機能・アップデート・配布情報` 配下に `v0.1.8 配布情報 2026-05-16` を追加。
+- [ ] `改善点` 配下に `改善記録 2026-05-16 Obsidian送信削除` を追加。
 - [x] 今後はObsidianを更新せず、すべての運用記録をNotionへ集約する方針に変更。
 - [ ] token を取得できた場合のみ、自動同期 workflow の復活を検討する。
 
@@ -41,8 +44,11 @@ Notion API token がないため、GitHub Actions 自動同期は使わない運
 - [x] `v0.1.6` GitHub Release を作成し、`tracklog-assist-debug.apk` を添付済み。
 - [x] `v0.1.7` APK を作成し、端末へ `adb install -r` で上書きインストール済み。
 - [x] PWA本番 `https://tracklog-assist.pages.dev` を `0.1.7` へ更新済み。
-- [ ] `v0.1.7` GitHub Release を作成し、`tracklog-assist-debug.apk` を添付する。
-- [ ] 次回公開時は `v0.1.8` 以降で `package.json` / Android `versionCode` を更新する。
+- [x] `v0.1.7` GitHub Release を作成し、`tracklog-assist-debug.apk` を添付済み。
+- [x] `v0.1.8` APK を作成し、端末へ `adb install -r` で上書きインストール済み。
+- [x] PWA本番 `https://tracklog-assist.pages.dev` を `0.1.8` へ更新済み。
+- [ ] `v0.1.8` GitHub Release を作成し、`tracklog-assist-debug.apk` を添付する。
+- [ ] 次回公開時は `v0.1.9` 以降で `package.json` / Android `versionCode` を更新する。
 
 ### [確認] iPhone(iOS)でのPWA動作確認
 - [ ] iPhoneの Safari で開き、「ホーム画面に追加」して住所取得が動くか最終確認。

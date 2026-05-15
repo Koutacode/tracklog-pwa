@@ -43,47 +43,6 @@ public class AppSharePlugin extends Plugin {
     }
 
     @PluginMethod
-    public void shareTextToPackage(PluginCall call) {
-        String packageName = call.getString("packageName");
-        String title = call.getString("title");
-        String subject = call.getString("subject");
-        String text = call.getString("text");
-
-        if (packageName == null || packageName.trim().isEmpty()) {
-            call.reject("packageName が必要です。");
-            return;
-        }
-        if (text == null || text.trim().isEmpty()) {
-            call.reject("共有テキストが空です。");
-            return;
-        }
-
-        PackageManager packageManager = getContext().getPackageManager();
-        try {
-            packageManager.getPackageInfo(packageName, PackageManager.GET_ACTIVITIES);
-        } catch (Exception ex) {
-            call.reject("対象アプリが見つかりません。", ex);
-            return;
-        }
-
-        Intent intent = buildTextShareIntent(packageName, title, subject, text);
-
-        if (intent.resolveActivity(packageManager) == null) {
-            call.reject("対象アプリでテキスト共有を処理できません。");
-            return;
-        }
-
-        try {
-            getContext().startActivity(intent);
-            JSObject result = new JSObject();
-            result.put("opened", true);
-            call.resolve(result);
-        } catch (Exception ex) {
-            call.reject("対象アプリを開けませんでした。", ex);
-        }
-    }
-
-    @PluginMethod
     public void shareText(PluginCall call) {
         String title = call.getString("title");
         String subject = call.getString("subject");

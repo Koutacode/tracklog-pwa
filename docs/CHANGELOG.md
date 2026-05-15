@@ -1,5 +1,37 @@
 # TrackLog Changelog
 
+## 2026-05-16 v0.1.8
+
+### アプリ内Obsidian送信の削除
+
+- 今後の記録先をNotionに集約する運用に合わせ、`運行詳細・編集` の `Obsidian送信` ボタンを削除
+- Obsidian向けMarkdown生成、`obsidian://` URL起動、`md.obsidian` 指定共有、Obsidian専用のAndroid package visibility設定を削除
+- AI要約用の共有、設定画面のアプリ共有、管理画面の共有リンク、外部URLを開く処理は維持
+- Androidの配布バージョンを `0.1.8` / `versionCode=6` に更新
+
+### 検証
+
+- `npm run typecheck`
+- `npm run build`
+- `npx cap sync android`
+- `android\\gradlew.bat -PtracklogAppBuildDir=build-release-v018 --no-daemon assembleDebug`
+- `adb install -r output\\tracklog-assist-debug.apk`
+- `adb shell am start -W -n com.tracklog.assist/.MainActivity`
+- `adb shell dumpsys package com.tracklog.assist` で `versionCode=6` / `versionName=0.1.8` を確認
+- `adb shell pidof com.tracklog.assist` で起動後プロセス維持を確認
+- 直近ログに TrackLog の `FATAL EXCEPTION` / `AndroidRuntime` / `ANR` なし
+- `dist` / Android同梱assets / `src` / Android manifest から、現行の `Obsidian送信` / `md.obsidian` / `obsidian://` が消えていることを確認
+- Cloudflare Pages本番 `https://tracklog-assist.pages.dev/version.json` が `version=0.1.8` を返すことを確認
+- 本番 `https://tracklog-assist.pages.dev/sw.js` に `tracklog-shell-v2` と `version.json` バイパスが反映済み
+
+### APK
+
+- File: `output/tracklog-assist-debug.apk`
+- Version: `versionCode=6` / `versionName=0.1.8`
+- SHA-256: `1D65B19D44337ACD19DDCBC6874545F8214D16FDE881816A58CB34FEFFEEDB09`
+- Size: `6,020,890 bytes`
+- Device install: completed on `SCG34` (`RFCY70L6HTF`) with `adb install -r`
+
 ## 2026-05-16 v0.1.7
 
 ### Android更新通知の誤検知修正
