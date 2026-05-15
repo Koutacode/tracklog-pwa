@@ -107,10 +107,13 @@ export async function reverseGeocode(geo: Geo): Promise<string | undefined> {
   try {
     const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(
       lng,
-    )}&zoom=19&addressdetails=1`;
+    )}&zoom=19&addressdetails=1&email=matumurak0623@gmail.com`;
     const res = await fetch(url, {
       signal: controller.signal,
-      headers: { 'Accept-Language': 'ja' },
+      headers: {
+        'Accept-Language': 'ja',
+        'User-Agent': 'TrackLogApp/1.0 (matumurak0623@gmail.com)'
+      },
     });
     if (!res.ok) return undefined;
     const data = await res.json();

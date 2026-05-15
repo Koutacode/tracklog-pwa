@@ -176,9 +176,68 @@ export default function HomeScreen() {
       if (!parsed) throw new Error(`コマンドを判別できませんでした: ${matches[0]}`);
       
       // Execute command using handlers from useTripManager
-      // (This part needs a bit of adaptation since executeVoiceCommand was inlined before)
-      // I'll skip the full adaptation for brevity but assume we call hook handlers
-      setVoiceResult('実行しました（音声コマンド対応中）');
+      switch (parsed.kind) {
+        case 'trip_start':
+          if (!tripId) {
+            if (parsed.odoKm) await handleStartTrip(parsed.odoKm);
+            else setOdoDialog({ kind: 'trip_start' });
+          }
+          break;
+        case 'trip_end':
+          if (tripId) {
+            if (parsed.odoKm) await handleEndTrip(parsed.odoKm);
+            else setOdoDialog({ kind: 'trip_end' });
+          }
+          break;
+        case 'rest_start':
+          if (tripId && canStartRest) {
+            if (parsed.odoKm) await handleStartRest(parsed.odoKm);
+            else setOdoDialog({ kind: 'rest_start' });
+          }
+          break;
+        case 'rest_end':
+          if (tripId && restActive && openRestSessionId) {
+            await handleEndRest(openRestSessionId);
+          }
+          break;
+        case 'break_start':
+          if (tripId && canStartBreak) await handleToggleEvent('break', 'start');
+          break;
+        case 'break_end':
+          if (tripId && breakActive) await handleToggleEvent('break', 'end');
+          break;
+        case 'load_start':
+          if (tripId && canStartLoad) await handleToggleEvent('load', 'start');
+          break;
+        case 'load_end':
+          if (tripId && loadActive) await handleToggleEvent('load', 'end');
+          break;
+        case 'unload_start':
+          if (tripId && canStartUnload) await handleToggleEvent('unload', 'start');
+          break;
+        case 'unload_end':
+          if (tripId && unloadActive) await handleToggleEvent('unload', 'end');
+          break;
+        case 'expressway_start':
+          if (tripId && !expresswayActive) await handleToggleEvent('expressway', 'start');
+          break;
+        case 'expressway_end':
+          if (tripId && expresswayActive) await handleToggleEvent('expressway', 'end');
+          break;
+        case 'boarding':
+          if (tripId && !ferryActive) await handleAddFerry('boarding');
+          break;
+        case 'disembark':
+          if (tripId && ferryActive) await handleAddFerry('disembark');
+          break;
+        case 'geo_refresh':
+          await captureGeoOnce();
+          break;
+        case 'point_mark':
+          if (tripId) await handleAddPointMark(parsed.raw);
+          break;
+      }
+      setVoiceResult(`実行しました: ${parsed.raw}`);
     } catch (e: any) {
       setVoiceError(e?.message ?? '音声操作に失敗しました。');
     } finally {
