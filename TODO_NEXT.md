@@ -47,7 +47,7 @@ Notion API token がないため、GitHub Actions 自動同期は使わない運
 - [x] `v0.1.7` GitHub Release を作成し、`tracklog-assist-debug.apk` を添付済み。
 - [x] `v0.1.8` APK を作成し、端末へ `adb install -r` で上書きインストール済み。
 - [x] PWA本番 `https://tracklog-assist.pages.dev` を `0.1.8` へ更新済み。
-- [ ] `v0.1.8` GitHub Release を作成し、`tracklog-assist-debug.apk` を添付する。
+- [x] `v0.1.8` GitHub Release を作成し、`tracklog-assist-debug.apk` を添付済み。
 - [ ] 次回公開時は `v0.1.9` 以降で `package.json` / Android `versionCode` を更新する。
 
 ### [確認] iPhone(iOS)でのPWA動作確認

@@ -23,6 +23,8 @@
 - `dist` / Android同梱assets / `src` / Android manifest から、現行の `Obsidian送信` / `md.obsidian` / `obsidian://` が消えていることを確認
 - Cloudflare Pages本番 `https://tracklog-assist.pages.dev/version.json` が `version=0.1.8` を返すことを確認
 - 本番 `https://tracklog-assist.pages.dev/sw.js` に `tracklog-shell-v2` と `version.json` バイパスが反映済み
+- GitHub Release `v0.1.8` を作成し、`tracklog-assist-debug.apk` を添付済み
+- GitHub latest APKリンクが `https://github.com/Koutacode/tracklog-pwa/releases/download/v0.1.8/tracklog-assist-debug.apk` にリダイレクトされることを確認
 
 ### APK
 
@@ -30,6 +32,7 @@
 - Version: `versionCode=6` / `versionName=0.1.8`
 - SHA-256: `1D65B19D44337ACD19DDCBC6874545F8214D16FDE881816A58CB34FEFFEEDB09`
 - Size: `6,020,890 bytes`
+- Release: `https://github.com/Koutacode/tracklog-pwa/releases/tag/v0.1.8`
 - Device install: completed on `SCG34` (`RFCY70L6HTF`) with `adb install -r`
 
 ## 2026-05-16 v0.1.7
