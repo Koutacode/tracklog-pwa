@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Capacitor } from '@capacitor/core';
+import { App as CapApp } from '@capacitor/app';
 import { getDefaultAdminEmail, getDriverIdentity, setDriverProfileLocal } from '../../services/remoteAuth';
 import { getRemoteSyncState, hydrateRemoteSyncState, runRemoteSync, subscribeRemoteSyncState } from '../../services/remoteSync';
-import { openExternalUrl } from '../../services/nativeShare';
+import { openExternalUrl, shareText } from '../../services/nativeShare';
 
 function isStandaloneMode() {
   return window.matchMedia?.('(display-mode: standalone)').matches || (navigator as any).standalone === true;
@@ -46,6 +47,28 @@ export default function SettingsScreen() {
             <h1 className="screen-card__title">端末設定</h1>
           </div>
           <div className="screen-card__actions">
+            <button
+              className="pill-link"
+              onClick={async () => {
+                const url = window.location.origin;
+                const text = `【TrackLog 配布用アプリ】\n以下のURLからアプリを開き、Androidの場合はインストールしてください。\n${url}`;
+                try {
+                  const shared = await shareText({ title: 'TrackLog アプリを共有', text });
+                  if (!shared && navigator.share) {
+                    await navigator.share({ title: 'TrackLog アプリ', text });
+                  } else if (!shared) {
+                    await navigator.clipboard.writeText(text);
+                    setMessage('クリップボードにURLをコピーしました');
+                  }
+                } catch (e) {
+                  console.error(e);
+                  await navigator.clipboard.writeText(text);
+                  setMessage('クリップボードにURLをコピーしました');
+                }
+              }}
+            >
+              アプリ共有
+            </button>
             <Link to="/" className="pill-link">
               ホーム
             </Link>
@@ -147,6 +170,28 @@ export default function SettingsScreen() {
               </Link>
             )}
           </article>
+
+          {isNative && (
+            <article className="card settings-panel">
+              <div className="settings-panel__title">アプリの権限設定</div>
+              <div className="settings-note">
+                位置情報（常に許可）などのシステム権限を変更するには、OSの設定画面を開いてください。<br />
+                ※Androidの制限により、権限はユーザー自身で許可する必要があります。
+              </div>
+              <button
+                className="trip-btn"
+                onClick={async () => {
+                  try {
+                    await CapApp.openAppSettings();
+                  } catch (e: any) {
+                    setMessage('設定画面を開けませんでした');
+                  }
+                }}
+              >
+                OSの権限設定を開く
+              </button>
+            </article>
+          )}
         </section>
 
         {message && <div className="settings-toast">{message}</div>}

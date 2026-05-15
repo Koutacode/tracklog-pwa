@@ -1,15 +1,17 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Link, Navigate, useParams } from 'react-router-dom';
+import { Link, Navigate, useNavigate, useParams } from 'react-router-dom';
 import AdminMap from '../components/AdminMap';
-import { getAdminTripBundle } from '../../services/remoteAdmin';
+import { getAdminTripBundle, deleteAdminTrip } from '../../services/remoteAdmin';
 import { getAdminSession } from '../../services/remoteAuth';
 
 export default function AdminTripDetail() {
   const { tripId = '' } = useParams();
+  const navigate = useNavigate();
   const [ready, setReady] = useState(false);
   const [authenticated, setAuthenticated] = useState(false);
   const [bundle, setBundle] = useState<Awaited<ReturnType<typeof getAdminTripBundle>> | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -52,6 +54,25 @@ export default function AdminTripDetail() {
             <h1 className="screen-card__title">{tripId}</h1>
           </div>
           <div className="screen-card__actions">
+            <button
+              className="pill-link pill-link--danger"
+              disabled={isDeleting}
+              onClick={async () => {
+                if (!window.confirm('この運行履歴を完全に削除しますか？\n\n関連する走行ルートや日報データもすべて削除されます。\n※この操作は元に戻せません。')) {
+                  return;
+                }
+                setIsDeleting(true);
+                try {
+                  await deleteAdminTrip(tripId);
+                  navigate(-1);
+                } catch (e: any) {
+                  setError(e?.message ?? '削除に失敗しました');
+                  setIsDeleting(false);
+                }
+              }}
+            >
+              {isDeleting ? '削除中...' : 'この履歴を削除'}
+            </button>
             <Link to="/admin" className="pill-link">一覧へ戻る</Link>
           </div>
         </div>

@@ -78,6 +78,15 @@ export async function deleteAdminDevice(deviceId: string): Promise<DeleteAdminDe
   return { mode: 'hidden' };
 }
 
+export async function deleteAdminTrip(tripId: string): Promise<boolean> {
+  const client = assertAdminConfigured();
+  const { error } = await client.rpc('delete_tracklog_trip', {
+    _trip_id: tripId,
+  });
+  if (error) throw error;
+  return true;
+}
+
 export async function getAdminDeviceBundle(deviceId: string): Promise<AdminDeviceBundle> {
   const client = assertAdminConfigured();
   const [profileResult, tripsResult, eventsResult, reportsResult] = await Promise.all([

@@ -3,6 +3,7 @@ import { Link, Navigate } from 'react-router-dom';
 import type { RemoteDeviceProfile } from '../../domain/remoteTypes';
 import { deleteAdminDevice, listAdminDevices } from '../../services/remoteAdmin';
 import { getAdminSession, signOutAdmin } from '../../services/remoteAuth';
+import { shareText } from '../../services/nativeShare';
 import AdminMap from '../components/AdminMap';
 
 function fmtDateTime(ts?: string | null) {
@@ -166,6 +167,28 @@ export default function AdminDashboard() {
             <h1 className="screen-card__title">端末一覧</h1>
           </div>
           <div className="screen-card__actions">
+            <button
+              className="pill-link"
+              onClick={async () => {
+                const url = window.location.origin;
+                const text = `【TrackLog 配布用アプリ】\n以下のURLからアプリを開き、Androidの場合はインストールしてください。\n${url}\n\n※管理者画面は ${url}/admin です。`;
+                try {
+                  const shared = await shareText({ title: 'TrackLog アプリを共有', text });
+                  if (!shared && navigator.share) {
+                    await navigator.share({ title: 'TrackLog アプリ', text });
+                  } else if (!shared) {
+                    await navigator.clipboard.writeText(text);
+                    setNotice('クリップボードにURLをコピーしました');
+                  }
+                } catch (e) {
+                  console.error(e);
+                  await navigator.clipboard.writeText(text);
+                  setNotice('クリップボードにURLをコピーしました');
+                }
+              }}
+            >
+              アプリURLを共有
+            </button>
             <Link to="/" className="pill-link">
               ホーム
             </Link>
