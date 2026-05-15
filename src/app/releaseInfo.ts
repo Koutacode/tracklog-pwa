@@ -18,6 +18,7 @@ export const RELEASE_APK_NAME =
 export const LATEST_RELEASE_API = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases/latest`;
 export const RELEASE_PAGE_URL = `https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/releases/latest`;
 export const DEFAULT_APK_DOWNLOAD_URL = `${RELEASE_PAGE_URL}/download/${RELEASE_APK_NAME}`;
+export const PWA_URL = 'https://tracklog-assist.pages.dev';
 
 export const PREFERRED_APK_ASSET_NAMES = [
   RELEASE_APK_NAME,

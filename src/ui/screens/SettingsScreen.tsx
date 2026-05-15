@@ -5,6 +5,7 @@ import { App as CapApp } from '@capacitor/app';
 import { getDefaultAdminEmail, getDriverIdentity, setDriverProfileLocal } from '../../services/remoteAuth';
 import { getRemoteSyncState, hydrateRemoteSyncState, runRemoteSync, subscribeRemoteSyncState } from '../../services/remoteSync';
 import { openExternalUrl, shareText } from '../../services/nativeShare';
+import { PWA_URL, DEFAULT_APK_DOWNLOAD_URL } from '../../app/releaseInfo';
 
 function isStandaloneMode() {
   return window.matchMedia?.('(display-mode: standalone)').matches || (navigator as any).standalone === true;
@@ -50,7 +51,7 @@ export default function SettingsScreen() {
             <button
               className="pill-link"
               onClick={async () => {
-                const url = window.location.origin;
+                const url = PWA_URL;
                 const text = `【TrackLog 配布用アプリ】\n以下のURLからアプリを開き、Androidの場合はインストールしてください。\n${url}`;
                 try {
                   const shared = await shareText({ title: 'TrackLog アプリを共有', text });
@@ -152,12 +153,37 @@ export default function SettingsScreen() {
               <span>実行形態</span>
               <strong>{isNative ? 'Android ネイティブ' : standalone ? 'PWA' : 'ブラウザ'}</strong>
             </div>
-            {!isNative && (
-              <div className="settings-note">
-                iPhone では Safari で開いてから「共有 → ホーム画面に追加」で PWA として使えます。長時間バックグラウンド記録は Android ネイティブ前提です。
-              </div>
-            )}
             <div className="settings-note">
+              iPhone等でPWAとして利用するには、以下の共有URLを Safari で開いて「ホーム画面に追加」してください。
+            </div>
+            <div className="settings-card__actions" style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+              <button
+                className="trip-btn"
+                style={{ flex: 1, minWidth: '140px' }}
+                onClick={() => {
+                  const url = PWA_URL;
+                  navigator.clipboard.writeText(url).then(() => {
+                    setMessage('共有URLをコピーしました');
+                  }).catch(() => {
+                    setMessage('コピーに失敗しました');
+                  });
+                }}
+              >
+                共有URLをコピー
+              </button>
+              {!isNative && (
+                <a
+                  href={DEFAULT_APK_DOWNLOAD_URL}
+                  className="trip-btn trip-btn--ghost"
+                  style={{ flex: 1, minWidth: '140px', textAlign: 'center', textDecoration: 'none' }}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  Android用APKをDL
+                </a>
+              )}
+            </div>
+            <div className="settings-note" style={{ marginTop: '1rem' }}>
               管理画面は同じ URL の <code>/admin</code> で開きます。
             </div>
             {isNative && (

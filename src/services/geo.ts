@@ -1,67 +1,5 @@
 import type { Geo } from '../domain/types';
 
-type OrderedAddressParts = {
-  postalCode?: string;
-  country?: string;
-  prefecture?: string;
-  city?: string;
-  ward?: string;
-  locality?: string;
-  street?: string;
-  houseNumber?: string;
-  building?: string;
-};
-
-function cleanPart(value?: string | null): string | undefined {
-  if (typeof value !== 'string') return undefined;
-  const v = value.trim();
-  return v ? v : undefined;
-}
-
-function normalizePostalCode(value?: string | null): string | undefined {
-  const v = cleanPart(value);
-  if (!v) return undefined;
-  const digits = v.replace(/\D/g, '');
-  if (digits.length === 7) {
-    return `${digits.slice(0, 3)}-${digits.slice(3)}`;
-  }
-  return v;
-}
-
-function appendUnique(parts: string[], value?: string | null) {
-  const v = cleanPart(value);
-  if (!v) return;
-  if (parts.includes(v)) return;
-  if (parts.some(p => p.includes(v))) return;
-  const parentIdx = parts.findIndex(p => v.includes(p));
-  if (parentIdx >= 0) {
-    parts[parentIdx] = v;
-    return;
-  }
-  parts.push(v);
-}
-
-function concatCompact(parts: Array<string | undefined>) {
-  const out: string[] = [];
-  for (const p of parts) appendUnique(out, p);
-  return out.join('');
-}
-
-function concatSpaced(parts: Array<string | undefined>) {
-  const out: string[] = [];
-  for (const p of parts) appendUnique(out, p);
-  return out.join(' ').trim();
-}
-
-function formatOrderedAddress(parts: OrderedAddressParts): string | undefined {
-  const cityLine = concatCompact([parts.prefecture, parts.city, parts.ward, parts.locality]);
-  const streetLine = concatCompact([parts.street, parts.houseNumber]);
-  const tail = concatSpaced([cityLine, streetLine, cleanPart(parts.building)]);
-  const head = concatSpaced([normalizePostalCode(parts.postalCode), cleanPart(parts.country)]);
-  const merged = concatSpaced([head, tail]);
-  return merged || undefined;
-}
-
 /**
  * getGeo returns the current position from the browser's geolocation API. If
  * geolocation is unavailable or fails it resolves to undefined. The
@@ -95,9 +33,8 @@ export async function getGeo(): Promise<Geo | undefined> {
 }
 
 /**
- * reverseGeocode queries a public reverse geocoding service (Nominatim) to get
- * a human-readable address. If the network request fails or is unavailable it
- * returns undefined so that callers can degrade gracefully.
+ * reverseGeocode queries HeartRails Geo API to get a human-readable address.
+ * It degrades gracefully and returns undefined if network is unavailable or request fails.
  */
 export async function reverseGeocode(geo: Geo): Promise<string | undefined> {
   if (typeof navigator !== 'undefined' && navigator.onLine === false) return undefined;
@@ -105,46 +42,19 @@ export async function reverseGeocode(geo: Geo): Promise<string | undefined> {
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), 8000);
   try {
-    const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(
-      lng,
-    )}&zoom=19&addressdetails=1&email=matumurak0623@gmail.com`;
-    const res = await fetch(url, {
-      signal: controller.signal,
-      headers: {
-        'Accept-Language': 'ja'
-      },
-    });
+    const url = `https://geoapi.heartrails.com/api/json?method=searchByGeoLocation&x=${lng}&y=${lat}`;
+    const res = await fetch(url, { signal: controller.signal });
     if (!res.ok) return undefined;
     const data = await res.json();
-    const rawDisplayName: string | undefined = typeof data?.display_name === 'string' ? data.display_name : undefined;
-    const addr = data?.address ?? {};
-    
-    if (addr.country_code === 'jp' && rawDisplayName) {
-      const parts = rawDisplayName.split(',').map(s => s.trim()).reverse();
-      const filtered = parts.filter(p => p !== '日本' && !p.match(/^[〒\s]*[0-9]{3}-[0-9]{4}$/));
-      const out: string[] = [];
-      for (const p of filtered) {
-        if (out.length > 0 && p.startsWith(out[out.length - 1])) {
-          out[out.length - 1] = p;
-          continue;
-        }
-        out.push(p);
-      }
-      return out.join('');
-    }
 
-    const ordered = formatOrderedAddress({
-      postalCode: addr.postcode,
-      country: addr.country,
-      prefecture: addr.state || addr.province,
-      city: addr.city || addr.town || addr.village || addr.municipality,
-      ward: addr.city_district || addr.county,
-      locality: addr.suburb || addr.quarter || addr.neighbourhood || addr.hamlet,
-      street: addr.road || addr.residential || addr.pedestrian,
-      houseNumber: addr.house_number,
-      building: addr.building || addr.house,
-    });
-    return ordered || rawDisplayName;
+    if (data?.response?.location && data.response.location.length > 0) {
+      // Return the prefecture, city, and town of the closest matching location
+      const loc = data.response.location.sort((a: any, b: any) => a.distance - b.distance)[0];
+      if (loc) {
+        return `${loc.prefecture || ''}${loc.city || ''}${loc.town || ''}`.trim() || undefined;
+      }
+    }
+    return undefined;
   } catch {
     return undefined;
   } finally {
