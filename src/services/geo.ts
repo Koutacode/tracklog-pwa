@@ -100,10 +100,10 @@ export async function getGeo(): Promise<Geo | undefined> {
  * returns undefined so that callers can degrade gracefully.
  */
 export async function reverseGeocode(geo: Geo): Promise<string | undefined> {
-  if (typeof navigator !== 'undefined' && !navigator.onLine) return undefined;
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) return undefined;
   const { lat, lng } = geo;
   const controller = new AbortController();
-  const id = setTimeout(() => controller.abort(), 2500);
+  const id = setTimeout(() => controller.abort(), 8000);
   try {
     const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(
       lng,
@@ -111,8 +111,7 @@ export async function reverseGeocode(geo: Geo): Promise<string | undefined> {
     const res = await fetch(url, {
       signal: controller.signal,
       headers: {
-        'Accept-Language': 'ja',
-        'User-Agent': 'TrackLogApp/1.0 (matumurak0623@gmail.com)'
+        'Accept-Language': 'ja'
       },
     });
     if (!res.ok) return undefined;
@@ -122,7 +121,7 @@ export async function reverseGeocode(geo: Geo): Promise<string | undefined> {
     
     if (addr.country_code === 'jp' && rawDisplayName) {
       const parts = rawDisplayName.split(',').map(s => s.trim()).reverse();
-      const filtered = parts.filter(p => p !== '日本' && !p.match(/^[0-9]{3}-[0-9]{4}$/));
+      const filtered = parts.filter(p => p !== '日本' && !p.match(/^[〒\s]*[0-9]{3}-[0-9]{4}$/));
       const out: string[] = [];
       for (const p of filtered) {
         if (out.length > 0 && p.startsWith(out[out.length - 1])) {
