@@ -20,11 +20,29 @@ type ReleaseInfo = {
 };
 
 function isNewerRelease(release: ReleaseInfo) {
+  const releaseVersion = release.tag.replace(/^v/i, '').trim();
+  if (releaseVersion) {
+    const versionCompare = compareVersions(releaseVersion, APP_VERSION);
+    return versionCompare > 0;
+  }
+
   const buildTime = Date.parse(BUILD_DATE);
   const effectiveTime = release.assetUpdatedAt || release.publishedAt;
   const releaseTime = Date.parse(effectiveTime);
   if (!Number.isFinite(buildTime) || !Number.isFinite(releaseTime)) return false;
   return releaseTime > buildTime + UPDATE_GRACE_MS;
+}
+
+function compareVersions(a: string, b: string) {
+  const aParts = a.split(/[.-]/).map(part => Number.parseInt(part, 10));
+  const bParts = b.split(/[.-]/).map(part => Number.parseInt(part, 10));
+  const len = Math.max(aParts.length, bParts.length);
+  for (let i = 0; i < len; i += 1) {
+    const av = Number.isFinite(aParts[i]) ? aParts[i] : 0;
+    const bv = Number.isFinite(bParts[i]) ? bParts[i] : 0;
+    if (av !== bv) return av > bv ? 1 : -1;
+  }
+  return 0;
 }
 
 async function copyText(text: string) {

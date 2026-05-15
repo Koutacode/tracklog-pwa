@@ -1,5 +1,98 @@
 # TrackLog Changelog
 
+## 2026-05-16 v0.1.7
+
+### Android更新通知の誤検知修正
+
+- 接続中の端末は `versionCode=4` / `versionName=0.1.6` で、GitHub latest も `v0.1.6` だったため、その時点では実際の更新は不要だった
+- 更新通知が出た原因は、同一バージョンでも GitHub Release asset の更新時刻がAPKビルド時刻より後だと「新しいリリース」と見なす fallback 判定が残っていたため
+- Androidの更新通知判定を修正し、Release tag に `vX.Y.Z` がある場合はアプリ内 `APP_VERSION` より大きい時だけ更新ありと判定するようにした
+- 誤検知修正を反映した `0.1.7` / `versionCode=5` のAPKを作成し、接続中の端末へ `adb install -r` で上書きインストールした
+- Cloudflare Pages本番 `https://tracklog-assist.pages.dev` へ v0.1.7 をデプロイし、iPhone PWA が `version.json` で最新ビルドを検出できる状態にした
+
+### 検証
+
+- `npm run typecheck`
+- `powershell -ExecutionPolicy Bypass -File skills/tracklog-release-notion/scripts/prepare-tracklog-release.ps1 -Build -SyncAndroid -AssembleDebug -AppBuildDir build-release-v017`
+- `adb install -r output\\tracklog-assist-debug.apk`
+- `adb shell am start -W -n com.tracklog.assist/.MainActivity`
+- `adb shell dumpsys package com.tracklog.assist` で `versionCode=5` / `versionName=0.1.7` を確認
+- `adb shell pidof com.tracklog.assist` で起動後プロセス維持を確認
+- 直近ログに TrackLog の `FATAL EXCEPTION` / `AndroidRuntime` / `ANR` なし
+- 本番 `https://tracklog-assist.pages.dev/version.json` が `version=0.1.7` を返すことを確認
+- 本番 `https://tracklog-assist.pages.dev/sw.js` に `tracklog-shell-v2` と `version.json` バイパスが反映済み
+
+### APK
+
+- File: `output/tracklog-assist-debug.apk`
+- Version: `versionCode=5` / `versionName=0.1.7`
+- SHA-256: `BBBF4EAAC910E3254F2DD190A82FF255A2E999DAFDE79082A385CAEA060189F0`
+- Size: `6,023,554 bytes`
+- Device install: completed on `SCG34` (`RFCY70L6HTF`) with `adb install -r`
+
+## 2026-05-16 v0.1.6
+
+### 常に最新化する更新導線
+
+- PWA向けにビルドごとの `version.json` を生成し、iPhone PWAが起動中/復帰時/定期チェックで最新ビルドを検出できるようにした
+- PWAが新しい `version.json` を検出した場合、同一セッションで1回だけ自動リロードして最新画面へ切り替えるようにした
+- Service Workerを `tracklog-shell-v2` に更新し、`version.json` / `sw.js` は常にネットワーク優先、通常リソースもネットワーク優先でキャッシュを更新するようにした
+- Androidの更新通知は、GitHub Releaseの公開時刻だけでなく `vX.Y.Z` とアプリ内 `APP_VERSION` のバージョン比較でも判定するようにした
+- Cloudflare Pages本番 `https://tracklog-assist.pages.dev` へ v0.1.6 をデプロイ済み
+- GitHub Release `v0.1.6` を作成し、`tracklog-assist-debug.apk` を添付済み。`/releases/latest/download/tracklog-assist-debug.apk` は v0.1.6 に解決される
+
+### 検証
+
+- `npm run typecheck`
+- `npm run build`
+- `dist/version.json` が `version=0.1.6` を返すことを確認
+- `powershell -ExecutionPolicy Bypass -File skills/tracklog-release-notion/scripts/prepare-tracklog-release.ps1 -Build -SyncAndroid -AssembleDebug -AppBuildDir build-release-v016`
+- `adb install -r output\\tracklog-assist-debug.apk`
+- `adb shell am start -W -n com.tracklog.assist/.MainActivity`
+- 起動後20秒待機しても `com.tracklog.assist` プロセスが維持されることを確認
+- 直近ログに TrackLog の `FATAL EXCEPTION` / `ANR` なし
+- 本番 `https://tracklog-assist.pages.dev/version.json` が `0.1.6` を返すことを確認
+- 本番 `https://tracklog-assist.pages.dev/sw.js` に `tracklog-shell-v2` と `version.json` バイパスが反映済み
+- GitHub latest APKリンクが `https://github.com/Koutacode/tracklog-pwa/releases/download/v0.1.6/tracklog-assist-debug.apk` にリダイレクトされることを確認
+
+### APK
+
+- File: `output/tracklog-assist-debug.apk`
+- Version: `versionCode=4` / `versionName=0.1.6`
+- SHA-256: `5FCB014CE3A563C06928820B5470BC50A856CAA25DE09DB9A67EA01D514FD14A`
+- Device install: completed on `SCG34` (`RFCY70L6HTF`) with `adb install -r`
+
+## 2026-05-16
+
+### Android APK / iPhone PWA 配布方針の整理
+
+- 配布方針を「AndroidはAPK、iPhoneはPWA」に更新
+- 設定画面の共有文言を新方針に合わせ、Android APKリンクとiPhone向けPWA共有URLを維持
+- `@capacitor/app` に存在しない `openAppSettings()` 呼び出しをやめ、既存の `NativeSetup.openAppSettings()` ラッパー経由に修正
+- GitHub Release のAPK添付名を `tracklog-assist-debug.apk` に統一し、Release workflow に `npm run typecheck` を追加
+- `package.json` / `package-lock.json` / `android/gradle.properties` を `0.1.5` 系へ更新
+- Notion API token 未設定のため、GitHub Actions による Notion 自動同期は使わない運用として文書化
+
+### 検証
+
+- `npm run typecheck`
+- `npm run build`
+- `npm run cap:sync:android`
+- `powershell -ExecutionPolicy Bypass -File skills/tracklog-release-notion/scripts/prepare-tracklog-release.ps1 -Build -SyncAndroid -AssembleDebug -AppBuildDir build-release-v015`
+- `adb install -r output\\tracklog-assist-debug.apk`
+- `adb shell am start -W -n com.tracklog.assist/.MainActivity`
+- Home遷移後20秒待機しても `com.tracklog.assist` プロセスが維持されることを確認
+- 直近ログに TrackLog の `FATAL EXCEPTION` / `ANR` なし
+- `POST_NOTIFICATIONS` / `ACCESS_FINE_LOCATION` / `ACCESS_COARSE_LOCATION` / `ACCESS_BACKGROUND_LOCATION` は許可済み、`SCHEDULE_EXACT_ALARM` は `allow`
+- 電池最適化除外 whitelist に `com.tracklog.assist` を確認
+
+### APK
+
+- File: `output/tracklog-assist-debug.apk`
+- Version: `versionCode=3` / `versionName=0.1.5`
+- SHA-256: `69AD1CE468EE1C491FDAE162E6FC0170C2A0D73622B1014AB02A1B75F56FC730`
+- Device install: completed on `SCG34` (`RFCY70L6HTF`) with `adb install -r`
+
 ## 2026-04-25
 
 ### PCソース本線化 / 権限診断 / 配布バージョン

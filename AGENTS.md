@@ -1,11 +1,13 @@
 # TrackLog Local Agent Rules
 
-この `AGENTS.md` は、このフォルダ（`C:\Users\Public\Desktop\Codex専用\NativeApps\TrackLog`）配下でのみ有効。
+この `AGENTS.md` は、このフォルダ（`C:\Users\matum\OneDrive\デスクトップ\TrackLog`）配下でのみ有効。
 
 ## Project Scope
-- 本アプリは **Android Native専用**（Capacitor）として扱う。
+- 本アプリは **AndroidはAPK、iPhoneはPWA** で配布する。
+- Androidアプリは Capacitor Native として扱う。
 - パッケージIDは `com.tracklog.assist` を維持する。
-- PWA向け導線（インストール誘導やPWAアップデータ）は、明示依頼がない限り復活させない。
+- iPhone向けPWA導線（共有URL、ホーム画面追加の案内）は維持する。
+- PWAアップデータや汎用インストール誘導は、明示依頼がない限り追加しない。
 
 ## Build / Artifact
 - 基本ビルド手順:
@@ -31,21 +33,19 @@
 - 診断表示は実態ベースで判定し、黄色固定にならないようにする。
 - AI関連の固定文言として `要約してください` を自動挿入しない。
 
-## Obsidian / Notion / GitHub Update Policy
-- 記録更新の依頼時は、実装反映後に Obsidian / GitHub / Notion の3箇所を更新する。
-- UI調整や配布APK更新など、実機反映まで完了した変更は「成功した更新」とみなし、関連ログと配布情報を同じ日に反映する。
-- 反映順は原則 `Git 変更確認 -> APK / 実機確認 -> Obsidian ログ更新 -> Notion 更新` とする。
-- タスク完了報告の前に、少なくとも1件の Obsidian ログ更新と 3件の Notion ページ更新対象の要否を確認する。
+## Notion / GitHub Update Policy
+- 記録更新の依頼時は、実装反映後に GitHub / Notion を更新する。
+- Obsidian は今後更新しない。運用ログ、配布情報、改善履歴は Notion に集約する。
+- UI調整や配布APK更新など、実機反映まで完了した変更は「成功した更新」とみなし、関連ログと配布情報を同じ日に Notion へ反映する。
+- 反映順は原則 `Git 変更確認 -> APK / 実機確認 -> Notion 更新` とする。
+- タスク完了報告の前に、3件の Notion ページ更新対象の要否を確認する。
 - Notion の TrackLog関連更新対象:
   - `個人アプリ`
   - `TrackLog運行アシスト｜機能・アップデート・配布情報`
   - `改善点`（TrackLogページのサブページとして維持）
-- Obsidian の TrackLog関連更新対象:
-  - `AI会話/Codex/2026-03-09_Codex-TrackLogとObsidian運用ログ.md`
-  - 必要に応じて `仕事/運行記録/運行記録ホーム.md`
-- 自動同期:
-  - `sync-notion-from-github.yml`（`main` push時に GitHub -> Notion）
-  - `sync-github-from-notion.yml`（定期実行で Notion -> GitHub ミラー）
+- Notion自動同期:
+  - 現状は `NOTION_TOKEN` 未設定のため GitHub Actions 自動同期は使わない。
+  - 必要な更新は、実装/検証後に手動またはAI支援で対象ページを確認して反映する。
 
 ## Local Skill (Project Only)
 - リポジトリ内ローカルスキル:

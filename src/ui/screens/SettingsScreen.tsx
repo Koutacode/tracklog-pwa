@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Capacitor } from '@capacitor/core';
-import { App as CapApp } from '@capacitor/app';
 import { getDefaultAdminEmail, getDriverIdentity, setDriverProfileLocal } from '../../services/remoteAuth';
 import { getRemoteSyncState, hydrateRemoteSyncState, runRemoteSync, subscribeRemoteSyncState } from '../../services/remoteSync';
-import { openExternalUrl, shareText } from '../../services/nativeShare';
+import { shareText } from '../../services/nativeShare';
 import { PWA_URL, DEFAULT_APK_DOWNLOAD_URL } from '../../app/releaseInfo';
+import { openAppPermissionSettings } from '../../services/nativeSetup';
 
 function isStandaloneMode() {
   return window.matchMedia?.('(display-mode: standalone)').matches || (navigator as any).standalone === true;
@@ -52,7 +52,7 @@ export default function SettingsScreen() {
               className="pill-link"
               onClick={async () => {
                 const url = PWA_URL;
-                const text = `【TrackLog 配布用アプリ】\n以下のURLからアプリを開き、Androidの場合はインストールしてください。\n${url}`;
+                const text = `【TrackLog 配布用アプリ】\nAndroidはAPK、iPhoneはSafariで以下のURLを開いてホーム画面に追加してください。\n${url}`;
                 try {
                   const shared = await shareText({ title: 'TrackLog アプリを共有', text });
                   if (!shared && navigator.share) {
@@ -208,7 +208,8 @@ export default function SettingsScreen() {
                 className="trip-btn"
                 onClick={async () => {
                   try {
-                    await CapApp.openAppSettings();
+                    const opened = await openAppPermissionSettings();
+                    if (!opened) setMessage('設定画面を開けませんでした');
                   } catch (e: any) {
                     setMessage('設定画面を開けませんでした');
                   }

@@ -14,16 +14,36 @@ const githubOwner = releaseConfig.githubOwner ?? 'Koutacode';
 const githubRepo = releaseConfig.githubRepo ?? 'tracklog-pwa';
 const apkAssetName = releaseConfig.apkAssetName ?? 'tracklog-assist-debug.apk';
 const projectRoot = fs.realpathSync(__dirname);
+const buildDate = new Date().toISOString();
 
 const basePath = '/';
 
 export default defineConfig({
   root: projectRoot,
   base: basePath,
-  plugins: [react()],
+  plugins: [
+    react(),
+    {
+      name: 'tracklog-version-manifest',
+      generateBundle() {
+        this.emitFile({
+          type: 'asset',
+          fileName: 'version.json',
+          source: JSON.stringify(
+            {
+              version: pkg.version,
+              buildDate,
+            },
+            null,
+            2,
+          ),
+        });
+      },
+    },
+  ],
   define: {
     __APP_VERSION__: JSON.stringify(pkg.version),
-    __BUILD_DATE__: JSON.stringify(new Date().toISOString()),
+    __BUILD_DATE__: JSON.stringify(buildDate),
     __TRACKLOG_GITHUB_OWNER__: JSON.stringify(githubOwner),
     __TRACKLOG_GITHUB_REPO__: JSON.stringify(githubRepo),
     __TRACKLOG_RELEASE_APK_NAME__: JSON.stringify(apkAssetName),

@@ -1,6 +1,6 @@
-# Androidネイティブ運用手順（TrackLog）
+# TrackLog 配布運用手順
 
-TrackLogは **Androidネイティブ専用（Capacitor）** として運用する。PWA配布は行わない。
+TrackLogは **AndroidはAPK、iPhoneはPWA** で配布する。Androidアプリは Capacitor Native として扱い、パッケージID `com.tracklog.assist` を維持する。
 
 ## 0. 事前準備
 - PC: Node.js 20+、Android Studio（SDK含む）
@@ -33,6 +33,11 @@ npm run release:prepare
 - 再インストール時は同一署名キーを使用
 - 長期運用時はリリース署名鍵を管理する
 
+## 3.1 iPhone PWA 配布
+- iPhoneは `https://tracklog-assist.pages.dev` をSafariで開き、「ホーム画面に追加」で利用する
+- PWAの管理画面は `https://tracklog-assist.pages.dev/admin`
+- Android向けAPKリンクとiPhone向けPWA共有URLは設定画面から共有できる
+
 ## 4. ネイティブ権限・安定化
 - 位置情報: 常時許可（必要時）
 - 通知: 許可
@@ -49,9 +54,10 @@ npm run release:prepare
 - Android の `versionCode` / `versionName` は `android/gradle.properties` の `tracklogVersionCode` / `tracklogVersionName`
 - 配布前に `versionCode` を必ず増やす
 
-## 7. 現在の配布方針（2026-04-25）
+## 7. 現在の配布方針（2026-05-16）
 - PC上のソースを正として再ビルドする
-- 配布APK: `output/tracklog-assist-debug.apk`
+- Android配布APK: `output/tracklog-assist-debug.apk`
+- iPhone配布PWA: `https://tracklog-assist.pages.dev`
 - バックアップ: `output/device-backup/`
 
 ## 8. GitHub / Notion 同期
