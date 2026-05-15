@@ -138,20 +138,13 @@ export default function SettingsScreen() {
               管理画面は同じ URL の <code>/admin</code> で開きます。
             </div>
             {isNative && (
-              <button
+              <Link
+                to="/admin"
                 className="trip-btn"
-                onClick={async () => {
-                  setMessage(null);
-                  try {
-                    await openExternalUrl(`${window.location.origin}/admin`);
-                    setMessage('既定ブラウザで管理画面を開きました');
-                  } catch (error: any) {
-                    setMessage(error?.message ?? 'ブラウザを開けませんでした');
-                  }
-                }}
+                style={{ textAlign: 'center', textDecoration: 'none', display: 'block' }}
               >
-                ブラウザで管理画面を開く
-              </button>
+                アプリ内で管理画面を開く
+              </Link>
             )}
           </article>
         </section>
