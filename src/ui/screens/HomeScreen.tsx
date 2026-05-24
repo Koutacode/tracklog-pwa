@@ -80,6 +80,23 @@ function getOpenToggle(events: any[], startType: string, endType: string, key: s
   return null;
 }
 
+function getOpenToggleStartTs(events: any[], startType: string, endType: string, key: string): string | null {
+  const starts = events.filter(e => e.type === startType).sort((a, b) => a.ts.localeCompare(b.ts));
+  const ends = events.filter(e => e.type === endType);
+  for (let i = starts.length - 1; i >= 0; i--) {
+    const sid = (starts[i] as any).extras?.[key] as string | undefined;
+    if (!sid) continue;
+    const hasEnd = ends.some(en => (en as any).extras?.[key] === sid);
+    if (!hasEnd) return starts[i].ts;
+  }
+  const lastStart = starts[starts.length - 1];
+  if (lastStart) {
+    const hasEndAfter = ends.some(en => en.ts > lastStart.ts);
+    if (!hasEndAfter) return lastStart.ts;
+  }
+  return null;
+}
+
 export default function HomeScreen() {
   const {
     tripId,
@@ -146,6 +163,45 @@ export default function HomeScreen() {
   const restActive = !!openRestSessionId;
   const expresswayActive = !!getOpenToggle(events, 'expressway_start', 'expressway_end', 'expresswaySessionId');
   const ferryActive = !!getOpenToggle(events, 'boarding', 'disembark', 'ferrySessionId');
+
+  const activeStatuses = useMemo(() => {
+    const list: { name: string; startTs: string; type: 'base' | 'expressway' | 'ferry' }[] = [];
+
+    // 1. 基本カテゴリ (運転、休憩、休息、積込、荷卸、待機、業務)
+    if (liveDrive && liveDrive.currentCategory && liveDrive.currentCategory !== 'idle' && liveDrive.currentCategoryStartedAt) {
+      list.push({
+        name: liveDrive.currentCategoryLabel,
+        startTs: liveDrive.currentCategoryStartedAt,
+        type: 'base',
+      });
+    }
+
+    // 2. 高速道路
+    if (expresswayActive) {
+      const ts = getOpenToggleStartTs(events, 'expressway_start', 'expressway_end', 'expresswaySessionId');
+      if (ts) {
+        list.push({
+          name: '高速道路走行',
+          startTs: ts,
+          type: 'expressway',
+        });
+      }
+    }
+
+    // 3. フェリー
+    if (ferryActive) {
+      const ts = getOpenToggleStartTs(events, 'boarding', 'disembark', 'ferrySessionId');
+      if (ts) {
+        list.push({
+          name: 'フェリー乗船',
+          startTs: ts,
+          type: 'ferry',
+        });
+      }
+    }
+
+    return list;
+  }, [liveDrive, expresswayActive, ferryActive, events]);
 
   const canStartRest = !ferryActive && !loadActive && !breakActive && !restActive && !unloadActive;
   const canStartLoad = !ferryActive && !restActive && !breakActive && !loadActive && !unloadActive;
@@ -352,6 +408,61 @@ export default function HomeScreen() {
         ) : (
           <div className="home-grid">
             <div className="home-primary">
+              <div className="card" style={{ padding: 16 }}>
+                <div className="home-section-label">現在の作業状態</div>
+                <div style={{ display: 'grid', gap: 8, marginTop: 8 }}>
+                  {activeStatuses.map((status, idx) => {
+                    const elapsedMs = now - new Date(status.startTs).getTime();
+                    return (
+                      <div
+                        key={idx}
+                        style={{
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'center',
+                          background: 'rgba(255,255,255,0.05)',
+                          padding: '10px 14px',
+                          borderRadius: 8,
+                        }}
+                      >
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                          <span
+                            style={{
+                              display: 'inline-block',
+                              width: 8,
+                              height: 8,
+                              borderRadius: '50%',
+                              background:
+                                status.type === 'base'
+                                  ? '#3b82f6'
+                                  : status.type === 'expressway'
+                                  ? '#f59e0b'
+                                  : '#10b981',
+                            }}
+                          />
+                          <span style={{ fontSize: 15, fontWeight: 'bold' }}>
+                            {status.type === 'base' ? `${status.name}中` : status.name}
+                          </span>
+                        </div>
+                        <div style={{ textAlign: 'right' }}>
+                          <div style={{ fontSize: 16, fontWeight: 900, fontFamily: 'monospace' }}>
+                            {fmtDuration(elapsedMs)}
+                          </div>
+                          <div style={{ fontSize: 10, opacity: 0.5 }}>
+                            開始 {fmtDateTime(status.startTs).split(' ')[1] /* 時刻部分のみ */}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                  {activeStatuses.length === 0 && (
+                    <div style={{ fontSize: 13, color: 'rgba(255,255,255,0.5)', textAlign: 'center', padding: '8px 0' }}>
+                      稼働中の作業はありません
+                    </div>
+                  )}
+                </div>
+              </div>
+
               <div className="card" style={{ padding: 16 }}>
                 <div className="home-section-label">法令チェック</div>
                 <div style={{ display: 'flex', justifyContent: 'space-around', padding: '10px 0' }}>
