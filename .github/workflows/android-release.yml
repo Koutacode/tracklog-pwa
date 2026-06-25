@@ -33,6 +33,9 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
+      - name: Check Content Security Policy
+        run: npm run check:csp
+
       - name: Build Web Asset
         run: npm run build
 

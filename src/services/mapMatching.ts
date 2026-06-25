@@ -6,7 +6,17 @@ export type MatchProvider = 'osrm-match' | 'osrm-route' | 'raw';
 const OSRM_MATCH_ENDPOINT = 'https://router.project-osrm.org/match/v1/driving';
 const OSRM_ROUTE_ENDPOINT = 'https://router.project-osrm.org/route/v1/driving';
 const MAX_POINTS_PER_REQUEST = 70;
+const MAX_ROUTE_WAYPOINTS_PER_REQUEST = 25;
 const OVERLAP_POINTS = 6;
+
+function isValidLatLng(point: Pick<RoutePoint, 'lat' | 'lng'> | LatLng) {
+  return (
+    Number.isFinite(point.lat) &&
+    Number.isFinite(point.lng) &&
+    Math.abs(point.lat) <= 90 &&
+    Math.abs(point.lng) <= 180
+  );
+}
 
 function distanceMeters(a: LatLng, b: LatLng) {
   const toRad = (v: number) => (v * Math.PI) / 180;
@@ -36,10 +46,11 @@ function splitIntoChunks(points: RoutePoint[]): RoutePoint[][] {
 }
 
 function normalizePointsForMatching(points: RoutePoint[]): RoutePoint[] {
-  if (points.length <= 1) return points;
-  const normalized: RoutePoint[] = [points[0]];
-  for (let i = 1; i < points.length; i++) {
-    const current = points[i];
+  const validPoints = points.filter(isValidLatLng);
+  if (validPoints.length <= 1) return validPoints;
+  const normalized: RoutePoint[] = [validPoints[0]];
+  for (let i = 1; i < validPoints.length; i++) {
+    const current = validPoints[i];
     const prev = normalized[normalized.length - 1];
     const gapMs = Math.max(0, new Date(current.ts).getTime() - new Date(prev.ts).getTime());
     if (distanceMeters(prev, current) < 8 && gapMs < 20 * 60 * 1000) {
@@ -106,6 +117,27 @@ async function fetchOsrmMatch(points: RoutePoint[]): Promise<LatLng[] | null> {
 async function fetchOsrmRoute(points: RoutePoint[]): Promise<LatLng[] | null> {
   if (points.length < 2) {
     return points.map(p => ({ lat: p.lat, lng: p.lng }));
+  }
+  if (points.length > MAX_ROUTE_WAYPOINTS_PER_REQUEST) {
+    const merged: LatLng[] = [];
+    let routedAny = false;
+    let start = 0;
+    while (start < points.length - 1) {
+      const end = Math.min(points.length, start + MAX_ROUTE_WAYPOINTS_PER_REQUEST);
+      const rawPart = points.slice(start, end).map(p => ({ lat: p.lat, lng: p.lng }));
+      const part = (await fetchOsrmRoute(points.slice(start, end))) ?? rawPart;
+      if (part !== rawPart) routedAny = true;
+      if (merged.length === 0) {
+        merged.push(...part);
+      } else {
+        const prevLast = merged[merged.length - 1];
+        const startIdx = distanceMeters(prevLast, part[0]) < 6 ? 1 : 0;
+        merged.push(...part.slice(startIdx));
+      }
+      if (end >= points.length) break;
+      start = end - 1;
+    }
+    return routedAny && merged.length > 0 ? merged : null;
   }
   const coords = points.map(p => `${p.lng.toFixed(6)},${p.lat.toFixed(6)}`).join(';');
   const url =

@@ -11,6 +11,7 @@ const COLOR_PALETTE = ['#0ea5e9', '#22c55e', '#f97316', '#e11d48', '#a855f7', '#
 const MAX_SEGMENT_GAP_MS = 4 * 60 * 1000;
 const MAX_SEGMENT_DISTANCE_M = 1500;
 const MAX_SEGMENT_SPEED_KMH = 135;
+const SPARSE_ROUTE_GAP_MS = 8 * 60 * 1000;
 const MAX_RENDER_POINTS_PER_SEGMENT = 900;
 const MAX_MATCH_POINTS_PER_SEGMENT = 240;
 
@@ -114,6 +115,23 @@ function distanceMeters(a: { lat: number; lng: number }, b: { lat: number; lng: 
   return 2 * r * Math.asin(Math.min(1, Math.sqrt(h)));
 }
 
+function isValidLatLng(point: { lat: number; lng: number }) {
+  return (
+    Number.isFinite(point.lat) &&
+    Number.isFinite(point.lng) &&
+    Math.abs(point.lat) <= 90 &&
+    Math.abs(point.lng) <= 180
+  );
+}
+
+function hasSparseRouteGaps(points: RoutePoint[]) {
+  for (let i = 1; i < points.length; i++) {
+    const gapMs = Math.max(0, new Date(points[i].ts).getTime() - new Date(points[i - 1].ts).getTime());
+    if (gapMs >= SPARSE_ROUTE_GAP_MS) return true;
+  }
+  return false;
+}
+
 function buildSegments(points: RoutePoint[]): RouteSegment[] {
   const groups = new Map<
     string,
@@ -130,7 +148,7 @@ function buildSegments(points: RoutePoint[]): RouteSegment[] {
   }
   return [...groups.entries()]
     .flatMap(([dateKey, info], idx) => {
-      const pts = [...info.points].sort((a, b) => a.ts.localeCompare(b.ts));
+      const pts = [...info.points].filter(isValidLatLng).sort((a, b) => a.ts.localeCompare(b.ts));
       if (pts.length === 0) return [];
 
       const parts: Array<{ points: RoutePoint[]; gapFromPrevMs: number; gapFromPrevMeters: number }> = [];
@@ -145,9 +163,8 @@ function buildSegments(points: RoutePoint[]): RouteSegment[] {
         const gapMeters = distanceMeters(prev, next);
         const speedKmh = gapMs > 0 ? gapMeters / (gapMs / 3600000) : 0;
         const shouldSplit =
-          gapMs > MAX_SEGMENT_GAP_MS ||
-          gapMeters > MAX_SEGMENT_DISTANCE_M ||
-          speedKmh > MAX_SEGMENT_SPEED_KMH;
+          speedKmh > MAX_SEGMENT_SPEED_KMH ||
+          (gapMeters > MAX_SEGMENT_DISTANCE_M && gapMs > MAX_SEGMENT_GAP_MS);
 
         if (shouldSplit) {
           parts.push({
@@ -200,7 +217,7 @@ function buildSegments(points: RoutePoint[]): RouteSegment[] {
 function buildEventFallbackSegments(events: AppEvent[]): RouteSegment[] {
   const grouped = new Map<string, { dateLabel: string; dayStamp: number; points: RoutePoint[] }>();
   for (const event of events) {
-    if (!event.geo) continue;
+    if (!event.geo || !isValidLatLng(event.geo)) continue;
     const info = getJstDateInfo(event.ts);
     const point: RoutePoint = {
       id: `event-${event.id}`,
@@ -289,7 +306,7 @@ function fmtDateTime(ts?: string) {
 }
 
 function shouldUseRouteCorrection(segment: RouteSegment) {
-  return segment.sourceKind === 'eventFallback';
+  return segment.sourceKind === 'eventFallback' || hasSparseRouteGaps(segment.points);
 }
 
 export default function RouteMapScreen() {

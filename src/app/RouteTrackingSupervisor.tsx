@@ -8,10 +8,12 @@ import {
   getPendingExpresswayEndDecision,
   getPendingExpresswayEndPrompt,
   getRouteTrackingMode,
+  updateExpresswayResolved,
 } from '../db/repositories';
 import type { AppEvent } from '../domain/types';
 import { startRouteTracking, stopRouteTracking } from '../services/routeTracking';
 import { cancelNativeExpresswayEndPrompt } from '../services/nativeExpresswayPrompt';
+import { resolveNearestIC } from '../services/icResolver';
 import { ROUTE_TRACKING_SYNC_EVENT } from './routeTrackingSignal';
 
 function hasOpenRest(events: AppEvent[]) {
@@ -91,7 +93,18 @@ export default function RouteTrackingSupervisor() {
               pendingDecision.geo ??
               (pendingPrompt?.tripId === tripId ? pendingPrompt.geo : undefined);
             if (geo) {
-              await endExpressway({ tripId, geo });
+              const { eventId } = await endExpressway({ tripId, geo });
+              if (navigator.onLine) {
+                const result = await resolveNearestIC(geo.lat, geo.lng);
+                if (result) {
+                  await updateExpresswayResolved({
+                    eventId,
+                    status: 'resolved',
+                    icName: result.icName,
+                    icDistanceM: result.distanceM,
+                  });
+                }
+              }
             }
             await clearPendingExpresswayEndPrompt(tripId);
             await clearPendingExpresswayEndDecision(tripId);

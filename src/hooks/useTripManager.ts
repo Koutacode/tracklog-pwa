@@ -72,6 +72,19 @@ export function useTripManager() {
     }
   }, []);
 
+  const resolveExpresswayIcNow = useCallback(async (eventId: string, geo?: Geo) => {
+    if (!navigator.onLine || !geo) return;
+    const result = await resolveNearestIC(geo.lat, geo.lng);
+    if (result) {
+      await updateExpresswayResolved({
+        eventId,
+        status: 'resolved',
+        icName: result.icName,
+        icDistanceM: result.distanceM,
+      });
+    }
+  }, []);
+
   // Event handlers
   const handleStartTrip = async (odoKm: number) => {
     setLoading(true);
@@ -125,14 +138,10 @@ export function useTripManager() {
     } else if (type === 'expressway') {
       if (action === 'start') {
         const { eventId } = await dbStartExpressway({ tripId, geo, address });
-        if (navigator.onLine && geo) {
-          const result = await resolveNearestIC(geo.lat, geo.lng);
-          if (result) {
-            await updateExpresswayResolved({ eventId, status: 'resolved', icName: result.icName, icDistanceM: result.distanceM });
-          }
-        }
+        await resolveExpresswayIcNow(eventId, geo);
       } else {
-        await dbEndExpressway({ tripId, geo, address });
+        const { eventId } = await dbEndExpressway({ tripId, geo, address });
+        await resolveExpresswayIcNow(eventId, geo);
       }
       await cancelNativeExpresswayEndPrompt(tripId);
       await clearPendingExpresswayEndDecision(tripId);

@@ -99,6 +99,7 @@ type RawEvent = {
   volume?: number;
   memo?: string;
   odoKm?: number;
+  extras?: Record<string, unknown>;
 };
 
 type RawDayRun = {
@@ -155,6 +156,7 @@ const VALID_EVENT_TYPES: Set<string> = new Set([
   'wait_start', 'wait_end',
   'drive_start', 'drive_end',
   'work_start', 'work_end',
+  'expressway', 'expressway_start', 'expressway_end',
 ]);
 
 function mapEvent(raw: RawEvent): TripEvent | null {
@@ -167,6 +169,7 @@ function mapEvent(raw: RawEvent): TripEvent | null {
     customer: raw.customer,
     volume: raw.volume,
     memo: raw.memo,
+    extras: raw.extras,
   };
 }
 
@@ -366,6 +369,7 @@ function mapAppEventToRawEvent(event: AppEvent): RawEvent {
     volume: Number.isFinite(volume) ? volume : undefined,
     memo,
     odoKm: Number.isFinite(odoKm) ? odoKm : undefined,
+    extras: event.extras,
   };
 }
 
@@ -626,6 +630,9 @@ function categoryAfterEvent(
       return { category: 'drive', tripActive: true };
     case 'boarding':
     case 'disembark':
+    case 'expressway':
+    case 'expressway_start':
+    case 'expressway_end':
       return { category: currentCategory, tripActive };
     case 'break_start':
       return { category: 'break', tripActive: true };

@@ -5,8 +5,10 @@ import {
   deleteEvent,
   deleteTrip,
   getEventsByTripId,
+  refreshExpresswayIcFromGeo,
   refreshEventAddressFromGeo,
   updateEventAddressManual,
+  updateExpresswayIcNameManual,
   updateEventLiters,
   updateEventOdo,
   updateEventTimestamp,
@@ -119,6 +121,11 @@ type NumericEditDef = {
   step?: number;
 };
 
+type IcEditState = {
+  id: string;
+  value: string;
+};
+
 const EDITABLE_EVENT_TYPES: EventType[] = [
   'rest_start',
   'rest_end',
@@ -183,6 +190,34 @@ function getNumericEditDef(ev: AppEvent): NumericEditDef | null {
     return { field: 'liters', label: '給油量（L）', value: extras.liters, min: 0, step: 0.1 };
   }
   return null;
+}
+
+function isExpresswayEvent(ev: AppEvent) {
+  return ev.type === 'expressway' || ev.type === 'expressway_start' || ev.type === 'expressway_end';
+}
+
+function getIcResolveStatusLabel(ev: AppEvent): { label: string; detail: string; level: 'ok' | 'warn' | 'danger' } | null {
+  if (!isExpresswayEvent(ev)) return null;
+  const extras = (ev as any).extras ?? {};
+  const status = extras.icResolveStatus;
+  const name = typeof extras.icName === 'string' && extras.icName.trim() ? extras.icName.trim() : '';
+  const distance = Number(extras.icDistanceM);
+  const error = typeof extras.icResolveError === 'string' && extras.icResolveError.trim()
+    ? extras.icResolveError.trim()
+    : '';
+  const nextRetryAt = typeof extras.icResolveNextRetryAt === 'string' && extras.icResolveNextRetryAt.trim()
+    ? extras.icResolveNextRetryAt.trim()
+    : '';
+  if (status === 'resolved') {
+    const method = extras.icResolvedManually ? '手動修正' : '取得済';
+    const suffix = Number.isFinite(distance) ? ` / 約${Math.round(distance)}m` : '';
+    return { label: name || 'IC名未設定', detail: `${method}${suffix}`, level: 'ok' };
+  }
+  if (status === 'failed') {
+    const retry = nextRetryAt ? ` / 次回 ${fmtLocal(nextRetryAt)}` : '';
+    return { label: name || 'IC取得失敗', detail: `${error || '近傍ICを取得できませんでした'}${retry}`, level: 'danger' };
+  }
+  return { label: name || 'IC検索待ち', detail: 'オンライン時に位置情報から再取得します', level: 'warn' };
 }
 
 function getDayIndexByStamp(dayStamp: number, startDayStamp: number) {
@@ -262,9 +297,9 @@ function buildGrouped(events: AppEvent[]): GroupedItem[] {
         if ((end as any).geo) places.push({ label: '終了', ...(end as any).geo, address: end.address });
         let detail: string | undefined;
         if (def.label === '高速道路') {
-          const icFrom = (start as any).extras?.icName;
-          const icTo = (end as any).extras?.icName;
-          detail = `IC: ${icFrom ?? '不明'} → ${icTo ?? '不明'}`;
+          const startIc = getIcResolveStatusLabel(start);
+          const endIc = getIcResolveStatusLabel(end);
+          detail = `IC: ${startIc?.label ?? '不明'} → ${endIc?.label ?? '不明'}`;
         }
         out.push({
           id: `${start.id}-${end.id}`,
@@ -286,10 +321,9 @@ function buildGrouped(events: AppEvent[]): GroupedItem[] {
     if (ev.type === 'refuel') {
       const liters = (ev as any).extras?.liters;
       detail = liters != null ? `${liters} L` : undefined;
-    } else if (ev.type === 'expressway') {
-      const st = (ev as any).extras?.icResolveStatus;
-      const name = (ev as any).extras?.icName;
-      detail = st === 'resolved' ? `${name ?? 'IC'}（取得済）` : st === 'failed' ? 'IC取得失敗' : 'IC検索中';
+    } else if (isExpresswayEvent(ev)) {
+      const icStatus = getIcResolveStatusLabel(ev);
+      detail = icStatus ? `${icStatus.label}（${icStatus.detail}）` : undefined;
     } else if (ev.type === 'rest_end') {
       const dc = (ev as any).extras?.dayClose;
       const di = dc ? getDayIndex(ev.ts) : undefined;
@@ -477,6 +511,7 @@ export default function TripDetail() {
   const [typeEditing, setTypeEditing] = useState<{ id: string; value: EventType } | null>(null);
   const [addressEditing, setAddressEditing] = useState<{ id: string; value: string } | null>(null);
   const [numberEditing, setNumberEditing] = useState<{ id: string; field: NumericEditField; value: string } | null>(null);
+  const [icEditing, setIcEditing] = useState<IcEditState | null>(null);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [sharing, setSharing] = useState(false);
@@ -580,6 +615,22 @@ export default function TripDetail() {
     }
   }
 
+  async function handleSaveIcName() {
+    if (!icEditing) return;
+    setSaving(true);
+    setWorkingId(icEditing.id);
+    try {
+      await updateExpresswayIcNameManual(icEditing.id, icEditing.value);
+      setIcEditing(null);
+      await load();
+    } catch (e: any) {
+      setErr(e?.message ?? 'IC名の保存に失敗しました');
+    } finally {
+      setSaving(false);
+      setWorkingId(null);
+    }
+  }
+
   async function handleSaveNumber() {
     if (!numberEditing) return;
     const raw = numberEditing.value.trim();
@@ -629,6 +680,19 @@ export default function TripDetail() {
       }
     } catch (e: any) {
       setErr(e?.message ?? '住所の再取得に失敗しました');
+    } finally {
+      setWorkingId(null);
+    }
+  }
+
+  async function handleRefreshIc(eventId: string) {
+    setWorkingId(eventId);
+    try {
+      await refreshExpresswayIcFromGeo(eventId);
+      await load();
+    } catch (e: any) {
+      setErr(e?.message ?? 'IC名の再取得に失敗しました');
+      await load();
     } finally {
       setWorkingId(null);
     }
@@ -930,12 +994,14 @@ export default function TripDetail() {
               <div className="trip-list">
                   {editingEvents.map(ev => {
                     const numDef = getNumericEditDef(ev);
+                    const icStatus = getIcResolveStatusLabel(ev);
                     const isOpen = openEditorId === ev.id;
                     const timeEditing = editing?.id === ev.id;
                     const typeEditingActive = typeEditing?.id === ev.id;
                     const addressEditingActive = addressEditing?.id === ev.id;
                     const numberEditingActive =
                       !!numDef && numberEditing?.id === ev.id && numberEditing.field === numDef.field;
+                    const icEditingActive = icEditing?.id === ev.id;
                     const canDelete = ev.type !== 'trip_start';
                     const canEditType = ev.type !== 'trip_start' && ev.type !== 'trip_end';
                     const typeOptions = EDITABLE_EVENT_TYPES.includes(ev.type)
@@ -948,6 +1014,11 @@ export default function TripDetail() {
                             <div className="trip-item__title">{label(ev)}</div>
                             <div className="trip-item__meta">{fmtLocal(ev.ts)}</div>
                             {numDef && <div className="trip-item__meta">{numDef.label}: {numDef.value ?? '-'}</div>}
+                            {icStatus && (
+                              <div className="trip-item__meta">
+                                IC: {icStatus.label}（{icStatus.detail}）
+                              </div>
+                            )}
                             <div className="trip-item__meta trip-edit__address-preview">{ev.address ?? '住所未設定'}</div>
                           </div>
                           <div className="trip-edit__actions">
@@ -1084,6 +1155,58 @@ export default function TripDetail() {
                                       >
                                         数値を編集
                                       </button>
+                                    </div>
+                                  </div>
+                                )}
+                              </div>
+                            )}
+
+                            {icStatus && (
+                              <div className="trip-edit__section">
+                                <div className="trip-edit__label">高速IC</div>
+                                {icEditingActive ? (
+                                  <div className="trip-edit__stack">
+                                    <input
+                                      type="text"
+                                      value={icEditing.value}
+                                      onChange={e => setIcEditing({ id: ev.id, value: e.target.value })}
+                                      disabled={saving}
+                                      className="trip-input"
+                                      placeholder="例: 札幌南IC"
+                                    />
+                                    <div className="trip-edit__inline-actions">
+                                      <button onClick={handleSaveIcName} disabled={saving} className="trip-btn">保存</button>
+                                      <button onClick={() => setIcEditing(null)} disabled={saving} className="trip-btn trip-btn--ghost">取消</button>
+                                    </div>
+                                  </div>
+                                ) : (
+                                  <div className="trip-edit__stack">
+                                    <div className={`trip-edit__status trip-edit__status--${icStatus.level}`}>
+                                      <strong>{icStatus.label}</strong>
+                                      <span>{icStatus.detail}</span>
+                                    </div>
+                                    <div className="trip-edit__inline-actions">
+                                      <button
+                                        onClick={() =>
+                                          setIcEditing({
+                                            id: ev.id,
+                                            value: typeof (ev as any).extras?.icName === 'string' ? (ev as any).extras.icName : '',
+                                          })
+                                        }
+                                        disabled={saving}
+                                        className="trip-btn"
+                                      >
+                                        IC名を編集
+                                      </button>
+                                      {ev.geo && (
+                                        <button
+                                          onClick={() => handleRefreshIc(ev.id)}
+                                          disabled={workingId === ev.id}
+                                          className="trip-btn trip-btn--ghost"
+                                        >
+                                          {workingId === ev.id ? 'IC再取得中…' : 'ICを再取得'}
+                                        </button>
+                                      )}
                                     </div>
                                   </div>
                                 )}

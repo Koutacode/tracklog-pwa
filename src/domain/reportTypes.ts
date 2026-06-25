@@ -16,7 +16,10 @@ export type TripEventType =
   | 'drive_start'
   | 'drive_end'
   | 'work_start'
-  | 'work_end';
+  | 'work_end'
+  | 'expressway'
+  | 'expressway_start'
+  | 'expressway_end';
 
 export type ComplianceRuleMode = 'general' | 'long_distance' | 'ferry';
 
@@ -27,6 +30,7 @@ export type TripEvent = {
   customer?: string;
   volume?: number; // M3
   memo?: string;
+  extras?: Record<string, unknown>;
 };
 
 export type DayRecord = {

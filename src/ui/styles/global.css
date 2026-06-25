@@ -1048,6 +1048,31 @@ a:hover {
   flex-wrap: wrap;
 }
 
+.trip-edit__status {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.82);
+}
+
+.trip-edit__status strong {
+  color: #fff;
+}
+
+.trip-edit__status--ok strong {
+  color: #86efac;
+}
+
+.trip-edit__status--warn strong {
+  color: #fde68a;
+}
+
+.trip-edit__status--danger strong {
+  color: #fca5a5;
+}
+
 .trip-input {
   height: 40px;
   border-radius: 10px;

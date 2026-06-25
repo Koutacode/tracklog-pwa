@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo } from 'react';
 import { Link, useLocation, useSearchParams } from 'react-router-dom';
-import type { Trip, DayRecord, DayMetrics, JobInfo, TimeSegmentDetail } from '../../domain/reportTypes';
+import type { Trip, DayRecord, DayMetrics, JobInfo, TimeSegmentDetail, TripEvent } from '../../domain/reportTypes';
 import {
   buildReportTripFromAppEvents,
   parseJsonToTrip,
@@ -523,6 +523,7 @@ function DailyView({ day, metrics }: { day: DayRecord; metrics: DayMetrics }) {
     + metrics.breakMinutes
     + metrics.ferryMinutes
     + metrics.restMinutes;
+  const expresswaySessions = getExpresswaySessions(day);
 
   return (
     <div className="report-daily">
@@ -590,6 +591,18 @@ function DailyView({ day, metrics }: { day: DayRecord; metrics: DayMetrics }) {
         </div>
       )}
 
+      {expresswaySessions.length > 0 && (
+        <div className="report-card" style={{ padding: 16 }}>
+          <div className="report-section-title">高速道路区間</div>
+          <div className="report-section-caption" style={{ marginBottom: 12 }}>
+            高速開始・高速終了イベントに保存された IC 名を表示します。未解決の IC はオンライン時の再解決後に反映されます。
+          </div>
+          {expresswaySessions.map((session, index) => (
+            <ExpresswaySessionCard key={`expressway-${index}`} session={session} />
+          ))}
+        </div>
+      )}
+
       {/* Load/Unload details */}
       {(metrics.loads.length > 0 || metrics.unloads.length > 0) && (
         <div className="report-card" style={{ padding: 16 }}>
@@ -611,6 +624,92 @@ function DailyView({ day, metrics }: { day: DayRecord; metrics: DayMetrics }) {
 
 function getBusinessMinutes(metrics: DayMetrics) {
   return metrics.workMinutes + metrics.loadMinutes + metrics.unloadMinutes + metrics.waitMinutes;
+}
+
+type ExpresswaySession = {
+  startTs: string;
+  endTs?: string;
+  startIcName?: string;
+  endIcName?: string;
+  startIcDistanceM?: number;
+  endIcDistanceM?: number;
+  legacy?: boolean;
+};
+
+function getStringExtra(event: TripEvent | undefined, key: string): string | undefined {
+  const value = event?.extras?.[key];
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function getNumberExtra(event: TripEvent | undefined, key: string): number | undefined {
+  const value = event?.extras?.[key];
+  const n = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+function getExpresswaySessionId(event: TripEvent | undefined): string | undefined {
+  return getStringExtra(event, 'expresswaySessionId');
+}
+
+function getExpresswaySessions(day: DayRecord): ExpresswaySession[] {
+  const events = [...day.events].sort((a, b) => a.ts.localeCompare(b.ts));
+  const usedEndIndexes = new Set<number>();
+  const sessions: ExpresswaySession[] = [];
+
+  for (const start of events.filter(event => event.type === 'expressway_start')) {
+    const sessionId = getExpresswaySessionId(start);
+    const endIndex = events.findIndex((candidate, index) => {
+      if (usedEndIndexes.has(index) || candidate.type !== 'expressway_end' || candidate.ts < start.ts) return false;
+      const candidateSessionId = getExpresswaySessionId(candidate);
+      return sessionId ? candidateSessionId === sessionId : true;
+    });
+    const end = endIndex >= 0 ? events[endIndex] : undefined;
+    if (endIndex >= 0) usedEndIndexes.add(endIndex);
+    sessions.push({
+      startTs: start.ts,
+      endTs: end?.ts,
+      startIcName: getStringExtra(start, 'icName'),
+      endIcName: getStringExtra(end, 'icName'),
+      startIcDistanceM: getNumberExtra(start, 'icDistanceM'),
+      endIcDistanceM: getNumberExtra(end, 'icDistanceM'),
+    });
+  }
+
+  for (const legacy of events.filter(event => event.type === 'expressway')) {
+    sessions.push({
+      startTs: legacy.ts,
+      startIcName: getStringExtra(legacy, 'icName'),
+      startIcDistanceM: getNumberExtra(legacy, 'icDistanceM'),
+      legacy: true,
+    });
+  }
+
+  return sessions.sort((a, b) => a.startTs.localeCompare(b.startTs));
+}
+
+function formatIcDistance(distanceM?: number) {
+  if (distanceM == null) return '';
+  if (distanceM >= 1000) return `（約${(distanceM / 1000).toFixed(1)}km）`;
+  return `（約${Math.round(distanceM)}m）`;
+}
+
+function formatIcName(name?: string) {
+  return name || 'IC未解決';
+}
+
+function getExpresswayTimelineDetail(event: TripEvent): string | undefined {
+  if (event.type !== 'expressway_start' && event.type !== 'expressway_end' && event.type !== 'expressway') {
+    return undefined;
+  }
+  const prefix =
+    event.type === 'expressway_start'
+      ? '開始IC'
+      : event.type === 'expressway_end'
+        ? '終了IC'
+        : 'IC';
+  const icName = getStringExtra(event, 'icName');
+  const distanceM = getNumberExtra(event, 'icDistanceM');
+  return `${prefix}: ${formatIcName(icName)}${formatIcDistance(distanceM)}`;
 }
 
 // --- Constraint time card ---
@@ -765,6 +864,27 @@ function FerrySegmentCard({ segment }: { segment: TimeSegmentDetail }) {
       </div>
       <div className="report-load-item__meta">
         <span>{formatMinutes(segment.durationMinutes)}</span>
+      </div>
+    </div>
+  );
+}
+
+function ExpresswaySessionCard({ session }: { session: ExpresswaySession }) {
+  return (
+    <div className="report-load-item" style={{ borderLeftColor: '#ec4899' }}>
+      <div className="report-load-item__header">
+        <span style={{ color: '#ec4899' }}>{session.legacy ? '高速道路' : '高速道路区間'}</span>
+        <span className="mono">
+          {formatRoundedJstTime(session.startTs)} - {session.endTs ? formatRoundedJstTime(session.endTs) : '--:--'}
+        </span>
+      </div>
+      <div className="report-load-item__meta">
+        <span>開始IC: {formatIcName(session.startIcName)}{formatIcDistance(session.startIcDistanceM)}</span>
+        {session.legacy ? (
+          <span className="report-badge">旧形式</span>
+        ) : (
+          <span>終了IC: {formatIcName(session.endIcName)}{formatIcDistance(session.endIcDistanceM)}</span>
+        )}
       </div>
     </div>
   );
@@ -934,6 +1054,7 @@ function TimelineView({ day }: { day: DayRecord }) {
     <div className="report-timeline">
       {sorted.map((ev, i) => {
         const color = typeColors[ev.type] ?? '#94a3b8';
+        const expresswayDetail = getExpresswayTimelineDetail(ev);
         return (
           <div key={i} className="report-timeline__item">
             <div className="report-timeline__line">
@@ -945,6 +1066,7 @@ function TimelineView({ day }: { day: DayRecord }) {
               <div className="report-timeline__label" style={{ color }}>
                 {typeLabels[ev.type] ?? ev.type}
               </div>
+              {expresswayDetail && <div className="report-timeline__detail">{expresswayDetail}</div>}
               {ev.customer && <div className="report-timeline__detail">{ev.customer}</div>}
               {ev.address && <div className="report-timeline__detail">{ev.address}</div>}
               {ev.memo && <div className="report-timeline__detail">{ev.memo}</div>}

@@ -18,7 +18,7 @@ import { resolveNearestIC } from '../services/icResolver';
 export default function IcResolverJob() {
   useEffect(() => {
     let running = false;
-    const MAX_EVENTS_PER_TICK = 3;
+    const MAX_EVENTS_PER_TICK = 8;
     const runOnce = async () => {
       if (running || !navigator.onLine) return;
       running = true;

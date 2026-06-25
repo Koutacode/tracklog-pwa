@@ -13,6 +13,7 @@ import type {
 import { computeTotals } from '../domain/metrics';
 import { parseJsonInput } from '../domain/jsonInput';
 import { reverseGeocode } from '../services/geo';
+import { resolveNearestIC } from '../services/icResolver';
 
 /*
  * Utilities
@@ -57,8 +58,10 @@ const META_PENDING_EXPRESSWAY_END_PROMPT = 'pendingExpresswayEndPrompt';
 const META_PENDING_EXPRESSWAY_END_DECISION = 'pendingExpresswayEndDecision';
 const META_REMOTE_ROUTE_POINTS_UPLOADED_THROUGH = 'remoteRoutePointsUploadedThrough';
 const IC_RESOLVE_RETRY_LIMIT = 6;
+const IC_RESOLVE_ALGORITHM_VERSION = 3;
 const IC_RESOLVE_BACKOFF_BASE_MS = 2 * 60 * 1000;
 const IC_RESOLVE_BACKOFF_CAP_MS = 60 * 60 * 1000;
+const EXPRESSWAY_EVENT_TYPES = ['expressway', 'expressway_start', 'expressway_end'] as const;
 
 export type AutoExpresswayConfig = {
   speedKmh: number;
@@ -212,6 +215,8 @@ function canRetryIcResolve(ev: AppEvent, nowMs: number): boolean {
   const status = (ev as any).extras?.icResolveStatus;
   if (status == null || status === 'pending') return true;
   if (status !== 'failed') return false;
+  const algorithmVersion = parsePositiveInt((ev as any).extras?.icResolveAlgorithmVersion);
+  if (algorithmVersion < IC_RESOLVE_ALGORITHM_VERSION) return true;
   const retryCount = getIcResolveRetryCount(ev);
   if (retryCount >= IC_RESOLVE_RETRY_LIMIT) return false;
   const nextRetryMs = getIcResolveNextRetryAtMs(ev);
@@ -705,6 +710,76 @@ export async function updateEventLiters(eventId: string, liters: number) {
   const extras = { ...(ev as any).extras, liters };
   await db.events.update(eventId, { extras, syncStatus: 'pending' });
   notifyRemoteMutation('event-liters-update');
+}
+
+function assertExpresswayEvent(ev: AppEvent) {
+  if (!EXPRESSWAY_EVENT_TYPES.includes(ev.type as any)) {
+    throw new Error('高速道路イベントではありません');
+  }
+}
+
+export async function updateExpresswayIcNameManual(eventId: string, icName: string) {
+  const name = icName.trim();
+  if (!name) throw new Error('IC名を入力してください');
+  const ev = await db.events.get(eventId);
+  if (!ev) throw new Error('イベントが見つかりません');
+  assertExpresswayEvent(ev);
+  const extras = { ...(ev as any).extras };
+  extras.icName = name;
+  extras.icResolveStatus = 'resolved';
+  extras.icResolveAlgorithmVersion = IC_RESOLVE_ALGORITHM_VERSION;
+  extras.icResolvedManually = true;
+  extras.icResolveManualUpdatedAt = nowIso();
+  extras.icResolveRetryCount = 0;
+  delete extras.icDistanceM;
+  delete extras.icResolveNextRetryAt;
+  delete extras.icResolveLastAttemptAt;
+  delete extras.icResolveError;
+  await db.events.update(eventId, { extras, syncStatus: 'pending' });
+  notifyRemoteMutation('expressway-ic-manual');
+}
+
+export async function refreshExpresswayIcFromGeo(eventId: string): Promise<{ icName: string; distanceM: number }> {
+  const ev = await db.events.get(eventId);
+  if (!ev) throw new Error('イベントが見つかりません');
+  assertExpresswayEvent(ev);
+  const geo = (ev as any).geo as Geo | undefined;
+  if (!geo) {
+    await markExpresswayResolveFailure({
+      eventId,
+      errorMessage: '位置情報が未保存のためIC解決不可',
+      nextRetryAt: null,
+    });
+    throw new Error('このイベントには位置情報が保存されていません');
+  }
+
+  await updateExpresswayResolved({ eventId, status: 'pending' });
+  const result = await resolveNearestIC(geo.lat, geo.lng);
+  if (!result) {
+    await markExpresswayResolveFailure({
+      eventId,
+      errorMessage: '近傍ICを取得できませんでした',
+      nextRetryAt: null,
+    });
+    throw new Error('近傍ICを取得できませんでした');
+  }
+
+  const latest = await db.events.get(eventId);
+  if (!latest) throw new Error('イベントが見つかりません');
+  const extras = { ...(latest as any).extras };
+  extras.icName = result.icName;
+  extras.icDistanceM = result.distanceM;
+  extras.icResolveStatus = 'resolved';
+  extras.icResolveAlgorithmVersion = IC_RESOLVE_ALGORITHM_VERSION;
+  extras.icResolveRetryCount = 0;
+  extras.icResolveLastAttemptAt = nowIso();
+  delete extras.icResolvedManually;
+  delete extras.icResolveManualUpdatedAt;
+  delete extras.icResolveNextRetryAt;
+  delete extras.icResolveError;
+  await db.events.update(eventId, { extras, syncStatus: 'pending' });
+  notifyRemoteMutation('expressway-ic-refresh');
+  return result;
 }
 
 function getRoutePointAnchorId(eventId: string) {
@@ -1344,12 +1419,13 @@ export async function endExpressway(params: {
 }
 
 export async function getPendingExpresswayEvents(tripId?: string) {
-  const types = ['expressway', 'expressway_start', 'expressway_end'];
   const arr = tripId
-    ? await db.events.where('[tripId+type]').anyOf(types.map(t => [tripId, t])).toArray()
-    : await db.events.where('type').anyOf(types).toArray();
+    ? await db.events.where('[tripId+type]').anyOf(EXPRESSWAY_EVENT_TYPES.map(t => [tripId, t])).toArray()
+    : await db.events.where('type').anyOf([...EXPRESSWAY_EVENT_TYPES]).toArray();
   const nowMs = Date.now();
-  return arr.filter(e => canRetryIcResolve(e, nowMs));
+  return arr
+    .filter(e => canRetryIcResolve(e, nowMs))
+    .sort((a, b) => b.ts.localeCompare(a.ts));
 }
 
 export async function updateExpresswayResolved(params: {
@@ -1362,6 +1438,7 @@ export async function updateExpresswayResolved(params: {
   if (!ev) return;
   const extras = { ...(ev as any).extras };
   extras.icResolveStatus = params.status;
+  extras.icResolveAlgorithmVersion = IC_RESOLVE_ALGORITHM_VERSION;
   if (params.status === 'resolved') {
     if (params.icName) extras.icName = params.icName;
     if (params.icDistanceM != null) extras.icDistanceM = params.icDistanceM;
@@ -1374,7 +1451,7 @@ export async function updateExpresswayResolved(params: {
     if (extras.icResolveRetryCount == null) extras.icResolveRetryCount = 0;
     delete extras.icResolveNextRetryAt;
   }
-  await db.events.update(params.eventId, { extras });
+  await db.events.update(params.eventId, { extras, syncStatus: 'pending' });
   notifyRemoteMutation('expressway-resolved');
 }
 
@@ -1387,7 +1464,10 @@ export async function markExpresswayResolveFailure(params: {
   if (!ev) {
     return { retryCount: 0, exhausted: true, nextRetryAt: null as string | null };
   }
-  const retryCount = getIcResolveRetryCount(ev) + 1;
+  const previousAlgorithmVersion = parsePositiveInt((ev as any).extras?.icResolveAlgorithmVersion);
+  const previousRetryCount =
+    previousAlgorithmVersion < IC_RESOLVE_ALGORITHM_VERSION ? 0 : getIcResolveRetryCount(ev);
+  const retryCount = previousRetryCount + 1;
   const exhausted = retryCount >= IC_RESOLVE_RETRY_LIMIT;
   const nowMs = Date.now();
   const nextRetryAt =
@@ -1398,6 +1478,7 @@ export async function markExpresswayResolveFailure(params: {
 
   const extras = { ...(ev as any).extras };
   extras.icResolveStatus = 'failed';
+  extras.icResolveAlgorithmVersion = IC_RESOLVE_ALGORITHM_VERSION;
   extras.icResolveRetryCount = retryCount;
   extras.icResolveLastAttemptAt = new Date(nowMs).toISOString();
   if (nextRetryAt) {
@@ -1411,7 +1492,7 @@ export async function markExpresswayResolveFailure(params: {
   } else {
     delete extras.icResolveError;
   }
-  await db.events.update(params.eventId, { extras });
+  await db.events.update(params.eventId, { extras, syncStatus: 'pending' });
   notifyRemoteMutation('expressway-resolve-failure');
   return { retryCount, exhausted, nextRetryAt };
 }

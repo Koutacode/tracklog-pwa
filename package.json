@@ -15,6 +15,7 @@
     "build:pwa": "vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
+    "check:csp": "node scripts/check-csp-endpoints.mjs",
     "cap:sync:android": "npx cap sync android",
     "normalize:android-assets": "powershell -ExecutionPolicy Bypass -File scripts/normalize-capacitor-assets.ps1",
     "deploy:pages": "wrangler pages deploy dist --project-name tracklog-assist",
