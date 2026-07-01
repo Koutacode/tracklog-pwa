@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Capacitor } from '@capacitor/core';
-import { getDefaultAdminEmail, getDriverIdentity, setDriverProfileLocal } from '../../services/remoteAuth';
+import { getDefaultAdminEmail, getDriverIdentity, sendDriverMagicLink, setDriverProfileLocal } from '../../services/remoteAuth';
 import { getRemoteSyncState, hydrateRemoteSyncState, runRemoteSync, subscribeRemoteSyncState } from '../../services/remoteSync';
 import { shareText } from '../../services/nativeShare';
 import { PWA_URL, DEFAULT_APK_DOWNLOAD_URL } from '../../app/releaseInfo';
@@ -14,12 +14,16 @@ function isStandaloneMode() {
 export default function SettingsScreen() {
   const [displayName, setDisplayName] = useState('');
   const [vehicleLabel, setVehicleLabel] = useState('');
+  const [phone, setPhone] = useState('');
+  const [email, setEmail] = useState('');
+  const [sendingMagic, setSendingMagic] = useState(false);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [syncState, setSyncState] = useState(getRemoteSyncState());
 
   const isNative = Capacitor.isNativePlatform();
   const standalone = useMemo(() => isStandaloneMode(), []);
+  const authStatusLabel = email.trim() ? 'メール登録済み' : '未登録';
 
   useEffect(() => {
     let active = true;
@@ -28,6 +32,8 @@ export default function SettingsScreen() {
       if (!active) return;
       setDisplayName(identity.displayName);
       setVehicleLabel(identity.vehicleLabel);
+      setPhone(identity.phone);
+      setEmail(identity.email || '');
     })();
     void hydrateRemoteSyncState();
     const unsubscribe = subscribeRemoteSyncState(next => {
@@ -90,6 +96,14 @@ export default function SettingsScreen() {
               <span>車番・識別名</span>
               <input value={vehicleLabel} onChange={e => setVehicleLabel(e.target.value)} placeholder="例: 札幌 100 あ 1234" />
             </label>
+            <label className="settings-field">
+              <span>電話番号</span>
+              <input value={phone} onChange={e => setPhone(e.target.value)} placeholder="例: 090-1234-5678" />
+            </label>
+            <label className="settings-field">
+              <span>メールアドレス</span>
+              <input value={email} onChange={e => setEmail(e.target.value)} placeholder="例: sample@example.com" type="email" />
+            </label>
             <div className="settings-info-row">
               <span>端末ID</span>
               <strong>{syncState.deviceId ?? '未発行'}</strong>
@@ -98,6 +112,28 @@ export default function SettingsScreen() {
               <span>初期管理者メール</span>
               <strong>{getDefaultAdminEmail()}</strong>
             </div>
+            <div className="settings-info-row">
+              <span>認証状態</span>
+              <strong>{authStatusLabel}</strong>
+            </div>
+            <button
+              className="trip-btn"
+              disabled={!email.trim() || sendingMagic}
+              onClick={async () => {
+                setMessage(null);
+                setSendingMagic(true);
+                try {
+                  await sendDriverMagicLink(email);
+                  setMessage('認証リンクを送信しました。メールから開いて再度端末を更新してください。');
+                } catch (error: any) {
+                  setMessage(error?.message ?? '認証リンク送信に失敗しました');
+                } finally {
+                  setSendingMagic(false);
+                }
+              }}
+            >
+              {sendingMagic ? '送信中…' : '認証メールを送信'}
+            </button>
             <button
               className="trip-btn trip-btn--primary"
               disabled={saving}
@@ -105,7 +141,7 @@ export default function SettingsScreen() {
                 setSaving(true);
                 setMessage(null);
                 try {
-                  await setDriverProfileLocal({ displayName, vehicleLabel });
+                  await setDriverProfileLocal({ displayName, vehicleLabel, phone, email });
                   await hydrateRemoteSyncState();
                   await runRemoteSync('profile-save');
                   setMessage('端末プロフィールを保存しました');

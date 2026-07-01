@@ -5,15 +5,16 @@ export default function BigButton(props: {
   variant?: 'primary' | 'danger' | 'neutral';
   size?: 'default' | 'compact';
   hint?: string;
+  className?: string;
 }) {
-  const { label, onClick, disabled, variant = 'primary', size = 'default', hint } = props;
+  const { label, onClick, disabled, variant = 'primary', size = 'default', hint, className } = props;
 
   return (
     <button
       type="button"
       onClick={onClick}
       disabled={disabled}
-      className={`big-button big-button--${variant} big-button--${size}`}
+      className={`big-button big-button--${variant} big-button--${size}${className ? ` ${className}` : ''}`}
     >
       <span className="big-button__label">{label}</span>
       {hint && <span className="big-button__hint">{hint}</span>}

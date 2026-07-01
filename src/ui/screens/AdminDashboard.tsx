@@ -27,6 +27,11 @@ function getSeenStatus(lastSeenAt?: string | null): DeviceSeenStatus {
   return { kind: 'stale', label: '要確認' };
 }
 
+function getDisplayName(profile: RemoteDeviceProfile) {
+  const fallbackFromEmail = profile.driver_email ? profile.driver_email.split('@')[0] : null;
+  return profile.display_name || fallbackFromEmail || profile.device_id;
+}
+
 function escapeHtml(value: string) {
   return value.replace(/[&<>"']/g, char => {
     switch (char) {
@@ -44,6 +49,10 @@ function escapeHtml(value: string) {
         return char;
     }
   });
+}
+
+function formatProfileValue(value: string | null | undefined) {
+  return value && value.trim() ? value.trim() : '-';
 }
 
 export default function AdminDashboard() {
@@ -104,7 +113,7 @@ export default function AdminDashboard() {
         .filter(device => device.latest_lat != null && device.latest_lng != null)
         .map(device => {
           const seenStatus = deviceStatus.get(device.device_id) ?? getSeenStatus(device.last_seen_at);
-          const displayName = device.display_name || device.device_id;
+          const displayName = getDisplayName(device);
           const latestStatus = device.latest_status ?? '-';
           const vehicleLabel = device.vehicle_label ?? '-';
           const lastSeen = fmtDateTime(device.last_seen_at);
@@ -118,6 +127,8 @@ export default function AdminDashboard() {
               `<strong>${escapeHtml(displayName)}</strong>`,
               `状態: ${escapeHtml(latestStatus)} (${escapeHtml(seenStatus.label)})`,
               `車番: ${escapeHtml(vehicleLabel)}`,
+              `メール: ${escapeHtml(formatProfileValue(device.driver_email))}`,
+              `電話: ${escapeHtml(formatProfileValue(device.driver_phone))}`,
               `最終同期: ${escapeHtml(lastSeen)}`,
             ].join('<br />'),
           };
@@ -126,7 +137,7 @@ export default function AdminDashboard() {
   );
 
   async function handleDeleteDevice(device: RemoteDeviceProfile) {
-    const displayName = device.display_name || device.device_id;
+    const displayName = getDisplayName(device);
     const confirmed = window.confirm(
       `${displayName} を管理画面から消去します。\n\n` +
       'クラウド上の端末プロフィールと同期済みの運行データが削除されます。端末内のローカルデータは削除されません。\n\n' +
@@ -239,6 +250,8 @@ export default function AdminDashboard() {
               <tr>
                 <th>端末名</th>
                 <th>端末ID</th>
+                <th>メール</th>
+                <th>電話</th>
                 <th>現在状態</th>
                 <th>最新位置</th>
                 <th>最終同期</th>
@@ -250,9 +263,11 @@ export default function AdminDashboard() {
               {devices.map(device => (
                 <tr key={device.device_id}>
                   <td>
-                    <Link to={`/admin/devices/${encodeURIComponent(device.device_id)}`}>{device.display_name}</Link>
+                    <Link to={`/admin/devices/${encodeURIComponent(device.device_id)}`}>{getDisplayName(device)}</Link>
                   </td>
                   <td>{device.device_id.slice(0, 8)}</td>
+                  <td>{formatProfileValue(device.driver_email)}</td>
+                  <td>{formatProfileValue(device.driver_phone)}</td>
                   <td>
                     <span className={`admin-status-badge admin-status-badge--${deviceStatus.get(device.device_id)?.kind ?? 'stale'}`}>
                       {deviceStatus.get(device.device_id)?.label ?? '要確認'}

@@ -1,15 +1,15 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Capacitor } from '@capacitor/core';
 import { APP_VERSION, BUILD_DATE } from './version';
 import {
   LATEST_RELEASE_API,
-  RELEASE_PAGE_URL,
   pickPreferredApkAsset,
   resolveApkDownloadUrl,
 } from './releaseInfo';
+import { startNativeAppUpdate } from '../services/appUpdate';
+
 const CHECK_INTERVAL_MS = 5 * 60 * 1000;
-const UPDATE_GRACE_MS = 2 * 60 * 1000;
-const DISMISS_KEY = 'tracklog-dismissed-release';
+const UPDATE_GRACE_MS = 10 * 60 * 1000;
 
 type ReleaseInfo = {
   tag: string;
@@ -45,36 +45,11 @@ function compareVersions(a: string, b: string) {
   return 0;
 }
 
-async function copyText(text: string) {
-  try {
-    if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(text);
-      return true;
-    }
-  } catch {
-    // fallback below
-  }
-  try {
-    const el = document.createElement('textarea');
-    el.value = text;
-    el.setAttribute('readonly', 'true');
-    el.style.position = 'absolute';
-    el.style.left = '-9999px';
-    document.body.appendChild(el);
-    el.select();
-    const ok = document.execCommand('copy');
-    document.body.removeChild(el);
-    return ok;
-  } catch {
-    return false;
-  }
-}
-
 export default function NativeUpdateNotice() {
   const isNative = useMemo(() => Capacitor.isNativePlatform(), []);
   const [release, setRelease] = useState<ReleaseInfo | null>(null);
-  const [copied, setCopied] = useState(false);
-  const copyTimer = useRef<number | null>(null);
+  const [updating, setUpdating] = useState(false);
+  const [updateMessage, setUpdateMessage] = useState<string | null>(null);
 
   useEffect(() => {
     if (!isNative) return;
@@ -97,10 +72,6 @@ export default function NativeUpdateNotice() {
         };
         if (!info.tag || !info.publishedAt) return;
         if (!isNewerRelease(info)) return;
-        const effectiveTime = info.assetUpdatedAt || info.publishedAt;
-        const dismissKey = `${info.tag}:${effectiveTime}`;
-        const dismissed = localStorage.getItem(DISMISS_KEY);
-        if (dismissed && dismissed === dismissKey) return;
         if (cancelled) return;
         if (!cancelled) setRelease(info);
       } catch {
@@ -110,20 +81,21 @@ export default function NativeUpdateNotice() {
 
     void runCheck();
     const intervalId = window.setInterval(runCheck, CHECK_INTERVAL_MS);
+    const onFocus = () => {
+      void runCheck();
+    };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') void runCheck();
+    };
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onVisibilityChange);
     return () => {
       cancelled = true;
       window.clearInterval(intervalId);
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
     };
   }, [isNative]);
-
-  useEffect(() => {
-    return () => {
-      if (copyTimer.current != null) {
-        window.clearTimeout(copyTimer.current);
-        copyTimer.current = null;
-      }
-    };
-  }, []);
 
   if (!isNative || !release) return null;
 
@@ -133,66 +105,38 @@ export default function NativeUpdateNotice() {
     : release.publishedAt;
 
   return (
-    <div
-      style={{
-        position: 'fixed',
-        top: 'calc(12px + env(safe-area-inset-top))',
-        left: '50%',
-        transform: 'translateX(-50%)',
-        width: 'min(94vw, 640px)',
-        zIndex: 9999,
-      }}
-    >
-      <div
-        className="card"
-        style={{
-          padding: 12,
-          borderRadius: 16,
-          border: '1px solid rgba(59, 130, 246, 0.5)',
-          background: 'rgba(15, 23, 42, 0.95)',
-        }}
-      >
-        <div style={{ fontWeight: 900, fontSize: 16, marginBottom: 6 }}>新しいバージョンがあります</div>
-        <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.75)' }}>
+    <div className="native-update-modal" role="dialog" aria-modal="true" aria-labelledby="native-update-title">
+      <div className="native-update-card">
+        <div id="native-update-title" className="native-update-card__title">アップデートします</div>
+        <div className="native-update-card__body">
+          新しいアプリがあります。OKを押すと最新版APKを取得し、Androidの更新画面を開きます。
+        </div>
+        <div className="native-update-card__meta">
           現在: v{APP_VERSION} / 最新: {release.tag}（{publishedText}）
         </div>
-        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 10 }}>
-          <button className="trip-btn" onClick={() => window.open(release.downloadUrl, '_blank', 'noopener')}>
-            ダウンロード
-          </button>
-          <button
-            className="trip-btn"
-            onClick={async () => {
-              const ok = await copyText(release.downloadUrl);
-              if (!ok) return;
-              setCopied(true);
-              if (copyTimer.current != null) window.clearTimeout(copyTimer.current);
-              copyTimer.current = window.setTimeout(() => {
-                setCopied(false);
-                copyTimer.current = null;
-              }, 2000);
-            }}
-          >
-            URLコピー
-          </button>
-          <button
-            className="trip-btn trip-btn--ghost"
-            onClick={() => window.open(release.htmlUrl || RELEASE_PAGE_URL, '_blank', 'noopener')}
-          >
-            リリースページ
-          </button>
-          <button
-            className="trip-btn trip-btn--ghost"
-            onClick={() => {
-              const effectiveTime = release.assetUpdatedAt || release.publishedAt;
-              localStorage.setItem(DISMISS_KEY, `${release.tag}:${effectiveTime}`);
-              setRelease(null);
-            }}
-          >
-            あとで
-          </button>
-        </div>
-        {copied && <div style={{ fontSize: 12, color: '#86efac', marginTop: 6 }}>コピーしました</div>}
+        {updateMessage && <div className="native-update-card__message">{updateMessage}</div>}
+        <button
+          className="native-update-card__button"
+          disabled={updating}
+          onClick={async () => {
+            setUpdating(true);
+            setUpdateMessage('更新ファイルを準備しています...');
+            try {
+              const result = await startNativeAppUpdate(release.downloadUrl);
+              if (result.requiresPermission) {
+                setUpdateMessage('インストール許可の設定画面を開きました。許可後、もう一度OKを押してください。');
+                setUpdating(false);
+                return;
+              }
+              setUpdateMessage('Androidの更新画面を開きました。画面の案内に従って更新してください。');
+            } catch (error: any) {
+              setUpdateMessage(error?.message ?? 'アップデートを開始できませんでした。通信状態を確認してください。');
+              setUpdating(false);
+            }
+          }}
+        >
+          {updating ? '準備中...' : 'OK'}
+        </button>
       </div>
     </div>
   );

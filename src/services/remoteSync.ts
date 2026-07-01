@@ -10,15 +10,15 @@ import {
   setRemoteRoutePointsUploadedThrough,
 } from '../db/repositories';
 import { listReportTrips } from '../db/reportRepository';
-import type { AppEvent, RoutePoint } from '../domain/types';
+import type { AppEvent, EventType, RoutePoint } from '../domain/types';
 import type {
   DriverIdentity,
   RemoteCloudMaintenanceResult,
+  RemoteTripHeader,
   RemoteReportSnapshot,
   RemoteRoutePoint,
   RemoteSyncState,
   RemoteTripEvent,
-  RemoteTripHeader,
 } from '../domain/remoteTypes';
 import { subscribeRemoteSyncRequests, withRemoteSyncSignalsSuppressed } from '../app/remoteSyncSignal';
 import {
@@ -52,6 +52,37 @@ let inFlight: Promise<RemoteSyncState> | null = null;
 const META_REMOTE_CLOUD_MAINTENANCE_CHECKED_AT = 'remoteCloudMaintenanceCheckedAt';
 const META_REMOTE_CLOUD_DETAIL_RETENTION_CUTOFF_AT = 'remoteCloudDetailRetentionCutoffAt';
 const CLOUD_MAINTENANCE_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const REMOTE_DEVICE_IDS_CHUNK_SIZE = 50;
+
+const KNOWN_EVENT_TYPES: Set<EventType> = new Set([
+  'trip_start',
+  'trip_end',
+  'rest_start',
+  'rest_end',
+  'break_start',
+  'break_end',
+  'load_start',
+  'load_end',
+  'unload_start',
+  'unload_end',
+  'refuel',
+  'boarding',
+  'disembark',
+  'expressway',
+  'expressway_start',
+  'expressway_end',
+  'point_mark',
+]);
+
+const REMOTE_ROUTE_POINT_SOURCES: Set<RoutePoint['source']> = new Set([
+  'foreground',
+  'background',
+  'event',
+]);
+
+const LOCAL_SYNC_HEADER_EVENT_ID_PREFIX = 'header-sync';
+const HEADER_SYNC_EVENT_START = `${LOCAL_SYNC_HEADER_EVENT_ID_PREFIX}-trip-start`;
+const HEADER_SYNC_EVENT_END = `${LOCAL_SYNC_HEADER_EVENT_ID_PREFIX}-trip-end`;
 
 function emit(patch: Partial<RemoteSyncState>) {
   state = { ...state, ...patch };
@@ -89,6 +120,277 @@ function normalizeIso(value: unknown): string | null {
   const parsed = Date.parse(value);
   if (!Number.isFinite(parsed)) return null;
   return new Date(parsed).toISOString();
+}
+
+function normalizeEventType(raw: unknown): EventType | null {
+  if (typeof raw !== 'string') return null;
+  return KNOWN_EVENT_TYPES.has(raw as EventType) ? (raw as EventType) : null;
+}
+
+function normalizeSyncStatus(raw: unknown) {
+  if (raw === 'pending' || raw === 'synced' || raw === 'error') return raw;
+  return 'synced';
+}
+
+function normalizeRemoteExtras(raw: unknown): Record<string, unknown> | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  return { ...raw };
+}
+
+function normalizeRemoteGeo(raw: unknown): { lat: number; lng: number; accuracy?: number } | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const r = raw as Record<string, unknown>;
+  const lat = Number(r.lat);
+  const lng = Number(r.lng);
+  const accuracy = Number(r.accuracy);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return undefined;
+  return {
+    lat,
+    lng,
+    ...(Number.isFinite(accuracy) ? { accuracy } : {}),
+  };
+}
+
+function toMapStringSet(values: Array<{ device_id?: string | null }> | undefined | null): string[] {
+  if (!Array.isArray(values)) return [];
+  const next = new Set<string>();
+  for (const item of values) {
+    const id = typeof item.device_id === 'string' ? item.device_id.trim() : '';
+    if (id) next.add(id);
+  }
+  return [...next];
+}
+
+function chunkArray<T>(items: T[], size: number) {
+  const list = items ?? [];
+  if (size <= 0) return [list];
+  const out: T[][] = [];
+  for (let i = 0; i < list.length; i += size) {
+    out.push(list.slice(i, i + size));
+  }
+  return out;
+}
+
+function uniqueByKey<T>(items: T[], keyFor: (item: T) => string): T[] {
+  const seen = new Set<string>();
+  const result: T[] = [];
+  for (const item of items) {
+    const key = keyFor(item).trim();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    result.push(item);
+  }
+  return result;
+}
+
+function parseRemoteEvent(raw: unknown): AppEvent | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const row = raw as Record<string, unknown>;
+  const id = typeof row.id === 'string' ? row.id.trim() : '';
+  const tripId = typeof row.trip_id === 'string' ? row.trip_id.trim() : '';
+  const ts = normalizeIso(row.ts);
+  const type = normalizeEventType(row.type);
+  if (!id || !tripId || !ts || !type) return null;
+  const address = typeof row.address === 'string' && row.address.trim() ? row.address.trim() : undefined;
+  return {
+    id,
+    tripId,
+    type,
+    ts,
+    ...(address ? { address } : {}),
+    ...(normalizeRemoteGeo(row.geo) ? { geo: normalizeRemoteGeo(row.geo)! } : {}),
+    syncStatus: normalizeSyncStatus(row.sync_status),
+    ...(normalizeRemoteExtras(row.extras) ? { extras: normalizeRemoteExtras(row.extras)! } : {}),
+  };
+}
+
+function parseRemoteRoutePoint(raw: unknown): RoutePoint | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const row = raw as Record<string, unknown>;
+  const id = typeof row.id === 'string' ? row.id.trim() : '';
+  const tripId = typeof row.trip_id === 'string' ? row.trip_id.trim() : '';
+  const ts = normalizeIso(row.ts);
+  const lat = Number(row.lat);
+  const lng = Number(row.lng);
+  const accuracy = Number(row.accuracy);
+  const speed = Number(row.speed);
+  const heading = Number(row.heading);
+  if (!id || !tripId || !ts || !Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+
+  const sourceRaw = row.source;
+  const source = typeof sourceRaw === 'string' && REMOTE_ROUTE_POINT_SOURCES.has(sourceRaw as RoutePoint['source'])
+    ? sourceRaw
+    : null;
+
+  return {
+    id,
+    tripId,
+    ts,
+    updatedAt: normalizeIso(row.updated_at) ?? normalizeIso(row.ts)!,
+    lat,
+    lng,
+    ...(Number.isFinite(accuracy) ? { accuracy } : {}),
+    ...(Number.isFinite(speed) ? { speed } : {}),
+    ...(Number.isFinite(heading) ? { heading } : {}),
+    ...(source ? { source: source as RoutePoint['source'] } : {}),
+  };
+}
+
+async function getUserDeviceIds(userId: string): Promise<string[]> {
+  if (!driverSupabase) return [];
+  const { data, error } = await driverSupabase
+    .from('device_profiles')
+    .select('device_id')
+    .eq('auth_user_id', userId);
+  if (error) {
+    throw new Error(error.message || 'device_profiles の参照に失敗しました');
+  }
+  const ids = toMapStringSet(data as Array<{ device_id?: string | null }>);
+  if (ids.length === 0) return [];
+
+  const query: string[] = [];
+  const trimmed = ids.map(id => id.trim()).filter(Boolean);
+  for (const item of trimmed) {
+    if (!query.includes(item)) query.push(item);
+  }
+  return query;
+}
+
+async function fetchTableByDeviceIds<T extends Record<string, unknown>>(table: string): Promise<T[]> {
+  if (!driverSupabase) return [];
+  const session = await driverSupabase.auth.getSession();
+  const userId = session.data.session?.user?.id?.trim();
+  if (!userId) return [];
+  const deviceIds = await getUserDeviceIds(userId);
+  if (deviceIds.length === 0) return [];
+
+  const rows: T[] = [];
+  const chunks = chunkArray(deviceIds, REMOTE_DEVICE_IDS_CHUNK_SIZE);
+  for (const ids of chunks) {
+    if (ids.length === 0) continue;
+    const query = driverSupabase
+      .from(table)
+      .select('*')
+      .in('device_id', ids)
+      .order('ts', { ascending: true });
+    const { data, error } = await query;
+    if (error) {
+      throw new Error(error.message || `${table} の取得に失敗しました`);
+    }
+    if (Array.isArray(data)) {
+      rows.push(...(data as T[]));
+    }
+  }
+  return rows;
+}
+
+async function fetchUserCloudTripHeaders(): Promise<RemoteTripHeader[]> {
+  if (!driverSupabase) return [];
+  const session = await driverSupabase.auth.getSession();
+  const userId = session.data.session?.user?.id?.trim();
+  if (!userId) return [];
+  const deviceIds = await getUserDeviceIds(userId);
+  if (deviceIds.length === 0) return [];
+
+  const headers: RemoteTripHeader[] = [];
+  for (const chunk of chunkArray(deviceIds, REMOTE_DEVICE_IDS_CHUNK_SIZE)) {
+    if (chunk.length === 0) continue;
+    const result = await driverSupabase
+      .from('trip_headers')
+      .select('*')
+      .in('device_id', chunk)
+      .order('start_ts', { ascending: true });
+    if (result.error) {
+      throw new Error(result.error.message || 'trip_headers の取得に失敗しました');
+    }
+    if (Array.isArray(result.data)) {
+      headers.push(...(result.data as RemoteTripHeader[]));
+    }
+  }
+  return headers;
+}
+
+function normalizeHeaderStartEvent(header: RemoteTripHeader): AppEvent {
+  return {
+    id: `${HEADER_SYNC_EVENT_START}-${header.trip_id}`,
+    tripId: header.trip_id,
+    type: 'trip_start',
+    ts: normalizeIso(header.start_ts) || header.start_ts,
+    syncStatus: 'synced',
+    extras: { odoKm: header.odo_start },
+  };
+}
+
+function normalizeHeaderEndEvent(header: RemoteTripHeader): AppEvent {
+  const endTs = normalizeIso(header.end_ts) || header.end_ts || nowIso();
+  return {
+    id: `${HEADER_SYNC_EVENT_END}-${header.trip_id}`,
+    tripId: header.trip_id,
+    type: 'trip_end',
+    ts: endTs,
+    syncStatus: 'synced',
+    extras: {
+      odoKm: header.odo_end ?? 0,
+      totalKm: header.total_km ?? 0,
+      lastLegKm: header.last_leg_km ?? 0,
+    },
+  };
+}
+
+async function applyRemoteDownload(rows: {
+  headers: RemoteTripHeader[];
+  events: RemoteTripEvent[];
+  routePoints: RemoteRoutePoint[];
+  cloudCutoff: string | null;
+}) {
+  const normalizedEvents = rows.events.map(parseRemoteEvent).filter((item): item is AppEvent => item !== null);
+  const normalizedRoutePoints = rows.routePoints
+    .map(parseRemoteRoutePoint)
+    .filter((item): item is RoutePoint => item !== null);
+
+  const prunedHeaders = rows.cloudCutoff
+    ? rows.headers.filter(item =>
+        !(item.status === 'closed' && item.end_ts && Number.isFinite(Date.parse(item.end_ts)) && Date.parse(item.end_ts) < Date.parse(rows.cloudCutoff!)),
+      )
+    : rows.headers;
+  const prunedTripIds = getCloudDetailPrunedTripIds(prunedHeaders, rows.cloudCutoff);
+
+  const targetEvents = normalizedEvents.filter(item => !prunedTripIds.has(item.tripId));
+  const targetRoutePoints = normalizedRoutePoints.filter(item => !prunedTripIds.has(item.tripId));
+
+  const remoteTripIds = [...new Set(prunedHeaders.map(item => item.trip_id))];
+  const localTripEvents = remoteTripIds.length > 0
+    ? await db.events.where('tripId').anyOf(remoteTripIds).toArray()
+    : [];
+  const localHasStart = new Set(localTripEvents.filter(item => item.type === 'trip_start').map(item => item.tripId));
+  const localHasEnd = new Set(localTripEvents.filter(item => item.type === 'trip_end').map(item => item.tripId));
+
+  const headerBoundaryEvents = [];
+  for (const header of prunedHeaders) {
+    if (!localHasStart.has(header.trip_id)) {
+      headerBoundaryEvents.push(normalizeHeaderStartEvent(header));
+    }
+    if (header.end_ts && !localHasEnd.has(header.trip_id)) {
+      headerBoundaryEvents.push(normalizeHeaderEndEvent(header));
+    }
+  }
+
+  const mergedEvents = [...targetEvents, ...headerBoundaryEvents];
+  const uniqueEvents = Object.values(
+    mergedEvents.reduce<Record<string, AppEvent>>((acc, item) => {
+      acc[item.id] = item;
+      return acc;
+    }, {}),
+  );
+
+  await withRemoteSyncSignalsSuppressed(async () => {
+    await db.transaction('rw', db.events, db.routePoints, async () => {
+      await db.events.bulkPut(uniqueEvents);
+      if (targetRoutePoints.length > 0) {
+        await db.routePoints.bulkPut(targetRoutePoints);
+      }
+    });
+  });
 }
 
 async function getSavedCloudDetailRetentionCutoff(): Promise<string | null> {
@@ -135,7 +437,7 @@ async function maybeRunCloudMaintenance(): Promise<string | null> {
 }
 
 function getCloudDetailPrunedTripIds(
-  tripHeaders: Array<{ tripId: string; endTs?: string; status: string }>,
+  tripHeaders: Array<{ trip_id: string; end_ts?: string | null; status: string }>,
   cutoffIso: string | null,
 ) {
   if (!cutoffIso) return new Set<string>();
@@ -143,8 +445,8 @@ function getCloudDetailPrunedTripIds(
   if (!Number.isFinite(cutoffMs)) return new Set<string>();
   return new Set(
     tripHeaders
-      .filter(trip => trip.status === 'closed' && !!trip.endTs && Date.parse(trip.endTs) < cutoffMs)
-      .map(trip => trip.tripId),
+      .filter(trip => trip.status === 'closed' && !!trip.end_ts && Date.parse(trip.end_ts) < cutoffMs)
+      .map(trip => trip.trip_id),
   );
 }
 
@@ -283,6 +585,17 @@ export async function runRemoteSync(reason = 'manual'): Promise<RemoteSyncState>
     emit({ syncing: true, lastError: null });
     try {
       const identity = await initializeDriverIdentity();
+      if (!identity.authInitialized) {
+        emit({
+          syncing: false,
+          authInitialized: false,
+          profileComplete: identity.profileComplete,
+          deviceId: identity.deviceId,
+          displayName: identity.displayName,
+          vehicleLabel: identity.vehicleLabel,
+        });
+        return state;
+      }
       emit({
         deviceId: identity.deviceId,
         displayName: identity.displayName,
@@ -301,13 +614,21 @@ export async function runRemoteSync(reason = 'manual'): Promise<RemoteSyncState>
         listTrips(),
       ]);
       const deviceId = identity.deviceId as string;
-      const cloudPrunedTripIds = getCloudDetailPrunedTripIds(tripHeaders, cloudDetailRetentionCutoff);
+      const cloudPrunedTripIds = getCloudDetailPrunedTripIds(
+        tripHeaders.map(item => ({
+          trip_id: item.tripId,
+          end_ts: item.endTs ?? null,
+          status: item.status === 'closed' ? 'closed' : 'active',
+        })),
+        cloudDetailRetentionCutoff,
+      );
       const uploadableEvents = events.filter(item => !cloudPrunedTripIds.has(item.tripId));
       const uploadableRoutePoints = routePoints.filter(item => !cloudPrunedTripIds.has(item.tripId));
-      const uploadableReports = reportTrips.filter(item => !cloudPrunedTripIds.has(item.id));
+      const uploadableTripIds = new Set(tripHeaders.map(item => item.tripId));
+      const uploadableReports = reportTrips.filter(item => uploadableTripIds.has(item.id) && !cloudPrunedTripIds.has(item.id));
 
       await claimDeviceProfile(identity);
-      const normalizedTrips: RemoteTripHeader[] = tripHeaders.map(item => ({
+      const normalizedTrips: RemoteTripHeader[] = uniqueByKey(tripHeaders, item => item.tripId).map(item => ({
         trip_id: item.tripId,
         device_id: deviceId,
         start_ts: item.startTs,
@@ -319,9 +640,9 @@ export async function runRemoteSync(reason = 'manual'): Promise<RemoteSyncState>
         status: item.status,
         updated_at: nowIso(),
       }));
-      const normalizedEvents = uploadableEvents.map(item => normalizeTripEvent(deviceId, item));
-      const normalizedRoutePoints = uploadableRoutePoints.map(item => normalizeRoutePoint(deviceId, item));
-      const normalizedReports: RemoteReportSnapshot[] = uploadableReports.map(item => ({
+      const normalizedEvents = uniqueByKey(uploadableEvents, item => item.id).map(item => normalizeTripEvent(deviceId, item));
+      const normalizedRoutePoints = uniqueByKey(uploadableRoutePoints, item => item.id).map(item => normalizeRoutePoint(deviceId, item));
+      const normalizedReports: RemoteReportSnapshot[] = uniqueByKey(uploadableReports, item => item.id).map(item => ({
         trip_id: item.id,
         device_id: deviceId,
         created_at: item.createdAt,
@@ -357,6 +678,19 @@ export async function runRemoteSync(reason = 'manual'): Promise<RemoteSyncState>
         });
         if (error) throw error;
       }
+
+      const [remoteHeaders, remoteEvents, remoteRoutePoints] = await Promise.all([
+        fetchUserCloudTripHeaders(),
+        fetchTableByDeviceIds<RemoteTripEvent>('trip_events'),
+        fetchTableByDeviceIds<RemoteRoutePoint>('trip_route_points'),
+      ]);
+
+      await applyRemoteDownload({
+        headers: remoteHeaders,
+        events: remoteEvents,
+        routePoints: remoteRoutePoints,
+        cloudCutoff: cloudDetailRetentionCutoff,
+      });
 
       await withRemoteSyncSignalsSuppressed(async () => {
         await markAllEventsSynced();

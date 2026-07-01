@@ -17,11 +17,19 @@ type IcCandidate = IcResult & {
   score: number;
 };
 
+type CandidateSource = 'junction' | 'gate' | 'link' | 'motorway';
+
 const OVERPASS_ENDPOINTS = [
   'https://overpass-api.de/api/interpreter',
   'https://overpass.kumi.systems/api/interpreter',
 ];
 const OVERPASS_TIMEOUT_MS = 9000;
+const MAX_NAME_LEN_BY_SOURCE: Record<CandidateSource, number> = {
+  junction: 34,
+  gate: 48,
+  link: 34,
+  motorway: 36,
+};
 
 export type ExpresswaySignal = {
   resolved: boolean;
@@ -40,7 +48,7 @@ function haversineM(lat1: number, lon1: number, lat2: number, lon2: number) {
   const a =
     Math.sin(dLat / 2) ** 2 +
     Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
-  return 2 * r * Math.asin(Math.sqrt(a));
+  return 2 * r * Math.asin(Math.min(1, Math.sqrt(a)));
 }
 
 async function queryExpresswayOverpass(
@@ -49,14 +57,17 @@ async function queryExpresswayOverpass(
   radiusM: number,
 ): Promise<{ elements: OverpassElement[] } | null> {
   const gateRadiusM = Math.min(radiusM, 2200);
+  const highwayRadiusM = Math.min(radiusM, 3000);
   const query = `
 [out:json][timeout:12];
 (
   node(around:${radiusM},${lat},${lon})["highway"="motorway_junction"];
   node(around:${gateRadiusM},${lat},${lon})["barrier"="toll_booth"];
   node(around:${gateRadiusM},${lat},${lon})["highway"="toll_gantry"];
-  way(around:200,${lat},${lon})["highway"="motorway"];
-  way(around:800,${lat},${lon})["highway"="motorway_link"];
+  way(around:500,${lat},${lon})["highway"="motorway"]["name"];
+  way(around:${highwayRadiusM},${lat},${lon})["highway"="motorway"]["ref"]["name"];
+  way(around:${radiusM},${lat},${lon})["highway"="motorway_link"]["name"];
+  way(around:${radiusM},${lat},${lon})["highway"="motorway_link"]["destination"];
 );
 out body center;
   `.trim();
@@ -121,6 +132,11 @@ function isRoadRefOnly(name: string): boolean {
   return /^(?:E|C)?\d+[A-Z]?(?:-\d+)?$/i.test(compact) || /^国道\d+号?$/.test(compact);
 }
 
+function isRoadRefValue(name: string): boolean {
+  const compact = name.replace(/\s+/g, '');
+  return /^(?:E|C)?\d+[A-Z]?(?:-\d+)?$/i.test(compact) || /^(?:国道|都道府県道)\d+/i.test(compact);
+}
+
 function hasJapaneseText(name: string): boolean {
   return /[\u3040-\u30ff\u3400-\u9fff]/.test(name);
 }
@@ -129,67 +145,113 @@ function isIcLikeName(name: string): boolean {
   return /(IC|SIC|JCT|PA|SA|料金所|スマート)/i.test(name);
 }
 
-function shouldUseName(name: string, source: 'junction' | 'gate' | 'link'): boolean {
-  if (!name || isRoadRefOnly(name)) return false;
-  if (isIcLikeName(name)) return true;
-  if (source === 'link') return false;
-  return hasJapaneseText(name) && name.length <= 24;
+function isExitLikeName(name: string): boolean {
+  return isIcLikeName(name) || /(出口|入口|IC|JCT|PA|SA|料金所)/i.test(name);
 }
 
-function extractIcName(element: OverpassElement, source: 'junction' | 'gate' | 'link'): string | null {
-  const tags = element.tags;
-  const raw = getTag(tags, [
-    'name:ja',
-    'official_name:ja',
-    'name',
-    'official_name',
-    'alt_name',
-    'loc_name',
-    'nat_ref',
-    'junction:ref',
-    'ref',
-    'destination',
-    'destination:ref',
-  ]);
-  const normalized = raw ? normalizeIcName(raw) : null;
+function splitTagValues(raw: string): string[] {
+  return raw
+    .split(/[;,|]/)
+    .map(v => v.trim())
+    .filter(v => v.length > 0);
+}
+
+function shouldUseName(name: string, source: CandidateSource): boolean {
+  if (!name || isRoadRefOnly(name) || isRoadRefValue(name)) return false;
+  if (name.length > MAX_NAME_LEN_BY_SOURCE[source]) return false;
+  if (isIcLikeName(name)) return true;
+  if (source === 'junction') return hasJapaneseText(name);
+  if (source === 'gate') return true;
+  return hasJapaneseText(name) && isExitLikeName(name);
+}
+
+function normalizeCandidateName(raw: string, source: CandidateSource): string | null {
+  const normalized = normalizeIcName(raw);
   if (!normalized || !shouldUseName(normalized, source)) return null;
-  if (source === 'junction' && !isIcLikeName(normalized) && hasJapaneseText(normalized)) {
+  if (source === 'junction' && hasJapaneseText(normalized) && !isIcLikeName(normalized)) {
     return `${normalized}IC`;
   }
   return normalized;
 }
 
-function classifyCandidateSource(element: OverpassElement): 'junction' | 'gate' | 'link' | null {
+function collectRawNames(tags: OverpassTags, source: CandidateSource): string[] {
+  const values: string[] = [];
+  const pushTag = (key: string) => {
+    const raw = tags[key];
+    if (typeof raw === 'string' && raw.trim()) {
+      values.push(...splitTagValues(raw));
+    }
+  };
+
+  if (source === 'junction') {
+    ['name:ja', 'official_name:ja', 'name', 'official_name', 'loc_name', 'ref', 'junction:ref'].forEach(pushTag);
+    return values;
+  }
+
+  if (source === 'gate') {
+    ['name:ja', 'official_name:ja', 'name', 'operator', 'ref', 'note'].forEach(pushTag);
+    return values;
+  }
+
+  ['name:ja', 'official_name:ja', 'name', 'official_name', 'destination', 'destination:ref', 'destination:to', 'to', 'ref'].forEach(pushTag);
+  return values;
+}
+
+function extractIcName(element: OverpassElement, source: CandidateSource): string | null {
+  const tags = element.tags;
+  if (!tags) return null;
+  for (const raw of collectRawNames(tags, source)) {
+    const icName = normalizeCandidateName(raw, source);
+    if (icName) return icName;
+  }
+  const fallback = getTag(tags, ['alt_name', 'alt_name:ja', 'nat_ref', 'old_name', 'old_name:ja']);
+  return normalizeCandidateName(fallback ?? '', source);
+}
+
+function classifyCandidateSource(element: OverpassElement): CandidateSource | null {
   const tags = element.tags;
   if (!tags) return null;
   if (element.type === 'node' && tags.highway === 'motorway_junction') return 'junction';
   if (element.type === 'node' && (tags.barrier === 'toll_booth' || tags.highway === 'toll_gantry')) return 'gate';
   if (element.type === 'way' && tags.highway === 'motorway_link') return 'link';
+  if (element.type === 'way' && tags.highway === 'motorway') return 'motorway';
   return null;
 }
 
 function buildIcCandidates(elements: OverpassElement[], lat: number, lon: number): IcCandidate[] {
-  const sourcePriority = {
+  const sourcePriority: Record<CandidateSource, number> = {
     junction: 0,
     gate: 220,
     link: 520,
+    motorway: 620,
   };
-  const candidates: IcCandidate[] = [];
+  const candidatesByName = new Map<string, IcCandidate>();
   for (const element of elements) {
     const source = classifyCandidateSource(element);
     if (!source) continue;
     const point = elementPoint(element);
     if (!point) continue;
-    const icName = extractIcName(element, source);
-    if (!icName) continue;
-    const distanceM = Math.round(haversineM(lat, lon, point.lat, point.lon));
-    candidates.push({
-      icName,
-      distanceM,
-      score: distanceM + sourcePriority[source],
-    });
+
+    const rawNames = collectRawNames(element.tags ?? {}, source);
+    const fallbackName = extractIcName(element, source);
+    if (fallbackName) rawNames.push(fallbackName);
+
+    for (const rawName of rawNames) {
+      const icName = normalizeCandidateName(rawName, source);
+      if (!icName) continue;
+      const distanceM = Math.round(haversineM(lat, lon, point.lat, point.lon));
+      const score = distanceM + sourcePriority[source];
+      const existing = candidatesByName.get(icName);
+      if (!existing || score < existing.score) {
+        candidatesByName.set(icName, {
+          icName,
+          distanceM,
+          score,
+        });
+      }
+    }
   }
-  return candidates.sort((a, b) => a.score - b.score);
+  return [...candidatesByName.values()].sort((a, b) => a.score - b.score || a.distanceM - b.distanceM);
 }
 
 /**

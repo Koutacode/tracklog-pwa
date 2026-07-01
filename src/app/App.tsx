@@ -1,4 +1,4 @@
-import { Suspense, lazy } from 'react';
+import { Suspense, lazy, useEffect } from 'react';
 import { BrowserRouter, Routes, Route, useLocation } from 'react-router-dom';
 import AdminAuthBridge from './AdminAuthBridge';
 import IcResolverJob from './IcResolverJob';
@@ -8,6 +8,8 @@ import PwaBootstrap from './PwaBootstrap';
 import RequireDriverProfile from './RequireDriverProfile';
 import RemoteSyncBootstrap from './RemoteSyncBootstrap';
 import RouteTrackingSupervisor from './RouteTrackingSupervisor';
+import { onDriverAuthStateChange } from '../services/remoteAuth';
+import { runRemoteSync } from '../services/remoteSync';
 import { APP_VERSION } from './version';
 
 const HomeScreen = lazy(() => import('../ui/screens/HomeScreen'));
@@ -29,6 +31,15 @@ function AppShell() {
   const location = useLocation();
   const isAdminRoute =
     location.pathname.startsWith('/login') || location.pathname.startsWith('/admin');
+
+  useEffect(() => {
+    const unsubscribe = onDriverAuthStateChange(() => {
+      void runRemoteSync('driver-auth');
+    });
+    return () => {
+      unsubscribe();
+    };
+  }, []);
 
   return (
     <>

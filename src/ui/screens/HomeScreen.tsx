@@ -374,6 +374,11 @@ export default function HomeScreen() {
 
   const tripStart = events.find(e => e.type === 'trip_start') as any;
   const tripElapsed = tripStart?.ts ? now - new Date(tripStart.ts).getTime() : null;
+  const expresswayAction = expresswayActive ? 'end' : 'start';
+  const expresswayButtonClass = `big-button--expressway-hero ${
+    expresswayActive ? 'big-button--expressway-end' : 'big-button--expressway-start'
+  }`;
+  const expresswayButtonLabel = expresswayActive ? '高速道路終了' : '高速道路開始';
 
   return (
     <div className="home-backdrop">
@@ -399,11 +404,24 @@ export default function HomeScreen() {
           </div>
         </div>
 
+        {!focusDriving && (
+          <div className="home-expressway-quick">
+            <BigButton
+              label={expresswayButtonLabel}
+              variant="neutral"
+              className={expresswayButtonClass}
+              onClick={() => handleToggleEvent('expressway', expresswayAction)}
+            />
+          </div>
+        )}
+
         {focusDriving ? (
           <DrivingView
             liveDrive={liveDrive}
             onVoiceCommand={runVoiceCommand}
             voiceListening={voiceListening}
+            expresswayActive={expresswayActive}
+            onExpresswayToggle={action => handleToggleEvent('expressway', action)}
           />
         ) : (
           <div className="home-grid">
@@ -518,7 +536,6 @@ export default function HomeScreen() {
                 unloadActive={unloadActive}
                 breakActive={breakActive}
                 restActive={restActive}
-                expresswayActive={expresswayActive}
                 ferryActive={ferryActive}
                 canStartLoad={canStartLoad}
                 canStartUnload={canStartUnload}

@@ -2876,6 +2876,108 @@ a:hover {
   box-shadow: 0 16px 32px rgba(2, 6, 23, 0.32);
 }
 
+.driving-command-stack {
+  display: grid;
+  gap: 16px;
+}
+
+.home-expressway-quick {
+  margin-bottom: 14px;
+}
+
+.big-button--expressway-hero {
+  min-height: 106px;
+  padding: 20px 18px;
+  border-radius: 22px;
+  justify-items: center;
+  text-align: center;
+}
+
+.big-button--expressway-hero .big-button__label {
+  font-size: 24px;
+  line-height: 1.12;
+}
+
+.big-button--expressway-start {
+  background: linear-gradient(160deg, rgba(245, 158, 11, 0.98), rgba(180, 83, 9, 0.98));
+  border-color: rgba(253, 230, 138, 0.44);
+  box-shadow: 0 18px 38px rgba(180, 83, 9, 0.34);
+}
+
+.big-button--expressway-end {
+  background: linear-gradient(160deg, rgba(239, 68, 68, 0.98), rgba(153, 27, 27, 0.98));
+  border-color: rgba(254, 202, 202, 0.44);
+  box-shadow: 0 18px 38px rgba(127, 29, 29, 0.34);
+}
+
+.native-update-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  display: grid;
+  place-items: center;
+  padding: calc(18px + env(safe-area-inset-top)) 18px calc(18px + env(safe-area-inset-bottom));
+  background: rgba(2, 6, 23, 0.68);
+  backdrop-filter: blur(10px);
+}
+
+.native-update-card {
+  width: min(94vw, 420px);
+  border-radius: 22px;
+  border: 1px solid rgba(125, 211, 252, 0.28);
+  background: linear-gradient(180deg, rgba(15, 23, 42, 0.98), rgba(2, 6, 23, 0.98));
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.44);
+  color: #f8fafc;
+  padding: 22px;
+}
+
+.native-update-card__title {
+  font-size: 24px;
+  font-weight: 900;
+  line-height: 1.15;
+  margin-bottom: 12px;
+}
+
+.native-update-card__body,
+.native-update-card__meta,
+.native-update-card__message {
+  font-size: 14px;
+  line-height: 1.55;
+  color: rgba(226, 232, 240, 0.82);
+}
+
+.native-update-card__meta {
+  margin-top: 10px;
+  font-size: 12px;
+  color: rgba(148, 163, 184, 0.88);
+}
+
+.native-update-card__message {
+  margin-top: 14px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(56, 189, 248, 0.24);
+  background: rgba(14, 165, 233, 0.12);
+}
+
+.native-update-card__button {
+  width: 100%;
+  min-height: 58px;
+  margin-top: 18px;
+  border: 0;
+  border-radius: 16px;
+  background: linear-gradient(160deg, rgba(14, 165, 233, 0.96), rgba(2, 132, 199, 0.98));
+  color: #fff;
+  font-size: 18px;
+  font-weight: 900;
+  box-shadow: 0 18px 38px rgba(2, 132, 199, 0.28);
+}
+
+.native-update-card__button:disabled {
+  opacity: 0.66;
+  box-shadow: none;
+}
+
 .start-hero {
   padding: calc(16px + env(safe-area-inset-top)) 16px calc(28px + env(safe-area-inset-bottom));
   background:

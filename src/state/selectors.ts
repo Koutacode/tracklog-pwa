@@ -134,33 +134,42 @@ export function buildTimeline(events: AppEvent[]): TimelineItem[] {
     }
     return undefined;
   };
+  const getIcLabel = (e: AppEvent) => {
+    const extras = (e as any).extras ?? {};
+    const name = typeof extras.icName === 'string' && extras.icName.trim() ? extras.icName.trim() : null;
+    const status = extras.icResolveStatus;
+    if (name) return name;
+    if (status === 'failed') return 'IC未解決（再取得対象）';
+    if (status === 'pending' || status == null) return 'IC未解決';
+    return 'IC未解決';
+  };
   const label = (e: AppEvent) => {
-  switch (e.type) {
-    case 'trip_start':
-      return '運行開始';
-    case 'trip_end':
-      return '運行終了';
-    case 'rest_start':
-      return '休息開始';
-    case 'rest_end':
-      return '休息終了';
-    case 'break_start':
-      return '休憩開始';
-    case 'break_end':
-      return '休憩終了';
-    case 'load_start':
-      return '積込開始';
-    case 'load_end':
-      return '積込終了';
-    case 'unload_start':
-      return '荷卸開始';
-    case 'unload_end':
-      return '荷卸終了';
-    case 'refuel':
-      return '給油';
-    case 'expressway':
-      return '高速道路';
-    case 'expressway_start':
+    switch (e.type) {
+      case 'trip_start':
+        return '運行開始';
+      case 'trip_end':
+        return '運行終了';
+      case 'rest_start':
+        return '休息開始';
+      case 'rest_end':
+        return '休息終了';
+      case 'break_start':
+        return '休憩開始';
+      case 'break_end':
+        return '休憩終了';
+      case 'load_start':
+        return '積込開始';
+      case 'load_end':
+        return '積込終了';
+      case 'unload_start':
+        return '荷卸開始';
+      case 'unload_end':
+        return '荷卸終了';
+      case 'refuel':
+        return '給油';
+      case 'expressway':
+        return '高速道路';
+      case 'expressway_start':
         return '高速開始';
       case 'expressway_end':
         return '高速終了';
@@ -201,11 +210,9 @@ export function buildTimeline(events: AppEvent[]): TimelineItem[] {
           const loc = formatGeo(start) || formatGeo(e);
           let detail = `${fmtRange(start.ts, e.ts)}（${fmtDuration(start.ts, e.ts)}）`;
           if (def.label === '高速道路') {
-            const icFrom = (start as any).extras?.icName;
-            const icTo = (e as any).extras?.icName;
-            if (icFrom || icTo) {
-              detail = `IC: ${icFrom ?? '不明'} → ${icTo ?? '不明'} / ${detail}`;
-            }
+            const fromLabel = getIcLabel(start);
+            const toLabel = getIcLabel(e);
+            detail = `高速開始IC: ${fromLabel} / 高速終了IC: ${toLabel} / ${detail}`;
           }
           if (loc) detail += ` / ${loc}`;
           timeline.push({ ts: start.ts, title: def.label, detail });

@@ -42,14 +42,14 @@ export default function AdminDeviceDetail() {
     return {
       lat: bundle.profile.latest_lat,
       lng: bundle.profile.latest_lng,
-      label: bundle.profile.display_name,
+      label: bundle.profile.display_name || bundle.profile.driver_email || bundle.profile.device_id,
     };
   }, [bundle]);
 
   async function handleDeleteDevice() {
     const profile = bundle?.profile;
     if (!profile) return;
-    const displayName = profile.display_name || profile.device_id;
+    const displayName = profile.display_name || profile.driver_email || profile.device_id;
     const confirmed = window.confirm(
       `${displayName} を管理画面から消去します。\n\n` +
       'クラウド上の端末プロフィールと同期済みの運行データが削除されます。端末内のローカルデータは削除されません。\n\n' +
@@ -77,7 +77,7 @@ export default function AdminDeviceDetail() {
         <div className="screen-card__header">
           <div>
             <div className="screen-card__eyebrow">端末詳細</div>
-            <h1 className="screen-card__title">{bundle?.profile?.display_name ?? deviceId}</h1>
+            <h1 className="screen-card__title">{bundle?.profile?.display_name || bundle?.profile?.driver_email || deviceId}</h1>
           </div>
           <div className="screen-card__actions">
             <Link to="/admin" className="pill-link">一覧へ戻る</Link>
@@ -102,6 +102,9 @@ export default function AdminDeviceDetail() {
             </article>
             <article className="card settings-panel">
               <div className="settings-panel__title">概要</div>
+              <div className="settings-info-row"><span>表示名</span><strong>{bundle.profile.display_name || '-'}</strong></div>
+              <div className="settings-info-row"><span>メール</span><strong>{bundle.profile.driver_email || '-'}</strong></div>
+              <div className="settings-info-row"><span>電話番号</span><strong>{bundle.profile.driver_phone || '-'}</strong></div>
               <div className="settings-info-row"><span>端末ID</span><strong>{bundle.profile.device_id}</strong></div>
               <div className="settings-info-row"><span>状態</span><strong>{bundle.profile.latest_status ?? '-'}</strong></div>
               <div className="settings-info-row"><span>車番</span><strong>{bundle.profile.vehicle_label ?? '-'}</strong></div>

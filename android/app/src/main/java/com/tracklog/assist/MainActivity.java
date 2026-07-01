@@ -7,6 +7,7 @@ public class MainActivity extends BridgeActivity {
     @Override
     public void onCreate(Bundle savedInstanceState) {
         registerPlugin(AppSharePlugin.class);
+        registerPlugin(AppUpdatePlugin.class);
         registerPlugin(DeviceIdentityPlugin.class);
         registerPlugin(NativeSetupPlugin.class);
         // Avoid restoring a stale WebView session after APK updates. Restoring

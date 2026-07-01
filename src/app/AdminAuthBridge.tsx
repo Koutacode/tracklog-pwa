@@ -2,7 +2,7 @@ import { App as CapacitorApp } from '@capacitor/app';
 import { Capacitor } from '@capacitor/core';
 import { useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { handleAdminAuthCallbackUrl } from '../services/remoteAuth';
+import { handleAdminAuthCallbackUrl, handleDriverAuthCallbackUrl } from '../services/remoteAuth';
 
 export default function AdminAuthBridge() {
   const navigate = useNavigate();
@@ -14,7 +14,8 @@ export default function AdminAuthBridge() {
     const handleUrl = async (url?: string | null) => {
       if (!url || !active) return;
       try {
-        const result = await handleAdminAuthCallbackUrl(url);
+        const adminResult = await handleAdminAuthCallbackUrl(url);
+        const result = adminResult.handled ? adminResult : await handleDriverAuthCallbackUrl(url);
         if (result.handled && active) {
           navigate(result.nextPath ?? '/admin', { replace: true });
         }

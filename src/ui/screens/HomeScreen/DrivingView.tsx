@@ -7,12 +7,16 @@ type DrivingViewProps = {
   liveDrive: LiveDriveStatus;
   onVoiceCommand: () => void;
   voiceListening: boolean;
+  expresswayActive: boolean;
+  onExpresswayToggle: (action: 'start' | 'end') => void;
 };
 
 export const DrivingView: React.FC<DrivingViewProps> = ({
   liveDrive,
   onVoiceCommand,
   voiceListening,
+  expresswayActive,
+  onExpresswayToggle,
 }) => {
   const driveMinutes = liveDrive.driveSinceResetMinutes;
   const limit = 240; // 4 hours
@@ -50,7 +54,15 @@ export const DrivingView: React.FC<DrivingViewProps> = ({
         </div>
       </div>
 
-      <div style={{ display: 'grid', gap: 16 }}>
+      <div className="driving-command-stack">
+        <BigButton
+          label={expresswayActive ? '高速道路終了' : '高速道路開始'}
+          variant="neutral"
+          className={`big-button--expressway-hero ${
+            expresswayActive ? 'big-button--expressway-end' : 'big-button--expressway-start'
+          }`}
+          onClick={() => onExpresswayToggle(expresswayActive ? 'end' : 'start')}
+        />
         <button
           onClick={onVoiceCommand}
           disabled={voiceListening}
@@ -59,9 +71,6 @@ export const DrivingView: React.FC<DrivingViewProps> = ({
         >
           {voiceListening ? '聞き取り中…' : '🎙 音声で操作'}
         </button>
-        <p style={{ textAlign: 'center', fontSize: 13, color: 'rgba(255,255,255,0.6)' }}>
-          「積込開始」「休憩開始」「地点マーク」などが使えます
-        </p>
       </div>
     </div>
   );

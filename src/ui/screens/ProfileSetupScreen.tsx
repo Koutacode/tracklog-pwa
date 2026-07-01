@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { getDriverIdentity, setDriverProfileLocal } from '../../services/remoteAuth';
+import { getDriverIdentity, sendDriverMagicLink, setDriverProfileLocal } from '../../services/remoteAuth';
 import { runRemoteSync } from '../../services/remoteSync';
 
 export default function ProfileSetupScreen() {
@@ -8,8 +8,11 @@ export default function ProfileSetupScreen() {
   const [searchParams] = useSearchParams();
   const [displayName, setDisplayName] = useState('');
   const [vehicleLabel, setVehicleLabel] = useState('');
+  const [phone, setPhone] = useState('');
+  const [email, setEmail] = useState('');
   const [deviceId, setDeviceId] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [sendingMagic, setSendingMagic] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
 
   useEffect(() => {
@@ -26,11 +29,21 @@ export default function ProfileSetupScreen() {
         setDisplayName(identity.displayName);
       }
       setVehicleLabel(identity.vehicleLabel);
+      if (identity.phone) {
+        setPhone(identity.phone);
+      }
+      if (identity.email) {
+        setEmail(identity.email);
+      }
     })();
     return () => {
       active = false;
     };
   }, [navigate, searchParams]);
+
+  const disabledSave = !displayName.trim() || !vehicleLabel.trim() || !phone.trim() || !email.trim();
+  const canSave = !disabledSave && !saving;
+  const canSend = !!email.trim() && !sendingMagic;
 
   return (
     <div className="screen-shell">
@@ -38,36 +51,67 @@ export default function ProfileSetupScreen() {
         <div className="screen-card__header">
           <div>
             <div className="screen-card__eyebrow">初回セットアップ</div>
-            <h1 className="screen-card__title">端末プロフィールを設定</h1>
+            <h1 className="screen-card__title">ドライバー情報を登録</h1>
           </div>
         </div>
 
         <section className="settings-grid">
           <article className="card settings-panel settings-panel--full">
-            <div className="settings-panel__title">この端末の識別情報</div>
+            <div className="settings-panel__title">運行端末の識別情報を設定</div>
             <div className="settings-note">
-              管理画面で端末を見分けやすくするため、最初に表示名と車番を設定します。同じ端末では、この名前を引き継いで同期します。
+              名前・車番・電話番号・メールアドレスを登録すると、端末名で履歴を特定できるようになり
+              別端末でもアカウント単位で同期しやすくなります。
             </div>
             <label className="settings-field">
-              <span>表示名</span>
-              <input value={displayName} onChange={e => setDisplayName(e.target.value)} placeholder="例: 札幌便 1号車" />
+              <span>表示名（ドライバー名）</span>
+              <input value={displayName} onChange={e => setDisplayName(e.target.value)} placeholder="例: 田中 太郎" />
             </label>
             <label className="settings-field">
               <span>車番・識別名</span>
               <input value={vehicleLabel} onChange={e => setVehicleLabel(e.target.value)} placeholder="例: 札幌 100 あ 1234" />
             </label>
+            <label className="settings-field">
+              <span>電話番号</span>
+              <input value={phone} onChange={e => setPhone(e.target.value)} placeholder="例: 090-1234-5678" />
+            </label>
+            <label className="settings-field">
+              <span>メールアドレス</span>
+              <input value={email} onChange={e => setEmail(e.target.value)} placeholder="例: sample@example.com" type="email" />
+            </label>
             <div className="settings-info-row">
               <span>端末ID</span>
               <strong>{deviceId ?? '初期化中'}</strong>
             </div>
+            <div className="settings-info-row">
+              <span>補足</span>
+              <strong>先に保存後、必要に応じて「認証メールを送信」を押してください</strong>
+            </div>
+            <button
+              className="trip-btn"
+              disabled={!canSend}
+              onClick={async () => {
+                setMessage(null);
+                setSendingMagic(true);
+                try {
+                  await sendDriverMagicLink(email);
+                  setMessage('認証リンクを送信しました。メールから開いてサインインしてください。');
+                } catch (error: any) {
+                  setMessage(error?.message ?? '認証リンク送信に失敗しました');
+                } finally {
+                  setSendingMagic(false);
+                }
+              }}
+            >
+              {sendingMagic ? '送信中…' : '認証メールを送信'}
+            </button>
             <button
               className="trip-btn trip-btn--primary"
-              disabled={saving || !displayName.trim() || !vehicleLabel.trim()}
+              disabled={!canSave}
               onClick={async () => {
                 setSaving(true);
                 setMessage(null);
                 try {
-                  await setDriverProfileLocal({ displayName, vehicleLabel });
+                  await setDriverProfileLocal({ displayName, vehicleLabel, phone, email });
                   await runRemoteSync('profile-setup');
                   navigate(searchParams.get('next') || '/', { replace: true });
                 } catch (error: any) {

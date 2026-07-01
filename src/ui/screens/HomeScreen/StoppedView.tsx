@@ -7,7 +7,6 @@ type StoppedViewProps = {
   unloadActive: boolean;
   breakActive: boolean;
   restActive: boolean;
-  expresswayActive: boolean;
   ferryActive: boolean;
   canStartLoad: boolean;
   canStartUnload: boolean;
@@ -26,7 +25,6 @@ export const StoppedView: React.FC<StoppedViewProps> = ({
   unloadActive,
   breakActive,
   restActive,
-  expresswayActive,
   ferryActive,
   canStartLoad,
   canStartUnload,
@@ -81,12 +79,6 @@ export const StoppedView: React.FC<StoppedViewProps> = ({
         <div className="home-section-label">補助操作</div>
         <div className="home-action-grid">
           <BigButton label="給油（数量）" size="compact" variant="neutral" onClick={onRefuel} />
-          
-          {expresswayActive ? (
-            <BigButton label="高速道路終了" variant="neutral" size="compact" onClick={() => onToggle('expressway', 'end')} />
-          ) : (
-            <BigButton label="高速道路開始" size="compact" variant="neutral" onClick={() => onToggle('expressway', 'start')} />
-          )}
 
           {ferryActive ? (
             <BigButton label="フェリー下船" size="compact" variant="neutral" onClick={() => onFerry('disembark')} />

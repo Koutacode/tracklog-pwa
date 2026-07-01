@@ -505,9 +505,18 @@ export default function RouteMapScreen() {
 
     mapInstanceRef.current = map;
     layerGroupRef.current = L.layerGroup().addTo(map);
+    map.whenReady(() => {
+      map.invalidateSize();
+    });
+
+    const onResize = () => {
+      map.invalidateSize();
+    };
+    window.addEventListener('resize', onResize);
 
     return () => {
       fitBoundsRef.current = null;
+      window.removeEventListener('resize', onResize);
       if (mapInstanceRef.current) {
         mapInstanceRef.current.remove();
         mapInstanceRef.current = null;
@@ -567,53 +576,62 @@ export default function RouteMapScreen() {
     const layerGroup = layerGroupRef.current;
     if (!map || !layerGroup) return;
 
-    layerGroup.clearLayers();
-    const bounds = L.latLngBounds([]);
+    const redraw = () => {
+      layerGroup.clearLayers();
+      const bounds = L.latLngBounds([]);
 
-    for (const seg of visibleSegments) {
-      if (seg.renderPath.length < 2) continue;
-      const path = seg.renderPath.map(pt => L.latLng(pt.lat, pt.lng));
-      L.polyline(path, {
-        color: seg.color,
-        weight: 4,
-        opacity: 0.9,
-      }).addTo(layerGroup);
-      for (const p of path) bounds.extend(p);
-    }
+      for (const seg of visibleSegments) {
+        if (seg.renderPath.length < 2) continue;
+        const path = seg.renderPath.map(pt => L.latLng(pt.lat, pt.lng));
+        L.polyline(path, {
+          color: seg.color,
+          weight: 4,
+          opacity: 0.9,
+        }).addTo(layerGroup);
+        for (const p of path) bounds.extend(p);
+      }
 
-    if (visiblePoints.length > 0) {
-      const start = visiblePoints[0];
-      const end = visiblePoints[visiblePoints.length - 1];
-      const startPoint = L.latLng(start.lat, start.lng);
-      const endPoint = L.latLng(end.lat, end.lng);
-      L.circleMarker(startPoint, {
-        radius: 7,
-        color: '#16a34a',
-        weight: 2,
-        fillColor: '#16a34a',
-        fillOpacity: 0.9,
-      })
-        .addTo(layerGroup)
-        .bindTooltip('S', { permanent: true, direction: 'top' });
-      L.circleMarker(endPoint, {
-        radius: 7,
-        color: '#dc2626',
-        weight: 2,
-        fillColor: '#dc2626',
-        fillOpacity: 0.9,
-      })
-        .addTo(layerGroup)
-        .bindTooltip('E', { permanent: true, direction: 'top' });
-      bounds.extend(startPoint);
-      bounds.extend(endPoint);
-    }
+      if (visiblePoints.length > 0) {
+        const start = visiblePoints[0];
+        const end = visiblePoints[visiblePoints.length - 1];
+        const startPoint = L.latLng(start.lat, start.lng);
+        const endPoint = L.latLng(end.lat, end.lng);
+        L.circleMarker(startPoint, {
+          radius: 7,
+          color: '#16a34a',
+          weight: 2,
+          fillColor: '#16a34a',
+          fillOpacity: 0.9,
+        })
+          .addTo(layerGroup)
+          .bindTooltip('S', { permanent: true, direction: 'top' });
+        L.circleMarker(endPoint, {
+          radius: 7,
+          color: '#dc2626',
+          weight: 2,
+          fillColor: '#dc2626',
+          fillOpacity: 0.9,
+        })
+          .addTo(layerGroup)
+          .bindTooltip('E', { permanent: true, direction: 'top' });
+        bounds.extend(startPoint);
+        bounds.extend(endPoint);
+      }
 
-    if (bounds.isValid()) {
-      map.fitBounds(bounds, { padding: [40, 40] });
-      fitBoundsRef.current = () => map.fitBounds(bounds, { padding: [40, 40] });
+      if (bounds.isValid()) {
+        map.fitBounds(bounds, { padding: [40, 40] });
+        fitBoundsRef.current = () => map.fitBounds(bounds, { padding: [40, 40] });
+      } else {
+        fitBoundsRef.current = null;
+      }
+    };
+
+    if ((map as any)._loaded) {
+      redraw();
     } else {
-      fitBoundsRef.current = null;
+      map.whenReady(redraw);
     }
+    map.invalidateSize();
   }, [visibleSegments, visiblePoints]);
 
   return (

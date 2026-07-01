@@ -3,6 +3,8 @@ export type DriverIdentity = {
   deviceId: string | null;
   displayName: string;
   vehicleLabel: string;
+  email: string | null;
+  phone: string;
   authInitialized: boolean;
   profileComplete: boolean;
 };
@@ -41,6 +43,8 @@ export type RemoteDeviceProfile = {
   device_id: string;
   display_name: string;
   vehicle_label: string | null;
+  driver_phone: string | null;
+  driver_email: string | null;
   platform: string;
   app_version: string | null;
   latest_status: string | null;
