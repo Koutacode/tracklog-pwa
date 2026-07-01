@@ -14,7 +14,7 @@ const META_DRIVER_EMAIL = 'driver_email';
 const META_REMOTE_LAST_SYNC_AT = 'remote_last_sync_at';
 const META_REMOTE_AUTH_INITIALIZED = 'remote_auth_initialized';
 const NATIVE_ADMIN_REDIRECT = 'com.tracklog.assist://auth?next=%2Fadmin';
-const NATIVE_DRIVER_REDIRECT = 'com.tracklog.assist://auth?next=%2Fsetup';
+const NATIVE_DRIVER_REDIRECT = 'com.tracklog.assist://auth?next=%2Fsettings';
 
 type DriverProfileSeed = {
   displayName: string;
@@ -387,7 +387,7 @@ export function getAdminRedirectUrl(override?: string) {
 export function getDriverRedirectUrl(override?: string) {
   if (override?.trim()) return override.trim();
   if (Capacitor.isNativePlatform()) return NATIVE_DRIVER_REDIRECT;
-  return `${window.location.origin}/setup`;
+  return `${window.location.origin}/settings`;
 }
 
 export async function getAdminSession(): Promise<AdminSession> {
@@ -502,8 +502,8 @@ function parseAuthCallbackUrl(url: string) {
   const refreshToken = hash.get('refresh_token') ?? query.get('refresh_token');
   const errorCode = hash.get('error_code') ?? query.get('error_code');
   const errorDescription = hash.get('error_description') ?? query.get('error_description');
-  const nextRaw = query.get('next') || '/setup';
-  let nextPath = '/setup';
+  const nextRaw = query.get('next') || '/settings';
+  let nextPath = '/settings';
   try {
     nextPath = decodeURIComponent(nextRaw);
   } catch {

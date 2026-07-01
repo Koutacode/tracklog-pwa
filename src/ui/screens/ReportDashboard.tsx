@@ -1,9 +1,8 @@
 import { useState, useEffect, useMemo } from 'react';
 import { Link, useLocation, useSearchParams } from 'react-router-dom';
-import type { Trip, DayRecord, DayMetrics, JobInfo, TimeSegmentDetail, TripEvent } from '../../domain/reportTypes';
+import type { Trip, DayRecord, DayMetrics, TimeSegmentDetail, TripEvent } from '../../domain/reportTypes';
 import {
   buildReportTripFromAppEvents,
-  parseJsonToTrip,
   computeTripDayMetrics,
   computeMonthSummary,
   formatMinutes,
@@ -15,7 +14,7 @@ import {
   listReportTrips,
   deleteReportTrip,
 } from '../../db/reportRepository';
-import { getEventsByTripId, restoreSnapshotJson, uuid } from '../../db/repositories';
+import { getEventsByTripId } from '../../db/repositories';
 import { buildTripViewModel } from '../../state/selectors';
 
 // --- Status colors ---
@@ -31,16 +30,15 @@ const STATUS_COLORS: Record<string, string> = {
 };
 
 // --- Main tabs ---
-type MainTab = 'list' | 'new' | 'report' | 'monthly';
+type MainTab = 'list' | 'report' | 'monthly';
 const MAIN_TABS: { key: MainTab; label: string; icon: string }[] = [
   { key: 'list', label: '運行一覧', icon: '\u{1F3E0}' },
-  { key: 'new', label: '新規登録', icon: '\u{2795}' },
   { key: 'report', label: '日報', icon: '\u{1F4CA}' },
   { key: 'monthly', label: '月次集計', icon: '\u{1F4C8}' },
 ];
 
 // --- Report sub-tabs ---
-type ReportSubTab = 'daily' | 'jobs' | 'timeline';
+type ReportSubTab = 'daily' | 'timeline';
 
 type ReportLocationState = {
   initialReportTrip?: Trip;
@@ -170,13 +168,6 @@ export default function ReportDashboard() {
         {mainTab === 'list' && (
           <TripListTab trips={trips} onOpen={openTrip} onReload={loadTrips} />
         )}
-        {mainTab === 'new' && (
-          <NewTripTab onSaved={(trip) => {
-            void loadTrips().then(() => {
-              openTrip(trip.id);
-            });
-          }} />
-        )}
         {mainTab === 'report' && (
           <ReportTab
             trip={selectedTrip}
@@ -217,7 +208,7 @@ function TripListTab({ trips, onOpen, onReload }: {
       <div className="report-card" style={{ textAlign: 'center', padding: 32 }}>
         <div style={{ fontSize: 48, marginBottom: 12 }}>{'\u{1F69A}'}</div>
         <div style={{ fontWeight: 800, fontSize: 18, marginBottom: 8 }}>まだ運行がありません</div>
-        <div style={{ color: 'var(--muted)', fontSize: 14 }}>「新規登録」タブからJSONを登録してください</div>
+        <div style={{ color: 'var(--muted)', fontSize: 14 }}>ホームで運行を開始し、運行詳細から日報を作成してください</div>
       </div>
     );
   }
@@ -234,7 +225,6 @@ function TripListTab({ trips, onOpen, onReload }: {
           </div>
           <div className="report-trip-card__meta">
             <span>{trip.days.length}日間</span>
-            <span>{trip.jobs.length}案件</span>
             <span>#{trip.id.slice(0, 8)}</span>
           </div>
           <div className="report-trip-card__summary">
@@ -251,112 +241,6 @@ function TripListTab({ trips, onOpen, onReload }: {
           </div>
         </div>
       ))}
-    </div>
-  );
-}
-
-// =============================================
-// Tab: New Trip Registration
-// =============================================
-function NewTripTab({ onSaved }: { onSaved: (trip: Trip) => void }) {
-  const [jsonText, setJsonText] = useState('');
-  const [label, setLabel] = useState('');
-  const [parseError, setParseError] = useState<string | null>(null);
-  const [restoreMessage, setRestoreMessage] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
-
-  async function handleSubmit() {
-    setParseError(null);
-    setRestoreMessage(null);
-    if (!jsonText.trim()) {
-      setParseError('JSONを入力してください');
-      return;
-    }
-    try {
-      const tripId = uuid();
-      const trip = parseJsonToTrip(jsonText.trim(), tripId);
-      if (label.trim()) trip.label = label.trim();
-      setSaving(true);
-      await saveReportTrip(trip);
-      setSaving(false);
-      setJsonText('');
-      setLabel('');
-      onSaved(trip);
-    } catch (e: any) {
-      setSaving(false);
-      setParseError(e?.message ?? 'JSONのパースに失敗しました');
-    }
-  }
-
-  async function handleRestore() {
-    setParseError(null);
-    setRestoreMessage(null);
-    if (!jsonText.trim()) {
-      setParseError('JSONを入力してください');
-      return;
-    }
-    if (!window.confirm('この JSON から現行運行を復元します。未終了の運行があればアクティブ状態として戻します。続けますか？')) {
-      return;
-    }
-    try {
-      setSaving(true);
-      const result = await restoreSnapshotJson(jsonText.trim());
-      setSaving(false);
-      setRestoreMessage(
-        result.activeTripId
-          ? `復元しました。${result.importedEvents}件のイベントを戻し、未終了の運行をアクティブにしました。ホームで確認してください。`
-          : `復元しました。${result.importedEvents}件のイベントを戻しました。`
-      );
-    } catch (e: any) {
-      setSaving(false);
-      setParseError(e?.message ?? 'JSON からの復元に失敗しました');
-    }
-  }
-
-  return (
-    <div className="report-card" style={{ padding: 20 }}>
-      <div className="report-section-title">運行JSONを貼り付け</div>
-      <div style={{ marginBottom: 12 }}>
-        <label className="report-label">ラベル（任意）</label>
-        <input
-          type="text"
-          className="report-input"
-          placeholder="例：東京→大阪 配送"
-          value={label}
-          onChange={e => setLabel(e.target.value)}
-        />
-      </div>
-      <div style={{ marginBottom: 12 }}>
-        <label className="report-label">JSON</label>
-        <textarea
-          className="report-textarea"
-          rows={12}
-          placeholder={'{\n  "events": [...],\n  "dayRuns": [...],\n  "jobs": [...]\n}'}
-          value={jsonText}
-          onChange={e => setJsonText(e.target.value)}
-        />
-      </div>
-      {parseError && <div className="report-alert report-alert--danger">{parseError}</div>}
-      {restoreMessage && <div className="report-alert report-alert--success">{restoreMessage}</div>}
-      <button
-        className="report-btn report-btn--primary"
-        onClick={() => void handleSubmit()}
-        disabled={saving}
-        style={{ width: '100%', marginTop: 8 }}
-      >
-        {saving ? '保存中...' : '登録する'}
-      </button>
-      <button
-        className="report-btn"
-        onClick={() => void handleRestore()}
-        disabled={saving}
-        style={{ width: '100%', marginTop: 10 }}
-      >
-        {saving ? '復元中...' : '現行運行へ復元する'}
-      </button>
-      <div className="report-section-caption" style={{ marginTop: 10 }}>
-        `登録する` は `events` / `dayRuns` / `operation_log` に対応します。`運行履歴データ:` 付きの共有テキストもそのまま貼り付け可能です。`現行運行へ復元する` は `events` 付きスナップショットか `operation_log` を受け付けます。
-      </div>
     </div>
   );
 }
@@ -428,7 +312,6 @@ function ReportTab({ trip, trips, requestedTripId, onSelectTrip, onRefreshLiveTr
 
   const subTabs: { key: ReportSubTab; label: string; icon: string }[] = [
     { key: 'daily', label: '日報', icon: '\u{1F4CA}' },
-    { key: 'jobs', label: '案件', icon: '\u{1F4CB}' },
     { key: 'timeline', label: 'TL', icon: '\u{1F552}' },
   ];
 
@@ -439,7 +322,6 @@ function ReportTab({ trip, trips, requestedTripId, onSelectTrip, onRefreshLiveTr
         <div className="report-trip-summary__title">{trip.label || day.dateKey}</div>
         <div className="report-trip-summary__meta">
           <span>{trip.days.length}日構成</span>
-          <span>{trip.jobs.length}案件</span>
           <span>#{trip.id.slice(0, 8)}</span>
         </div>
         <div style={{ display: 'flex', gap: 10, marginTop: 14, flexWrap: 'wrap' }}>
@@ -507,7 +389,6 @@ function ReportTab({ trip, trips, requestedTripId, onSelectTrip, onRefreshLiveTr
       </div>
 
       {subTab === 'daily' && <DailyView day={day} metrics={metrics} />}
-      {subTab === 'jobs' && <JobsView jobs={trip.jobs} />}
       {subTab === 'timeline' && <TimelineView day={day} />}
     </div>
   );
@@ -549,8 +430,6 @@ function DailyView({ day, metrics }: { day: DayRecord; metrics: DayMetrics }) {
         <RollingDriveCard metrics={metrics} />
       </div>
 
-      <ComplianceCard metrics={metrics} />
-
       {/* Activity breakdown */}
       <div className="report-card" style={{ padding: 16 }}>
         <div className="report-section-title">項目別集計</div>
@@ -583,7 +462,7 @@ function DailyView({ day, metrics }: { day: DayRecord; metrics: DayMetrics }) {
         <div className="report-card" style={{ padding: 16 }}>
           <div className="report-section-title">フェリー区間</div>
           <div className="report-section-caption" style={{ marginBottom: 12 }}>
-            乗船から下船までをフェリー区間として扱い、日報では休息と分けて表示します。法令判定ではフェリー特例候補に回しています。
+            乗船から下船までをフェリー区間として扱い、日報では休息と分けて表示します。
           </div>
           {metrics.ferrySegments.map((segment, index) => (
             <FerrySegmentCard key={`ferry-${index}`} segment={segment} />
@@ -792,30 +671,6 @@ function RollingDriveCard({ metrics }: { metrics: DayMetrics }) {
   );
 }
 
-function ComplianceCard({ metrics }: { metrics: DayMetrics }) {
-  return (
-    <div className="report-card" style={{ padding: 16 }}>
-      <div className="report-section-title">法令チェック</div>
-      <div className="report-section-caption" style={{ marginBottom: 12 }}>
-        適用ルールは自動判定です。長距離特例は `450km以上区間`、フェリー特例は `乗船→下船` の検出を基準にしています。
-      </div>
-      <div className="report-load-item" style={{ borderLeftColor: '#38bdf8' }}>
-        <div className="report-load-item__header">
-          <span style={{ color: '#38bdf8' }}>{metrics.ruleModeLabel}</span>
-          <span className="mono">48h {formatMinutesShort(metrics.rollingTwoDayDriveMinutes)} / 18:00</span>
-        </div>
-        <div className="report-load-item__meta">
-          <span>2週平均 {formatMinutesShort(metrics.rollingTwoWeekWeeklyAverageMinutes)} / 44:00</span>
-          <span>連続運転 {formatMinutesShort(metrics.longestContinuousDriveMinutes)}</span>
-          <span>休息判定 {formatMinutesShort(metrics.restEquivalentMinutes)} / 最低 {formatMinutesShort(metrics.effectiveRestMinimumMinutes)}</span>
-          {metrics.ferryMinutes > 0 && <span>フェリー {formatMinutes(metrics.ferryMinutes)}</span>}
-        </div>
-        <div className="report-load-item__address">{metrics.ruleModeReason}</div>
-      </div>
-    </div>
-  );
-}
-
 // --- Breakdown row ---
 function BreakdownRow({ label, minutes, color }: { label: string; minutes: number; color: string }) {
   return (
@@ -945,42 +800,6 @@ function NextDayCard({ day }: { day: DayRecord }) {
           </div>
         ))}
       </div>
-    </div>
-  );
-}
-
-// =============================================
-// Sub-view: Jobs
-// =============================================
-function JobsView({ jobs }: { jobs: JobInfo[] }) {
-  if (jobs.length === 0) {
-    return (
-      <div className="report-card" style={{ padding: 24, textAlign: 'center' }}>
-        <div style={{ color: 'var(--muted)' }}>案件情報がありません</div>
-      </div>
-    );
-  }
-
-  return (
-    <div className="report-list">
-      {jobs.map(job => (
-        <div key={job.id} className="report-card report-job-card">
-          <div className="report-job-card__header">
-            <span className="report-job-card__customer">{job.customer || '顧客未設定'}</span>
-            <span className={`report-job-card__status ${job.completed ? 'report-job-card__status--done' : ''}`}>
-              {job.completed ? '完了' : '未完了'}
-            </span>
-          </div>
-          <div className="report-job-card__details">
-            {job.volume > 0 && <span>{job.volume} M3</span>}
-            {job.loadAt && <span>積: {job.loadAt}</span>}
-            {job.loadTime && <span>{job.loadTime}</span>}
-            {job.dropAt && <span>卸: {job.dropAt}</span>}
-            {job.dropDate && <span>{job.dropDate}</span>}
-            {job.isBranchDrop && <span className="report-badge">支店卸</span>}
-          </div>
-        </div>
-      ))}
     </div>
   );
 }

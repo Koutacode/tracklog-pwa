@@ -1,5 +1,5 @@
 import { Suspense, lazy, useEffect } from 'react';
-import { BrowserRouter, Routes, Route, useLocation } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import AdminAuthBridge from './AdminAuthBridge';
 import IcResolverJob from './IcResolverJob';
 import LocalRecoveryBootstrap from './LocalRecoveryBootstrap';
@@ -18,7 +18,6 @@ const HistoryScreen = lazy(() => import('../ui/screens/HistoryScreen'));
 const RouteMapScreen = lazy(() => import('../ui/screens/RouteMapScreen'));
 const ReportDashboard = lazy(() => import('../ui/screens/ReportDashboard'));
 const SettingsScreen = lazy(() => import('../ui/screens/SettingsScreen'));
-const ProfileSetupScreen = lazy(() => import('../ui/screens/ProfileSetupScreen'));
 const LoginScreen = lazy(() => import('../ui/screens/LoginScreen'));
 const AdminDashboard = lazy(() => import('../ui/screens/AdminDashboard'));
 const AdminDeviceDetail = lazy(() => import('../ui/screens/AdminDeviceDetail'));
@@ -56,7 +55,7 @@ function AppShell() {
       )}
       <Suspense fallback={<div style={{ padding: 24, color: '#fff' }}>読み込み中…</div>}>
         <Routes>
-          <Route path="/setup" element={<ProfileSetupScreen />} />
+          <Route path="/setup" element={<Navigate to="/" replace />} />
           <Route path="/" element={<RequireDriverProfile><HomeScreen /></RequireDriverProfile>} />
           <Route path="/settings" element={<RequireDriverProfile><SettingsScreen /></RequireDriverProfile>} />
           <Route path="/trip/:tripId" element={<RequireDriverProfile><TripDetail /></RequireDriverProfile>} />
