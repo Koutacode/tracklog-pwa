@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { deleteTrip, listTrips, TripSummary } from '../../db/repositories';
+import { listTrips, TripSummary } from '../../db/repositories';
+import { deleteTripEverywhere } from '../../services/tripDeletion';
 
 function fmtLocal(ts?: string) {
   if (!ts) return '-';
@@ -53,7 +54,7 @@ export default function HistoryScreen() {
     const ok = window.confirm('この運行を削除します。よろしいですか？');
     if (!ok) return;
     try {
-      await deleteTrip(tripId);
+      await deleteTripEverywhere(tripId);
       await load();
     } catch (e: any) {
       setErr(e?.message ?? '削除に失敗しました');

@@ -3,7 +3,6 @@ import { Capacitor } from '@capacitor/core';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import {
   deleteEvent,
-  deleteTrip,
   getEventsByTripId,
   refreshExpresswayIcFromGeo,
   refreshEventAddressFromGeo,
@@ -24,6 +23,7 @@ import {
 import { buildTripViewModel, TripViewModel } from '../../state/selectors';
 import { DAY_MS, getJstDateInfo } from '../../domain/jst';
 import { shareText } from '../../services/nativeShare';
+import { deleteTripEverywhere } from '../../services/tripDeletion';
 
 function fmtLocal(ts?: string) {
   if (!ts) return '-';
@@ -820,7 +820,7 @@ export default function TripDetail() {
                 if (!ok) return;
                 setDeleting(true);
                 try {
-                  await deleteTrip(tripId);
+                  await deleteTripEverywhere(tripId);
                   navigate('/history');
                 } catch (e: any) {
                   setErr(e?.message ?? '削除に失敗しました');

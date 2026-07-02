@@ -1512,12 +1512,17 @@ export type TripSummary = {
 export async function listTrips(): Promise<TripSummary[]> {
   const starts = (await db.events.where('type').equals('trip_start').toArray()) as TripStartEvent[];
   const ends = (await db.events.where('type').equals('trip_end').toArray()) as TripEndEvent[];
+  const startByTrip = new Map<string, TripStartEvent>();
+  for (const s of starts) {
+    const prev = startByTrip.get(s.tripId);
+    if (!prev || s.ts < prev.ts) startByTrip.set(s.tripId, s);
+  }
   const endByTrip = new Map<string, TripEndEvent>();
   for (const e of ends) {
     const prev = endByTrip.get(e.tripId);
     if (!prev || e.ts > prev.ts) endByTrip.set(e.tripId, e);
   }
-  const summaries: TripSummary[] = starts.map(s => {
+  const summaries: TripSummary[] = Array.from(startByTrip.values()).map(s => {
     const end = endByTrip.get(s.tripId);
     return {
       tripId: s.tripId,
@@ -1570,9 +1575,10 @@ export async function backfillMissingAddresses(limit = 30, batches = 2): Promise
 }
 
 export async function deleteTrip(tripId: string): Promise<void> {
-  await db.transaction('rw', db.events, db.meta, db.routePoints, async () => {
+  await db.transaction('rw', db.events, db.meta, db.routePoints, db.reportTrips, async () => {
     await db.events.where('tripId').equals(tripId).delete();
     await db.routePoints.where('tripId').equals(tripId).delete();
+    await db.reportTrips.delete(tripId);
     await clearPendingExpresswayEndPrompt(tripId);
     await clearPendingExpresswayEndDecision(tripId);
     const active = await db.meta.get(META_ACTIVE_TRIP_ID);

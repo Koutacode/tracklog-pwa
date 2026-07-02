@@ -104,3 +104,10 @@ export type RemoteReportSnapshot = {
   payload_json: unknown;
   updated_at: string;
 };
+
+export type RemoteDeletedTripTombstone = {
+  trip_id: string;
+  device_id: string;
+  deleted_by: string;
+  deleted_at: string;
+};
