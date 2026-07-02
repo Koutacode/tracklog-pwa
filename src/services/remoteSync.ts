@@ -47,6 +47,7 @@ let state: RemoteSyncState = {
   vehicleLabel: '',
   authInitialized: false,
   profileComplete: false,
+  approvalStatus: 'unregistered',
 };
 
 let inFlight: Promise<RemoteSyncState> | null = null;
@@ -609,6 +610,7 @@ export async function hydrateRemoteSyncState(): Promise<RemoteSyncState> {
     vehicleLabel: identity.vehicleLabel,
     authInitialized: identity.authInitialized,
     profileComplete: identity.profileComplete,
+    approvalStatus: identity.approvalStatus,
   });
   return state;
 }
@@ -640,9 +642,23 @@ export async function runRemoteSync(reason = 'manual'): Promise<RemoteSyncState>
           syncing: false,
           authInitialized: false,
           profileComplete: identity.profileComplete,
+          approvalStatus: identity.approvalStatus,
           deviceId: identity.deviceId,
           displayName: identity.displayName,
           vehicleLabel: identity.vehicleLabel,
+        });
+        return state;
+      }
+      if (!identity.profileComplete || identity.approvalStatus !== 'approved') {
+        emit({
+          syncing: false,
+          lastError: null,
+          deviceId: identity.deviceId,
+          displayName: identity.displayName,
+          vehicleLabel: identity.vehicleLabel,
+          authInitialized: identity.authInitialized,
+          profileComplete: identity.profileComplete,
+          approvalStatus: identity.approvalStatus,
         });
         return state;
       }
@@ -652,6 +668,7 @@ export async function runRemoteSync(reason = 'manual'): Promise<RemoteSyncState>
         vehicleLabel: identity.vehicleLabel,
         authInitialized: identity.authInitialized,
         profileComplete: identity.profileComplete,
+        approvalStatus: identity.approvalStatus,
       });
 
       const cloudDetailRetentionCutoff = await maybeRunCloudMaintenance();

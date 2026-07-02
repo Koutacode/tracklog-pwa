@@ -25,6 +25,8 @@ export type DeleteAdminDeviceResult = {
   mode: 'deleted' | 'hidden';
 };
 
+export type ApprovalDecision = 'approved' | 'rejected';
+
 const ADMIN_HIDDEN_PLATFORM = 'admin_hidden';
 const ADMIN_HIDDEN_STATUS = '管理画面で非表示';
 
@@ -52,6 +54,21 @@ export async function listAdminDevices(): Promise<RemoteDeviceProfile[]> {
     .order('last_seen_at', { ascending: false });
   if (error) throw error;
   return ((data ?? []) as RemoteDeviceProfile[]).filter(profile => !isHiddenDeviceProfile(profile));
+}
+
+export async function setAdminDeviceApproval(
+  deviceId: string,
+  decision: ApprovalDecision,
+): Promise<RemoteDeviceProfile> {
+  const client = assertAdminConfigured();
+  const { data, error } = await client.rpc('set_tracklog_device_approval', {
+    _device_id: deviceId,
+    _approval_status: decision,
+  });
+  if (error) throw error;
+  const profile = Array.isArray(data) ? data[0] : data;
+  if (!profile) throw new Error('承認状態の更新結果を取得できませんでした');
+  return profile as RemoteDeviceProfile;
 }
 
 export async function deleteAdminDevice(deviceId: string): Promise<DeleteAdminDeviceResult> {

@@ -190,6 +190,30 @@ a:hover {
   background: rgba(22, 101, 52, 0.18);
 }
 
+.approval-wait-card {
+  display: grid;
+  gap: 6px;
+  margin-top: 16px;
+  padding: 14px 16px;
+  border-radius: 14px;
+  background: rgba(15, 23, 42, 0.78);
+  border: 1px solid rgba(250, 204, 21, 0.32);
+  color: #fef9c3;
+}
+
+.approval-wait-card span {
+  color: #fde68a;
+}
+
+.approval-wait-card--rejected {
+  border-color: rgba(248, 113, 113, 0.42);
+  color: #fecaca;
+}
+
+.approval-wait-card--rejected span {
+  color: #fca5a5;
+}
+
 .settings-code {
   max-height: 360px;
   overflow: auto;
@@ -345,7 +369,12 @@ a:hover {
 }
 
 .admin-action-cell {
-  width: 96px;
+  width: 210px;
+  min-width: 210px;
+}
+
+.admin-action-cell .pill-link {
+  margin: 0 6px 6px 0;
 }
 
 .admin-delete-button {
@@ -472,6 +501,97 @@ a:hover {
   border-color: rgba(248, 113, 113, 0.72);
   background: rgba(127, 29, 29, 0.42);
   color: #fff;
+}
+
+.pill-link--approve {
+  border-color: rgba(34, 197, 94, 0.36);
+  color: #bbf7d0;
+}
+
+.pill-link--approve:hover:not(:disabled) {
+  border-color: rgba(34, 197, 94, 0.72);
+  background: rgba(20, 83, 45, 0.42);
+  color: #fff;
+}
+
+.approval-admin-panel {
+  display: grid;
+  gap: 14px;
+  margin-bottom: 18px;
+  padding: 16px;
+  border-radius: 18px;
+  background: rgba(15, 23, 42, 0.56);
+  border: 1px solid rgba(148, 163, 184, 0.18);
+}
+
+.approval-admin-panel__header,
+.approval-request {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 14px;
+}
+
+.approval-admin-panel__header p {
+  margin: 4px 0 0;
+  color: var(--muted);
+}
+
+.approval-admin-panel__header > strong {
+  font-size: 28px;
+  line-height: 1;
+}
+
+.approval-request-list {
+  display: grid;
+  gap: 10px;
+}
+
+.approval-request {
+  padding: 12px;
+  border-radius: 14px;
+  background: rgba(2, 6, 23, 0.34);
+  border: 1px solid rgba(148, 163, 184, 0.14);
+}
+
+.approval-request div:first-child {
+  display: grid;
+  gap: 4px;
+}
+
+.approval-request span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.approval-request__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.approval-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid rgba(250, 204, 21, 0.32);
+  color: #fef08a;
+  background: rgba(113, 63, 18, 0.22);
+  white-space: nowrap;
+}
+
+.approval-badge--approved {
+  border-color: rgba(34, 197, 94, 0.34);
+  color: #bbf7d0;
+  background: rgba(20, 83, 45, 0.2);
+}
+
+.approval-badge--rejected {
+  border-color: rgba(248, 113, 113, 0.34);
+  color: #fecaca;
+  background: rgba(127, 29, 29, 0.22);
 }
 
 .auto-expressway-overlay {

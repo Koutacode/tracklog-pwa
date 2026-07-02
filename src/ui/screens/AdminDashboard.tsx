@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, Navigate } from 'react-router-dom';
 import type { RemoteDeviceProfile } from '../../domain/remoteTypes';
-import { deleteAdminDevice, listAdminDevices } from '../../services/remoteAdmin';
+import { deleteAdminDevice, listAdminDevices, setAdminDeviceApproval } from '../../services/remoteAdmin';
 import { getAdminSession, signOutAdmin } from '../../services/remoteAuth';
 import { shareText } from '../../services/nativeShare';
 import { PWA_URL } from '../../app/releaseInfo';
@@ -55,6 +55,20 @@ function formatProfileValue(value: string | null | undefined) {
   return value && value.trim() ? value.trim() : '-';
 }
 
+function getApprovalStatus(profile: RemoteDeviceProfile) {
+  if (profile.approval_status === 'approved' || profile.approval_status === 'rejected') {
+    return profile.approval_status;
+  }
+  return 'pending';
+}
+
+function getApprovalLabel(profile: RemoteDeviceProfile) {
+  const status = getApprovalStatus(profile);
+  if (status === 'approved') return '承認済み';
+  if (status === 'rejected') return '拒否済み';
+  return '承認待ち';
+}
+
 export default function AdminDashboard() {
   const [ready, setReady] = useState(false);
   const [authenticated, setAuthenticated] = useState(false);
@@ -62,6 +76,7 @@ export default function AdminDashboard() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [deletingDeviceId, setDeletingDeviceId] = useState<string | null>(null);
+  const [approvingDeviceId, setApprovingDeviceId] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -105,6 +120,11 @@ export default function AdminDashboard() {
         { active: 0, recent: 0, stale: 0, withLocation: 0 },
       ),
     [deviceStatus, devices],
+  );
+
+  const pendingDevices = useMemo(
+    () => devices.filter(device => getApprovalStatus(device) === 'pending'),
+    [devices],
   );
 
   const mapMarkers = useMemo(
@@ -163,6 +183,29 @@ export default function AdminDashboard() {
     }
   }
 
+  async function handleSetApproval(device: RemoteDeviceProfile, decision: 'approved' | 'rejected') {
+    const displayName = getDisplayName(device);
+    const confirmed = window.confirm(
+      decision === 'approved'
+        ? `${displayName} の利用を許可しますか？`
+        : `${displayName} の利用申請を拒否しますか？\n\n拒否すると、この端末は運行記録と同期を利用できません。`,
+    );
+    if (!confirmed) return;
+
+    setError(null);
+    setNotice(null);
+    setApprovingDeviceId(device.device_id);
+    try {
+      const updated = await setAdminDeviceApproval(device.device_id, decision);
+      setDevices(current => current.map(item => (item.device_id === updated.device_id ? updated : item)));
+      setNotice(decision === 'approved' ? `${displayName} を許可しました` : `${displayName} を拒否しました`);
+    } catch (err: any) {
+      setError(err?.message ?? '承認状態の更新に失敗しました');
+    } finally {
+      setApprovingDeviceId(null);
+    }
+  }
+
   if (!ready) {
     return <div className="screen-shell"><div className="screen-card">読み込み中…</div></div>;
   }
@@ -217,6 +260,48 @@ export default function AdminDashboard() {
         </div>
         {error && <div className="settings-toast">{error}</div>}
         {notice && <div className="settings-toast settings-toast--success">{notice}</div>}
+        <section className="approval-admin-panel">
+          <div className="approval-admin-panel__header">
+            <div>
+              <div className="settings-panel__title">承認待ち一覧</div>
+              <p>新規登録後、管理者が許可するまで運行記録と同期は使えません。</p>
+            </div>
+            <strong>{pendingDevices.length}件</strong>
+          </div>
+          {pendingDevices.length === 0 ? (
+            <div className="settings-note">現在、承認待ちの登録はありません。</div>
+          ) : (
+            <div className="approval-request-list">
+              {pendingDevices.map(device => (
+                <article className="approval-request" key={device.device_id}>
+                  <div>
+                    <strong>{getDisplayName(device)}</strong>
+                    <span>{formatProfileValue(device.driver_email)} / {formatProfileValue(device.driver_phone)}</span>
+                    <span>車番: {formatProfileValue(device.vehicle_label)} / 申請: {fmtDateTime(device.approval_requested_at ?? device.created_at ?? device.last_seen_at)}</span>
+                  </div>
+                  <div className="approval-request__actions">
+                    <button
+                      type="button"
+                      className="pill-link pill-link--approve"
+                      disabled={approvingDeviceId === device.device_id}
+                      onClick={() => void handleSetApproval(device, 'approved')}
+                    >
+                      許可
+                    </button>
+                    <button
+                      type="button"
+                      className="pill-link pill-link--danger"
+                      disabled={approvingDeviceId === device.device_id}
+                      onClick={() => void handleSetApproval(device, 'rejected')}
+                    >
+                      拒否
+                    </button>
+                  </div>
+                </article>
+              ))}
+            </div>
+          )}
+        </section>
         <section className="admin-dashboard-map">
           <div className="admin-dashboard-map__header">
             <div>
@@ -252,6 +337,7 @@ export default function AdminDashboard() {
                 <th>端末ID</th>
                 <th>メール</th>
                 <th>電話</th>
+                <th>承認</th>
                 <th>現在状態</th>
                 <th>最新位置</th>
                 <th>最終同期</th>
@@ -269,6 +355,14 @@ export default function AdminDashboard() {
                   <td>{formatProfileValue(device.driver_email)}</td>
                   <td>{formatProfileValue(device.driver_phone)}</td>
                   <td>
+                    <span className={`approval-badge approval-badge--${getApprovalStatus(device)}`}>
+                      {getApprovalLabel(device)}
+                    </span>
+                    {device.approval_decided_at && (
+                      <div className="admin-table__subtext">{fmtDateTime(device.approval_decided_at)}</div>
+                    )}
+                  </td>
+                  <td>
                     <span className={`admin-status-badge admin-status-badge--${deviceStatus.get(device.device_id)?.kind ?? 'stale'}`}>
                       {deviceStatus.get(device.device_id)?.label ?? '要確認'}
                     </span>
@@ -282,6 +376,26 @@ export default function AdminDashboard() {
                   <td>{fmtDateTime(device.last_seen_at)}</td>
                   <td>{device.latest_trip_id ? device.latest_trip_id.slice(0, 8) : '-'}</td>
                   <td className="admin-action-cell">
+                    {getApprovalStatus(device) !== 'approved' && (
+                      <button
+                        type="button"
+                        className="pill-link pill-link--approve admin-delete-button"
+                        disabled={approvingDeviceId === device.device_id}
+                        onClick={() => void handleSetApproval(device, 'approved')}
+                      >
+                        許可
+                      </button>
+                    )}
+                    {getApprovalStatus(device) !== 'rejected' && (
+                      <button
+                        type="button"
+                        className="pill-link pill-link--danger admin-delete-button"
+                        disabled={approvingDeviceId === device.device_id}
+                        onClick={() => void handleSetApproval(device, 'rejected')}
+                      >
+                        拒否
+                      </button>
+                    )}
                     <button
                       type="button"
                       className="pill-link pill-link--danger admin-delete-button"

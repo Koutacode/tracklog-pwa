@@ -2,7 +2,7 @@ import { Capacitor } from '@capacitor/core';
 import { APP_VERSION } from '../app/version';
 import { requestImmediateRemoteSync } from '../app/remoteSyncSignal';
 import { db } from '../db/db';
-import type { AdminSession, DriverIdentity } from '../domain/remoteTypes';
+import type { AdminSession, DriverApprovalStatus, DriverIdentity } from '../domain/remoteTypes';
 import { getStableDeviceKey } from './deviceIdentity';
 import { adminSupabase, driverSupabase, SUPABASE_CONFIGURED } from './supabase';
 
@@ -13,6 +13,7 @@ const META_DRIVER_PHONE = 'driver_phone';
 const META_DRIVER_EMAIL = 'driver_email';
 const META_REMOTE_LAST_SYNC_AT = 'remote_last_sync_at';
 const META_REMOTE_AUTH_INITIALIZED = 'remote_auth_initialized';
+const META_DRIVER_APPROVAL_STATUS = 'driver_approval_status';
 const NATIVE_ADMIN_REDIRECT = 'com.tracklog.assist://auth?next=%2Fadmin';
 const NATIVE_DRIVER_REDIRECT = 'com.tracklog.assist://auth?next=%2Fsettings';
 
@@ -21,6 +22,18 @@ type DriverProfileSeed = {
   vehicleLabel: string;
   driverPhone: string;
   driverEmail: string;
+  approvalStatus: DriverApprovalStatus;
+};
+
+type ClaimedDeviceProfile = {
+  device_id: string;
+  display_name: string;
+  vehicle_label: string | null;
+  driver_phone: string | null;
+  driver_email: string | null;
+  approval_status: DriverApprovalStatus | null;
+  approval_requested_at?: string | null;
+  approval_decided_at?: string | null;
 };
 
 function nowIso() {
@@ -33,6 +46,15 @@ function normalizeText(value: string | null | undefined) {
 
 function normalizeEmail(value: string | null | undefined) {
   return normalizeText(value).toLowerCase();
+}
+
+function normalizeApprovalStatus(value: string | null | undefined): DriverApprovalStatus {
+  if (value === 'pending' || value === 'approved' || value === 'rejected') return value;
+  return 'unregistered';
+}
+
+function isAppApproved(status: DriverApprovalStatus) {
+  return status === 'approved';
 }
 
 function getUserMetaText(value: unknown) {
@@ -124,22 +146,14 @@ async function claimTracklogDeviceProfile(input: {
     _last_seen_at: nowIso(),
   });
   if (error) throw error;
-  return (Array.isArray(data) ? data[0] : data) as
-    | {
-        device_id: string;
-        display_name: string;
-        vehicle_label: string | null;
-        driver_phone: string | null;
-        driver_email: string | null;
-      }
-    | null;
+  return (Array.isArray(data) ? data[0] : data) as ClaimedDeviceProfile | null;
 }
 
 async function getCurrentCloudProfile(userId: string): Promise<DriverProfileSeed | null> {
   if (!driverSupabase) return null;
   const { data, error } = await driverSupabase
     .from('device_profiles')
-    .select('display_name, vehicle_label, driver_phone, driver_email')
+    .select('display_name, vehicle_label, driver_phone, driver_email, approval_status')
     .eq('auth_user_id', userId)
     .order('last_seen_at', { ascending: false })
     .limit(1)
@@ -152,16 +166,18 @@ async function getCurrentCloudProfile(userId: string): Promise<DriverProfileSeed
     vehicleLabel: normalizeText(data.vehicle_label),
     driverPhone: normalizeText(data.driver_phone),
     driverEmail: normalizeText(data.driver_email),
+    approvalStatus: normalizeApprovalStatus(data.approval_status),
   };
 }
 
 export async function getDriverIdentity(): Promise<DriverIdentity> {
   const { stableDeviceKey } = await getStableDeviceKey();
-  const [displayName, vehicleLabel, driverPhone, localEmail] = await Promise.all([
+  const [displayName, vehicleLabel, driverPhone, localEmail, localApprovalStatus] = await Promise.all([
     getMeta(META_DEVICE_DISPLAY_NAME),
     getMeta(META_DEVICE_VEHICLE_LABEL),
     getMeta(META_DRIVER_PHONE),
     getMeta(META_DRIVER_EMAIL),
+    getMeta(META_DRIVER_APPROVAL_STATUS),
   ]);
 
   const profile = await getProfileIdentity();
@@ -176,6 +192,7 @@ export async function getDriverIdentity(): Promise<DriverIdentity> {
     phone: finalPhone,
     email,
     authInitialized: !!profile?.email,
+    approvalStatus: profile?.email ? normalizeApprovalStatus(localApprovalStatus) : 'unregistered',
     profileComplete: isDriverProfileComplete({
       displayName,
       vehicleLabel,
@@ -231,6 +248,7 @@ export async function initializeDriverIdentity(): Promise<DriverIdentity> {
         phone,
         requireContactInfo: true,
       }),
+      approvalStatus: 'unregistered',
     };
   }
 
@@ -273,6 +291,7 @@ export async function initializeDriverIdentity(): Promise<DriverIdentity> {
   const vehicleLabel = claimedProfile?.vehicle_label?.trim() || mergedVehicleLabel || '';
   const driverPhone = claimedProfile?.driver_phone?.trim() || mergedDriverPhone || '';
   const driverEmail = claimedProfile?.driver_email?.trim() || mergedDriverEmail || '';
+  const approvalStatus = normalizeApprovalStatus(claimedProfile?.approval_status ?? cloudProfile?.approvalStatus);
 
   await Promise.all([
     setMeta(META_DEVICE_ID, deviceId),
@@ -281,6 +300,7 @@ export async function initializeDriverIdentity(): Promise<DriverIdentity> {
     setMeta(META_DRIVER_PHONE, driverPhone || null),
     setMeta(META_DRIVER_EMAIL, driverEmail || null),
     setMeta(META_REMOTE_AUTH_INITIALIZED, 'true'),
+    setMeta(META_DRIVER_APPROVAL_STATUS, approvalStatus),
   ]);
 
   return {
@@ -291,6 +311,7 @@ export async function initializeDriverIdentity(): Promise<DriverIdentity> {
     phone: driverPhone,
     email: driverEmail || null,
     authInitialized: true,
+    approvalStatus,
     profileComplete: isDriverProfileComplete({
       displayName,
       vehicleLabel,
@@ -327,6 +348,7 @@ export async function setDriverProfileLocal(input: {
   const [
     confirmed,
     savedEmail,
+    savedApprovalStatus,
     sessionProfile,
     savedDisplayName,
     savedVehicleLabel,
@@ -334,6 +356,7 @@ export async function setDriverProfileLocal(input: {
   ] = await Promise.all([
     getMeta(META_REMOTE_AUTH_INITIALIZED),
     getMeta(META_DRIVER_EMAIL),
+    getMeta(META_DRIVER_APPROVAL_STATUS),
     getProfileIdentity(),
     getMeta(META_DEVICE_DISPLAY_NAME),
     getMeta(META_DEVICE_VEHICLE_LABEL),
@@ -346,6 +369,7 @@ export async function setDriverProfileLocal(input: {
 
   const profileLocked =
     confirmed === 'true' &&
+    isAppApproved(normalizeApprovalStatus(savedApprovalStatus)) &&
     isDriverProfileComplete({
       displayName: savedDisplayName,
       vehicleLabel: savedVehicleLabel,
@@ -371,13 +395,14 @@ export async function setDriverProfileLocal(input: {
 
   const identity = await getDriverIdentity();
   if (identity.configured && identity.authInitialized && identity.deviceId) {
-    await claimTracklogDeviceProfile({
+    const claimedProfile = await claimTracklogDeviceProfile({
       deviceId: identity.deviceId,
       displayName: trimmedDisplayName,
       vehicleLabel: trimmedVehicleLabel,
       driverPhone: trimmedPhone,
       driverEmail: trimmedEmail,
     });
+    await setMeta(META_DRIVER_APPROVAL_STATUS, normalizeApprovalStatus(claimedProfile?.approval_status));
   }
   requestImmediateRemoteSync('profile-save');
 }

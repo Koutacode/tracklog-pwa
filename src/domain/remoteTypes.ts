@@ -1,3 +1,5 @@
+export type DriverApprovalStatus = 'unregistered' | 'pending' | 'approved' | 'rejected';
+
 export type DriverIdentity = {
   configured: boolean;
   deviceId: string | null;
@@ -7,6 +9,7 @@ export type DriverIdentity = {
   phone: string;
   authInitialized: boolean;
   profileComplete: boolean;
+  approvalStatus: DriverApprovalStatus;
 };
 
 export type AdminSession = {
@@ -26,6 +29,7 @@ export type RemoteSyncState = {
   vehicleLabel: string;
   authInitialized: boolean;
   profileComplete: boolean;
+  approvalStatus: DriverApprovalStatus;
 };
 
 export type RemoteCloudMaintenanceResult = {
@@ -53,6 +57,11 @@ export type RemoteDeviceProfile = {
   latest_lng: number | null;
   latest_accuracy: number | null;
   last_seen_at: string;
+  created_at?: string;
+  approval_status?: DriverApprovalStatus;
+  approval_requested_at?: string | null;
+  approval_decided_at?: string | null;
+  approval_decided_by?: string | null;
   updated_at?: string;
 };
 

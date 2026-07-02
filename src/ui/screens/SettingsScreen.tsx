@@ -18,6 +18,7 @@ export default function SettingsScreen() {
   const [email, setEmail] = useState('');
   const [authInitialized, setAuthInitialized] = useState(false);
   const [profileComplete, setProfileComplete] = useState(false);
+  const [approvalStatus, setApprovalStatus] = useState<'unregistered' | 'pending' | 'approved' | 'rejected'>('unregistered');
   const [sendingMagic, setSendingMagic] = useState(false);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
@@ -25,8 +26,17 @@ export default function SettingsScreen() {
 
   const isNative = Capacitor.isNativePlatform();
   const standalone = useMemo(() => isStandaloneMode(), []);
-  const profileLocked = authInitialized && profileComplete;
+  const profileLocked = authInitialized && profileComplete && approvalStatus === 'approved';
   const authStatusLabel = authInitialized ? '認証済み' : email.trim() ? '認証待ち' : '未登録';
+  const approvalStatusLabel =
+    approvalStatus === 'approved'
+      ? '承認済み'
+      : approvalStatus === 'rejected'
+        ? '拒否済み'
+        : authInitialized
+          ? '管理者承認待ち'
+          : '未申請';
+  const syncAvailable = syncState.configured && authInitialized && profileComplete && approvalStatus === 'approved';
 
   useEffect(() => {
     let active = true;
@@ -39,6 +49,7 @@ export default function SettingsScreen() {
       setEmail(identity.email || '');
       setAuthInitialized(identity.authInitialized);
       setProfileComplete(identity.profileComplete);
+      setApprovalStatus(identity.approvalStatus);
     })();
     void hydrateRemoteSyncState();
     const unsubscribe = subscribeRemoteSyncState(next => {
@@ -138,6 +149,20 @@ export default function SettingsScreen() {
               <span>認証状態</span>
               <strong>{authStatusLabel}</strong>
             </div>
+            <div className="settings-info-row">
+              <span>利用承認</span>
+              <strong>{approvalStatusLabel}</strong>
+            </div>
+            {authInitialized && profileComplete && approvalStatus !== 'approved' && (
+              <div className={`approval-wait-card approval-wait-card--${approvalStatus}`}>
+                <strong>{approvalStatusLabel}</strong>
+                <span>
+                  {approvalStatus === 'rejected'
+                    ? '管理者により拒否されています。利用する場合は管理者へ確認してください。'
+                    : '管理者が許可するまで、運行記録とクラウド同期は利用できません。'}
+                </span>
+              </div>
+            )}
             {profileLocked && (
               <div className="settings-note">
                 登録済みプロフィールは不正利用防止のため、この端末からは変更できません。
@@ -174,6 +199,7 @@ export default function SettingsScreen() {
                   const identity = await getDriverIdentity();
                   setAuthInitialized(identity.authInitialized);
                   setProfileComplete(identity.profileComplete);
+                  setApprovalStatus(identity.approvalStatus);
                   setMessage('端末プロフィールを保存しました');
                 } catch (error: any) {
                   setMessage(error?.message ?? '保存に失敗しました');
@@ -191,7 +217,7 @@ export default function SettingsScreen() {
             <div className="settings-note">クラウド同期は常時有効です。操作や記録のたびに自動で同期します。</div>
             <div className="settings-info-row">
               <span>状態</span>
-              <strong>{syncState.configured ? (syncState.syncing ? '同期中' : '常時同期') : '未設定'}</strong>
+              <strong>{syncAvailable ? (syncState.syncing ? '同期中' : '常時同期') : syncState.configured ? '承認待ち' : '未設定'}</strong>
             </div>
             <div className="settings-info-row">
               <span>最終同期</span>
@@ -203,7 +229,7 @@ export default function SettingsScreen() {
             </div>
             <button
               className="trip-btn"
-              disabled={!syncState.configured || syncState.syncing}
+              disabled={!syncAvailable || syncState.syncing}
               onClick={async () => {
                 setMessage(null);
                 await runRemoteSync('manual');

@@ -16,7 +16,16 @@ type Props = {
 function shouldAllowApp(identity: DriverIdentity | null) {
   if (!identity) return false;
   if (!identity.configured) return identity.profileComplete;
-  return identity.authInitialized && identity.profileComplete;
+  return identity.authInitialized && identity.profileComplete && identity.approvalStatus === 'approved';
+}
+
+function getApprovalLabel(identity: DriverIdentity) {
+  if (!identity.configured) return 'クラウド未設定';
+  if (!identity.authInitialized) return 'メール認証待ち';
+  if (!identity.profileComplete) return '登録情報不足';
+  if (identity.approvalStatus === 'approved') return '承認済み';
+  if (identity.approvalStatus === 'rejected') return '拒否済み';
+  return '管理者承認待ち';
 }
 
 function DriverRegistrationGate(props: {
@@ -51,7 +60,7 @@ function DriverRegistrationGate(props: {
         setMessage('認証メールを送信しました。メール内のリンクで認証後、「認証状態を更新」を押してください。');
       } else {
         await runRemoteSync('profile-registration');
-        setMessage('端末プロフィールを保存しました。');
+        setMessage('端末プロフィールを保存しました。管理者の承認後に利用できます。');
       }
       await onRefresh();
     } catch (error: any) {
@@ -61,11 +70,12 @@ function DriverRegistrationGate(props: {
     }
   };
 
-  const statusLabel = identity.configured
-    ? identity.authInitialized
-      ? 'メール認証済み'
-      : 'メール認証待ち'
-    : 'クラウド未設定';
+  const statusLabel = getApprovalLabel(identity);
+  const waitingForApproval =
+    identity.configured &&
+    identity.authInitialized &&
+    identity.profileComplete &&
+    identity.approvalStatus !== 'approved';
 
   return (
     <div className="screen-shell">
@@ -78,10 +88,21 @@ function DriverRegistrationGate(props: {
         </div>
 
         <div className="settings-note">
-          名前、メールアドレス、電話番号、車両番号を登録し、メール認証が完了するまで運行開始画面は利用できません。
+          名前、メールアドレス、電話番号、車両番号を登録し、メール認証と管理者承認が完了するまで運行開始画面は利用できません。
         </div>
 
-        <form className="driver-registration" onSubmit={handleSubmit}>
+        {waitingForApproval && (
+          <div className={`approval-wait-card approval-wait-card--${identity.approvalStatus}`}>
+            <strong>{statusLabel}</strong>
+            <span>
+              {identity.approvalStatus === 'rejected'
+                ? 'この登録は管理者により拒否されています。内容を確認する場合は管理者へ連絡してください。'
+                : '登録申請は管理画面に届いています。管理者が許可するとこの端末で機能を使えるようになります。'}
+            </span>
+          </div>
+        )}
+
+        {!waitingForApproval && <form className="driver-registration" onSubmit={handleSubmit}>
           <label className="settings-field">
             <span>名前</span>
             <input
@@ -140,7 +161,21 @@ function DriverRegistrationGate(props: {
           >
             {loading ? '確認中…' : '認証状態を更新'}
           </button>
-        </form>
+        </form>}
+
+        {waitingForApproval && (
+          <button
+            className="trip-btn trip-btn--primary"
+            disabled={busy || loading}
+            type="button"
+            onClick={async () => {
+              setMessage(null);
+              await onRefresh();
+            }}
+          >
+            {loading ? '確認中…' : '承認状態を更新'}
+          </button>
+        )}
 
         {message && <div className="settings-toast">{message}</div>}
       </div>
