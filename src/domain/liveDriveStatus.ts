@@ -2,6 +2,8 @@ import type { AppEvent, EventType } from './types';
 
 const CONTINUOUS_DRIVE_LIMIT_MIN = 4 * 60;
 const CONTINUOUS_DRIVE_EMERGENCY_LIMIT_MIN = 4 * 60 + 30;
+const MIN_QUALIFYING_RESET_SEGMENT_MIN = 10;
+const REQUIRED_RESET_MIN = 30;
 
 export type LiveDriveCategory = 'idle' | 'drive' | 'break' | 'rest' | 'load' | 'unload' | 'wait' | 'work';
 
@@ -140,9 +142,6 @@ export function computeLiveDriveStatus(events: AppEvent[], nowIso = new Date().t
     }
 
     if (state.category === 'drive') {
-      if (qualifyingResetMinutes < 30) {
-        qualifyingResetMinutes = 0;
-      }
       driveSinceReset += duration;
       if (isCurrentInterval) {
         currentNonDrivingMinutes = 0;
@@ -155,23 +154,24 @@ export function computeLiveDriveStatus(events: AppEvent[], nowIso = new Date().t
     const startingQualifying = qualifyingResetMinutes;
     if (isCurrentInterval) {
       currentNonDrivingMinutes = duration;
-      if (duration >= 10) {
-        const progress = Math.min(30, startingQualifying + duration);
-        currentResetCompleted = progress >= 30;
+      if (duration >= MIN_QUALIFYING_RESET_SEGMENT_MIN) {
+        const progress = Math.min(REQUIRED_RESET_MIN, startingQualifying + duration);
+        currentResetCompleted = progress >= REQUIRED_RESET_MIN;
         currentResetCompletedAt =
-          progress >= 30 ? addMinutes(startIso, Math.max(0, 30 - startingQualifying)) : null;
+          progress >= REQUIRED_RESET_MIN
+            ? addMinutes(startIso, Math.max(0, REQUIRED_RESET_MIN - startingQualifying))
+            : null;
       } else {
         currentResetCompleted = false;
         currentResetCompletedAt = null;
       }
     }
 
-    if (duration < 10) {
-      qualifyingResetMinutes = 0;
+    if (duration < MIN_QUALIFYING_RESET_SEGMENT_MIN) {
       return;
     }
 
-    const needed = 30 - qualifyingResetMinutes;
+    const needed = REQUIRED_RESET_MIN - qualifyingResetMinutes;
     if (duration >= needed) {
       const resetAt = addMinutes(startIso, Math.max(0, needed));
       driveSinceReset = 0;
@@ -207,7 +207,7 @@ export function computeLiveDriveStatus(events: AppEvent[], nowIso = new Date().t
     resetCompleted: currentResetCompleted,
     resetCompletedAt: currentResetCompletedAt,
     lastResetAt,
-    remainingUntilResetMinutes: Math.max(0, 30 - qualifyingResetMinutes),
+    remainingUntilResetMinutes: Math.max(0, REQUIRED_RESET_MIN - qualifyingResetMinutes),
     remainingUntilLimitMinutes: Math.max(0, CONTINUOUS_DRIVE_LIMIT_MIN - driveSinceReset),
     remainingUntilEmergencyLimitMinutes: Math.max(0, CONTINUOUS_DRIVE_EMERGENCY_LIMIT_MIN - driveSinceReset),
     continuousDriveExceeded: driveSinceReset > CONTINUOUS_DRIVE_LIMIT_MIN,

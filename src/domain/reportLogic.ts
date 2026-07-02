@@ -25,6 +25,8 @@ const TWO_DAY_DRIVE_LIMIT_MIN = 18 * 60;        // 2日平均1日9h -> 48hで18h
 const TWO_WEEK_DRIVE_LIMIT_MIN = 88 * 60;       // 2週平均1週44h -> 14日で88h
 const CONTINUOUS_DRIVE_LIMIT_MIN = 4 * 60;      // 連続運転 4h
 const CONTINUOUS_DRIVE_EMERGENCY_LIMIT_MIN = 4 * 60 + 30; // やむを得ない場合 4h30m
+const MIN_CONTINUOUS_DRIVE_RESET_SEGMENT_MIN = 10;
+const REQUIRED_CONTINUOUS_DRIVE_RESET_MIN = 30;
 const LONG_DISTANCE_THRESHOLD_KM = 450;
 const DAY_TOTAL_MIN = 24 * 60;
 const QUARTER_MIN = 15;
@@ -919,9 +921,6 @@ function summarizeContinuousDrive(days: DayRecord[], currentTs?: string): Map<nu
     if (duration <= 0) continue;
 
     if (interval.category === 'drive') {
-      if (qualifyingBreakMinutes < 30) {
-        qualifyingBreakMinutes = 0;
-      }
       driveSinceReset += duration;
       const state = ensure(interval.dayIndex);
       state.longestContinuousDriveMinutes = Math.max(state.longestContinuousDriveMinutes, driveSinceReset);
@@ -934,16 +933,14 @@ function summarizeContinuousDrive(days: DayRecord[], currentTs?: string): Map<nu
       continue;
     }
 
-    if (duration >= 10) {
+    if (duration >= MIN_CONTINUOUS_DRIVE_RESET_SEGMENT_MIN) {
       qualifyingBreakMinutes += duration;
-      if (qualifyingBreakMinutes >= 30) {
+      if (qualifyingBreakMinutes >= REQUIRED_CONTINUOUS_DRIVE_RESET_MIN) {
         driveSinceReset = 0;
         qualifyingBreakMinutes = 0;
       }
       continue;
     }
-
-    qualifyingBreakMinutes = 0;
   }
 
   return byDay;
