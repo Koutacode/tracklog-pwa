@@ -224,7 +224,7 @@ export default function RequireDriverProfile({ children }: Props) {
     };
   }, []);
 
-  if (loading && !identity) {
+  if (!identity) {
     return <div style={{ padding: 24, color: '#fff' }}>登録状態を確認中…</div>;
   }
 
