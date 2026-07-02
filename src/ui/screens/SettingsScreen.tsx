@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Capacitor } from '@capacitor/core';
-import { getDefaultAdminEmail, getDriverIdentity, sendDriverMagicLink, setDriverProfileLocal } from '../../services/remoteAuth';
+import { getDriverIdentity, sendDriverMagicLink, setDriverProfileLocal } from '../../services/remoteAuth';
 import { getRemoteSyncState, hydrateRemoteSyncState, runRemoteSync, subscribeRemoteSyncState } from '../../services/remoteSync';
 import { shareText } from '../../services/nativeShare';
 import { PWA_URL, DEFAULT_APK_DOWNLOAD_URL } from '../../app/releaseInfo';
@@ -16,6 +16,8 @@ export default function SettingsScreen() {
   const [vehicleLabel, setVehicleLabel] = useState('');
   const [phone, setPhone] = useState('');
   const [email, setEmail] = useState('');
+  const [authInitialized, setAuthInitialized] = useState(false);
+  const [profileComplete, setProfileComplete] = useState(false);
   const [sendingMagic, setSendingMagic] = useState(false);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
@@ -23,7 +25,8 @@ export default function SettingsScreen() {
 
   const isNative = Capacitor.isNativePlatform();
   const standalone = useMemo(() => isStandaloneMode(), []);
-  const authStatusLabel = email.trim() ? 'メール登録済み' : '未登録';
+  const profileLocked = authInitialized && profileComplete;
+  const authStatusLabel = authInitialized ? '認証済み' : email.trim() ? '認証待ち' : '未登録';
 
   useEffect(() => {
     let active = true;
@@ -34,6 +37,8 @@ export default function SettingsScreen() {
       setVehicleLabel(identity.vehicleLabel);
       setPhone(identity.phone);
       setEmail(identity.email || '');
+      setAuthInitialized(identity.authInitialized);
+      setProfileComplete(identity.profileComplete);
     })();
     void hydrateRemoteSyncState();
     const unsubscribe = subscribeRemoteSyncState(next => {
@@ -90,35 +95,57 @@ export default function SettingsScreen() {
             <div className="settings-panel__title">端末プロフィール</div>
             <label className="settings-field">
               <span>表示名</span>
-              <input value={displayName} onChange={e => setDisplayName(e.target.value)} placeholder="例: 札幌便 1号車" />
+              <input
+                value={displayName}
+                onChange={e => setDisplayName(e.target.value)}
+                placeholder="例: 札幌便 1号車"
+                disabled={profileLocked}
+              />
             </label>
             <label className="settings-field">
               <span>車番・識別名</span>
-              <input value={vehicleLabel} onChange={e => setVehicleLabel(e.target.value)} placeholder="例: 札幌 100 あ 1234" />
+              <input
+                value={vehicleLabel}
+                onChange={e => setVehicleLabel(e.target.value)}
+                placeholder="例: 札幌 100 あ 1234"
+                disabled={profileLocked}
+              />
             </label>
             <label className="settings-field">
               <span>電話番号</span>
-              <input value={phone} onChange={e => setPhone(e.target.value)} placeholder="例: 090-1234-5678" />
+              <input
+                value={phone}
+                onChange={e => setPhone(e.target.value)}
+                placeholder="例: 090-1234-5678"
+                disabled={profileLocked}
+              />
             </label>
             <label className="settings-field">
               <span>メールアドレス</span>
-              <input value={email} onChange={e => setEmail(e.target.value)} placeholder="例: sample@example.com" type="email" />
+              <input
+                value={email}
+                onChange={e => setEmail(e.target.value)}
+                placeholder="例: sample@example.com"
+                type="email"
+                disabled={profileLocked}
+              />
             </label>
             <div className="settings-info-row">
               <span>端末ID</span>
               <strong>{syncState.deviceId ?? '未発行'}</strong>
             </div>
             <div className="settings-info-row">
-              <span>初期管理者メール</span>
-              <strong>{getDefaultAdminEmail()}</strong>
-            </div>
-            <div className="settings-info-row">
               <span>認証状態</span>
               <strong>{authStatusLabel}</strong>
             </div>
+            {profileLocked && (
+              <div className="settings-note">
+                登録済みプロフィールは不正利用防止のため、この端末からは変更できません。
+              </div>
+            )}
             <button
               className="trip-btn"
-              disabled={!email.trim() || sendingMagic}
+              disabled={profileLocked || !email.trim() || sendingMagic}
               onClick={async () => {
                 setMessage(null);
                 setSendingMagic(true);
@@ -136,7 +163,7 @@ export default function SettingsScreen() {
             </button>
             <button
               className="trip-btn trip-btn--primary"
-              disabled={saving}
+              disabled={profileLocked || saving}
               onClick={async () => {
                 setSaving(true);
                 setMessage(null);
@@ -144,6 +171,9 @@ export default function SettingsScreen() {
                   await setDriverProfileLocal({ displayName, vehicleLabel, phone, email });
                   await hydrateRemoteSyncState();
                   await runRemoteSync('profile-save');
+                  const identity = await getDriverIdentity();
+                  setAuthInitialized(identity.authInitialized);
+                  setProfileComplete(identity.profileComplete);
                   setMessage('端末プロフィールを保存しました');
                 } catch (error: any) {
                   setMessage(error?.message ?? '保存に失敗しました');

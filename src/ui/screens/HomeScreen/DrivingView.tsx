@@ -8,6 +8,7 @@ type DrivingViewProps = {
   onVoiceCommand: () => void;
   voiceListening: boolean;
   expresswayActive: boolean;
+  expresswayPending: 'start' | 'end' | null;
   onExpresswayToggle: (action: 'start' | 'end') => void;
 };
 
@@ -16,6 +17,7 @@ export const DrivingView: React.FC<DrivingViewProps> = ({
   onVoiceCommand,
   voiceListening,
   expresswayActive,
+  expresswayPending,
   onExpresswayToggle,
 }) => {
   const driveMinutes = liveDrive.driveSinceResetMinutes;
@@ -27,6 +29,14 @@ export const DrivingView: React.FC<DrivingViewProps> = ({
     : liveDrive.continuousDriveExceeded
       ? '#f59e0b'
       : '#3b82f6';
+  const effectiveExpresswayActive = expresswayPending ? expresswayPending === 'start' : expresswayActive;
+  const expresswayLabel = expresswayPending
+    ? expresswayPending === 'start'
+      ? '高速道路開始中…'
+      : '高速道路終了中…'
+    : effectiveExpresswayActive
+      ? '高速道路終了'
+      : '高速道路開始';
 
   return (
     <div className="driving-view" style={{ display: 'grid', gap: 24, padding: '24px 0' }}>
@@ -56,12 +66,14 @@ export const DrivingView: React.FC<DrivingViewProps> = ({
 
       <div className="driving-command-stack">
         <BigButton
-          label={expresswayActive ? '高速道路終了' : '高速道路開始'}
+          label={expresswayLabel}
+          hint={expresswayPending ? '位置情報とIC名を記録しています' : undefined}
           variant="neutral"
           className={`big-button--expressway-hero ${
-            expresswayActive ? 'big-button--expressway-end' : 'big-button--expressway-start'
-          }`}
-          onClick={() => onExpresswayToggle(expresswayActive ? 'end' : 'start')}
+            effectiveExpresswayActive ? 'big-button--expressway-end' : 'big-button--expressway-start'
+          }${expresswayPending ? ' big-button--pending' : ''}`}
+          disabled={!!expresswayPending}
+          onClick={() => onExpresswayToggle(effectiveExpresswayActive ? 'end' : 'start')}
         />
         <button
           onClick={onVoiceCommand}

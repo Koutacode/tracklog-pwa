@@ -23,7 +23,8 @@ function isNewerRelease(release: ReleaseInfo) {
   const releaseVersion = release.tag.replace(/^v/i, '').trim();
   if (releaseVersion) {
     const versionCompare = compareVersions(releaseVersion, APP_VERSION);
-    return versionCompare > 0;
+    if (versionCompare > 0) return true;
+    if (versionCompare < 0) return false;
   }
 
   const buildTime = Date.parse(BUILD_DATE);

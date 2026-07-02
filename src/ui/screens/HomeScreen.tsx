@@ -140,6 +140,7 @@ export default function HomeScreen() {
   const [voiceResult, setVoiceResult] = useState<string | null>(null);
   const [voiceError, setVoiceError] = useState<string | null>(null);
   const [focusDriving, setFocusDriving] = useState(false);
+  const [expresswayPending, setExpresswayPending] = useState<'start' | 'end' | null>(null);
 
   const apkUrlCopyTimer = useRef<number | null>(null);
   const isNative = Capacitor.isNativePlatform();
@@ -208,6 +209,18 @@ export default function HomeScreen() {
   const canStartUnload = !ferryActive && !restActive && !breakActive && !unloadActive && !loadActive;
   const canStartBreak = !ferryActive && !restActive && !loadActive && !breakActive && !unloadActive;
 
+  const runExpresswayToggle = async (action: 'start' | 'end') => {
+    if (expresswayPending) return;
+    setExpresswayPending(action);
+    try {
+      await handleToggleEvent('expressway', action);
+    } catch (error: any) {
+      alert(error?.message ?? '高速道路操作に失敗しました');
+    } finally {
+      setExpresswayPending(null);
+    }
+  };
+
   // Auto-switch focus when driving starts
   useEffect(() => {
     if (liveDrive.currentCategory === 'drive') {
@@ -275,10 +288,10 @@ export default function HomeScreen() {
           if (tripId && unloadActive) await handleToggleEvent('unload', 'end');
           break;
         case 'expressway_start':
-          if (tripId && !expresswayActive) await handleToggleEvent('expressway', 'start');
+          if (tripId && !expresswayActive) await runExpresswayToggle('start');
           break;
         case 'expressway_end':
-          if (tripId && expresswayActive) await handleToggleEvent('expressway', 'end');
+          if (tripId && expresswayActive) await runExpresswayToggle('end');
           break;
         case 'boarding':
           if (tripId && !ferryActive) await handleAddFerry('boarding');
@@ -374,11 +387,18 @@ export default function HomeScreen() {
 
   const tripStart = events.find(e => e.type === 'trip_start') as any;
   const tripElapsed = tripStart?.ts ? now - new Date(tripStart.ts).getTime() : null;
-  const expresswayAction = expresswayActive ? 'end' : 'start';
+  const effectiveExpresswayActive = expresswayPending ? expresswayPending === 'start' : expresswayActive;
+  const expresswayAction = effectiveExpresswayActive ? 'end' : 'start';
   const expresswayButtonClass = `big-button--expressway-hero ${
-    expresswayActive ? 'big-button--expressway-end' : 'big-button--expressway-start'
-  }`;
-  const expresswayButtonLabel = expresswayActive ? '高速道路終了' : '高速道路開始';
+    effectiveExpresswayActive ? 'big-button--expressway-end' : 'big-button--expressway-start'
+  }${expresswayPending ? ' big-button--pending' : ''}`;
+  const expresswayButtonLabel = expresswayPending
+    ? expresswayPending === 'start'
+      ? '高速道路開始中…'
+      : '高速道路終了中…'
+    : effectiveExpresswayActive
+      ? '高速道路終了'
+      : '高速道路開始';
 
   return (
     <div className="home-backdrop">
@@ -408,9 +428,11 @@ export default function HomeScreen() {
           <div className="home-expressway-quick">
             <BigButton
               label={expresswayButtonLabel}
+              hint={expresswayPending ? '位置情報とIC名を記録しています' : undefined}
               variant="neutral"
               className={expresswayButtonClass}
-              onClick={() => handleToggleEvent('expressway', expresswayAction)}
+              disabled={!!expresswayPending}
+              onClick={() => runExpresswayToggle(expresswayAction)}
             />
           </div>
         )}
@@ -421,7 +443,8 @@ export default function HomeScreen() {
             onVoiceCommand={runVoiceCommand}
             voiceListening={voiceListening}
             expresswayActive={expresswayActive}
-            onExpresswayToggle={action => handleToggleEvent('expressway', action)}
+            expresswayPending={expresswayPending}
+            onExpresswayToggle={runExpresswayToggle}
           />
         ) : (
           <div className="home-grid">

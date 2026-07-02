@@ -131,6 +131,18 @@ a:hover {
   color: var(--text);
 }
 
+.settings-field input:disabled {
+  color: rgba(226, 232, 240, 0.72);
+  background: rgba(15, 23, 42, 0.52);
+  cursor: not-allowed;
+}
+
+.driver-registration {
+  display: grid;
+  gap: 14px;
+  margin-top: 18px;
+}
+
 .settings-checkbox {
   display: flex;
   align-items: center;
@@ -2931,6 +2943,11 @@ a:hover {
   opacity: 0.55;
   cursor: not-allowed;
   box-shadow: none;
+}
+
+.big-button--pending:disabled {
+  opacity: 0.92;
+  cursor: wait;
 }
 
 .big-button__label {

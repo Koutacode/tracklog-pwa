@@ -5,7 +5,6 @@ import {
   getAdminGoogleSignInUrl,
   getAdminRedirectUrl,
   getAdminSession,
-  getDefaultAdminEmail,
   onAdminAuthStateChange,
   sendAdminMagicLink,
 } from '../../services/remoteAuth';
@@ -29,7 +28,7 @@ function formatLoginError(error: any) {
 }
 
 export default function LoginScreen() {
-  const [email, setEmail] = useState(getDefaultAdminEmail());
+  const [email, setEmail] = useState('');
   const [message, setMessage] = useState<string | null>(null);
   const [status, setStatus] = useState<'idle' | 'sending' | 'google'>('idle');
   const [authenticated, setAuthenticated] = useState(false);
@@ -69,7 +68,7 @@ export default function LoginScreen() {
           </div>
         </div>
         <div className="settings-note">
-          管理者メールは <strong>{getDefaultAdminEmail()}</strong> を前提にしています。Googleログインまたはメールリンクで管理画面へ入れます。
+          管理者として登録されているメールアドレスでログインしてください。
         </div>
         {Capacitor.isNativePlatform() && (
           <div className="settings-note">

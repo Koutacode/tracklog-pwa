@@ -324,14 +324,42 @@ export async function setDriverProfileLocal(input: {
     throw new Error('メールアドレスを入力してください');
   }
 
-  const [confirmed, savedEmail, sessionProfile] = await Promise.all([
+  const [
+    confirmed,
+    savedEmail,
+    sessionProfile,
+    savedDisplayName,
+    savedVehicleLabel,
+    savedDriverPhone,
+  ] = await Promise.all([
     getMeta(META_REMOTE_AUTH_INITIALIZED),
     getMeta(META_DRIVER_EMAIL),
     getProfileIdentity(),
+    getMeta(META_DEVICE_DISPLAY_NAME),
+    getMeta(META_DEVICE_VEHICLE_LABEL),
+    getMeta(META_DRIVER_PHONE),
   ]);
   const lockedEmail = normalizeEmail(sessionProfile?.email) || (confirmed === 'true' ? normalizeEmail(savedEmail) : '');
   if (lockedEmail && trimmedEmail !== lockedEmail) {
     throw new Error(`この端末は ${lockedEmail} のアカウントに紐づいています。別メールで使う場合は管理者に切替を依頼してください。`);
+  }
+
+  const profileLocked =
+    confirmed === 'true' &&
+    isDriverProfileComplete({
+      displayName: savedDisplayName,
+      vehicleLabel: savedVehicleLabel,
+      email: lockedEmail || savedEmail,
+      phone: savedDriverPhone,
+      requireContactInfo: true,
+    });
+  if (
+    profileLocked &&
+    (trimmedDisplayName !== normalizeText(savedDisplayName) ||
+      trimmedVehicleLabel !== normalizeText(savedVehicleLabel) ||
+      trimmedPhone !== normalizeText(savedDriverPhone))
+  ) {
+    throw new Error('登録済みの端末プロフィールは変更できません。変更が必要な場合は管理者に依頼してください。');
   }
 
   await Promise.all([
