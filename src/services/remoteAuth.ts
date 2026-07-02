@@ -4,7 +4,7 @@ import { requestImmediateRemoteSync } from '../app/remoteSyncSignal';
 import { db } from '../db/db';
 import type { AdminSession, DriverIdentity } from '../domain/remoteTypes';
 import { getStableDeviceKey } from './deviceIdentity';
-import { adminSupabase, DEFAULT_ADMIN_EMAIL, driverSupabase, SUPABASE_CONFIGURED } from './supabase';
+import { adminSupabase, driverSupabase, SUPABASE_CONFIGURED } from './supabase';
 
 const META_DEVICE_ID = 'device_id';
 const META_DEVICE_DISPLAY_NAME = 'device_display_name';
@@ -398,10 +398,6 @@ export async function getRemoteLastSyncAt(): Promise<string | null> {
 
 export async function setRemoteLastSyncAt(ts: string | null): Promise<void> {
   await setMeta(META_REMOTE_LAST_SYNC_AT, ts);
-}
-
-export function getDefaultAdminEmail() {
-  return DEFAULT_ADMIN_EMAIL;
 }
 
 export { claimTracklogDeviceProfile };
