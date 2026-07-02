@@ -150,6 +150,16 @@ type DayGroup<T> = {
   items: T[];
 };
 
+type DistanceDayGroup = {
+  dayIndex: number;
+  dateLabel: string;
+  km: number;
+  status: 'confirmed' | 'pending';
+  closeOdo?: number;
+  closeLabel?: string;
+  segments: TripViewModel['segments'];
+};
+
 type AiSharePayload = {
   recordType: 'operation_log';
   tripId: string;
@@ -245,6 +255,63 @@ function groupItemsByDay<T extends { ts: string }>(items: T[], tripStartTs: stri
     }
   }
   return [...groups.entries()].sort((a, b) => a[0] - b[0]).map(([, v]) => v);
+}
+
+function formatDistanceCheckpoint(labelText: string) {
+  if (labelText === 'trip_start') return '運行開始';
+  if (labelText === 'trip_end') return '運行終了';
+  const restMatch = labelText.match(/^rest_start_(\d+)$/);
+  if (restMatch) return `休息${restMatch[1]}`;
+  return labelText;
+}
+
+function fmtShortLocal(ts?: string) {
+  if (!ts) return '-';
+  return new Intl.DateTimeFormat('ja-JP', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(new Date(ts));
+}
+
+function buildDistanceDayGroups(vm: TripViewModel): DistanceDayGroup[] {
+  const byDay = new Map<number, DistanceDayGroup>();
+  for (const day of vm.dayRuns) {
+    byDay.set(day.dayIndex, {
+      dayIndex: day.dayIndex,
+      dateLabel: day.dateLabel,
+      km: day.km,
+      status: day.status,
+      ...(day.closeOdo != null ? { closeOdo: day.closeOdo } : {}),
+      ...(day.closeLabel ? { closeLabel: day.closeLabel } : {}),
+      segments: [],
+    });
+  }
+
+  const firstDay = vm.dayRuns[0];
+  const startInfo = firstDay ? getJstDateInfo(`${firstDay.dateKey}T00:00:00+09:00`) : null;
+  const startDayStamp = startInfo?.dayStamp;
+  for (const seg of vm.segments) {
+    const ts = seg.toTs ?? seg.fromTs;
+    const info = ts ? getJstDateInfo(ts) : null;
+    const inferredDayIndex =
+      info && startDayStamp != null ? getDayIndexByStamp(info.dayStamp, startDayStamp) : 1;
+    const day = byDay.get(inferredDayIndex);
+    if (day) {
+      day.segments.push(seg);
+    } else if (info) {
+      byDay.set(inferredDayIndex, {
+        dayIndex: inferredDayIndex,
+        dateLabel: info.dateLabel,
+        km: seg.valid ? seg.km : 0,
+        status: 'confirmed',
+        segments: [seg],
+      });
+    }
+  }
+
+  return [...byDay.values()].sort((a, b) => a.dayIndex - b.dayIndex);
 }
 
 function buildGrouped(events: AppEvent[]): GroupedItem[] {
@@ -777,6 +844,7 @@ export default function TripDetail() {
   const groupedByDay = tripStartTs ? groupItemsByDay(grouped, tripStartTs) : [];
   const editingEvents = [...events].sort((a, b) => b.ts.localeCompare(a.ts));
   const reviewChecks = vm ? buildTripReviewChecks(vm, events) : [];
+  const distanceDayGroups = vm ? buildDistanceDayGroups(vm) : [];
   return (
     <div className="page-shell trip-detail">
       <div className="trip-detail__header">
@@ -893,37 +961,49 @@ export default function TripDetail() {
                   </ul>
                 </div>
               )}
-              <div className="card trip-section">
-              <div className="trip-section__title">区間距離一覧</div>
-              <div className="trip-section__note">休息開始ODOを区切りとして計算します。</div>
-              <div className="trip-list">
-                {vm.segments.map(seg => (
-                    <div key={seg.index} className="trip-item trip-item--split">
-                      <div>
-                        <div className="trip-item__title">{seg.fromLabel} → {seg.toLabel}</div>
-                        <div className="trip-item__meta">{fmtLocal(seg.fromTs)} → {fmtLocal(seg.toTs)}</div>
-                      </div>
-                      <div className={`trip-item__value${seg.valid ? '' : ' trip-item__value--bad'}`}>{seg.km} km</div>
-                    </div>
-                  ))}
+              <div className="card trip-section trip-distance">
+                <div className="trip-section__title">日別・区間距離</div>
+                <div className="trip-section__note">
+                  日本時間24時で日付を分け、休息開始ODOごとの区間を日別にまとめています。
                 </div>
-              </div>
-              <div className="card trip-section">
-                <div className="trip-section__title">日別運行</div>
-                <div className="trip-section__note">日本時間24時で日付切替</div>
-                <div className="trip-list">
-                  {vm.dayRuns.map(day => (
-                    <div key={day.dayIndex} className="trip-item trip-item--split">
-                      <div>
-                        <div className="trip-item__title">
-                          {day.dayIndex}日目 {day.status === 'pending' ? '（運行中）' : ''}
+                <div className="trip-distance__days">
+                  {distanceDayGroups.map(day => (
+                    <div key={day.dayIndex} className="trip-distance-day">
+                      <div className="trip-distance-day__head">
+                        <div>
+                          <div className="trip-distance-day__title">
+                            {day.dayIndex}日目
+                            {day.status === 'pending' ? <span>運行中</span> : null}
+                          </div>
+                          <div className="trip-distance-day__meta">
+                            {day.dateLabel}
+                            {day.closeOdo != null ? ` / ${day.closeLabel ?? '休息開始'} ${day.closeOdo} km` : ''}
+                          </div>
                         </div>
-                        <div className="trip-item__meta">{day.dateLabel}</div>
-                        {day.closeOdo != null && (
-                          <div className="trip-item__meta">{day.closeLabel ?? '休息開始'}: {day.closeOdo} km</div>
+                        <div className="trip-distance-day__km">{day.km} km</div>
+                      </div>
+                      <div className="trip-distance-segments">
+                        {day.segments.map(seg => (
+                          <div key={seg.index} className="trip-distance-segment">
+                            <div>
+                              <div className="trip-distance-segment__route">
+                                {formatDistanceCheckpoint(seg.fromLabel)} → {formatDistanceCheckpoint(seg.toLabel)}
+                              </div>
+                              <div className="trip-distance-segment__meta">
+                                {fmtShortLocal(seg.fromTs)} → {fmtShortLocal(seg.toTs)}
+                              </div>
+                            </div>
+                            <div className={`trip-distance-segment__km${seg.valid ? '' : ' trip-item__value--bad'}`}>
+                              {seg.km} km
+                            </div>
+                          </div>
+                        ))}
+                        {day.segments.length === 0 && (
+                          <div className="trip-distance-segment trip-distance-segment--empty">
+                            この日の区間距離はまだありません
+                          </div>
                         )}
                       </div>
-                      <div className="trip-item__value">{day.km} km</div>
                     </div>
                   ))}
                 </div>

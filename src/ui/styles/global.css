@@ -909,6 +909,109 @@ a:hover {
   color: #fecaca;
 }
 
+.trip-distance {
+  display: grid;
+  gap: 12px;
+}
+
+.trip-distance__days {
+  display: grid;
+  gap: 14px;
+}
+
+.trip-distance-day {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border-radius: 16px;
+  background: linear-gradient(145deg, rgba(15, 23, 42, 0.92), rgba(2, 6, 23, 0.72));
+  border: 1px solid rgba(148, 163, 184, 0.22);
+}
+
+.trip-distance-day__head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 12px;
+}
+
+.trip-distance-day__title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 18px;
+  font-weight: 900;
+}
+
+.trip-distance-day__title span {
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: rgba(59, 130, 246, 0.16);
+  color: #bfdbfe;
+  border: 1px solid rgba(96, 165, 250, 0.34);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.trip-distance-day__meta {
+  margin-top: 4px;
+  color: rgba(255, 255, 255, 0.68);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.trip-distance-day__km {
+  min-width: 92px;
+  text-align: right;
+  font-size: 24px;
+  line-height: 1.1;
+  font-weight: 950;
+  color: #ffffff;
+}
+
+.trip-distance-segments {
+  display: grid;
+  gap: 8px;
+}
+
+.trip-distance-segment {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(15, 23, 42, 0.54);
+  border: 1px solid rgba(148, 163, 184, 0.14);
+}
+
+.trip-distance-segment__route {
+  font-size: 14px;
+  font-weight: 850;
+  overflow-wrap: anywhere;
+}
+
+.trip-distance-segment__meta {
+  margin-top: 3px;
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.trip-distance-segment__km {
+  min-width: 62px;
+  text-align: right;
+  font-size: 16px;
+  font-weight: 900;
+}
+
+.trip-distance-segment--empty {
+  grid-template-columns: 1fr;
+  color: rgba(255, 255, 255, 0.62);
+  font-size: 13px;
+}
+
 .trip-day__title {
   font-weight: 900;
   font-size: 16px;
