@@ -15,7 +15,7 @@ type Props = {
 
 function shouldAllowApp(identity: DriverIdentity | null) {
   if (!identity) return false;
-  if (!identity.configured) return identity.profileComplete;
+  if (!identity.configured) return false;
   return identity.authInitialized && identity.profileComplete && identity.approvalStatus === 'approved';
 }
 
@@ -89,6 +89,7 @@ function DriverRegistrationGate(props: {
 
         <div className="settings-note">
           名前、メールアドレス、電話番号、車両番号を登録し、メール認証と管理者承認が完了するまで運行開始画面は利用できません。
+          {!identity.configured && ' 現在はクラウド設定を読み込めていないため、管理者承認を確認できません。'}
         </div>
 
         {waitingForApproval && (

@@ -3,6 +3,7 @@ import {
   deleteTrip,
   getActiveTripId,
   getAllEvents,
+  getDeletedEventTombstones,
   getEventsByTripId,
   getLatestRoutePoint,
   getRemoteRoutePointsUploadedThrough,
@@ -15,6 +16,7 @@ import type { AppEvent, EventType, RoutePoint } from '../domain/types';
 import type {
   DriverIdentity,
   RemoteCloudMaintenanceResult,
+  RemoteDeletedEventTombstone,
   RemoteDeletedTripTombstone,
   RemoteTripHeader,
   RemoteReportSnapshot,
@@ -86,6 +88,7 @@ const REMOTE_ROUTE_POINT_SOURCES: Set<RoutePoint['source']> = new Set([
 const LOCAL_SYNC_HEADER_EVENT_ID_PREFIX = 'header-sync';
 const HEADER_SYNC_EVENT_START = `${LOCAL_SYNC_HEADER_EVENT_ID_PREFIX}-trip-start`;
 const HEADER_SYNC_EVENT_END = `${LOCAL_SYNC_HEADER_EVENT_ID_PREFIX}-trip-end`;
+const EVENT_ROUTE_POINT_ANCHOR_PREFIX = 'event-anchor-';
 
 function emit(patch: Partial<RemoteSyncState>) {
   state = { ...state, ...patch };
@@ -120,7 +123,14 @@ function isMissingRpcError(error: any) {
 
 function isMissingTableError(error: any, table: string) {
   const message = `${error?.message ?? error ?? ''}`.toLowerCase();
-  return error?.code === '42P01' || message.includes(table.toLowerCase());
+  const tableName = table.toLowerCase();
+  return (
+    error?.code === '42P01' ||
+    error?.code === 'PGRST205' ||
+    message.includes(`relation "${tableName}" does not exist`) ||
+    message.includes(`could not find the table '${tableName}'`) ||
+    (message.includes('schema cache') && message.includes(tableName))
+  );
 }
 
 function normalizeIso(value: unknown): string | null {
@@ -348,6 +358,36 @@ async function fetchUserDeletedTripIds(): Promise<Set<string>> {
   return new Set(tombstones.map(item => item.trip_id).filter(Boolean));
 }
 
+async function fetchUserDeletedEventIds(): Promise<Set<string>> {
+  if (!driverSupabase) return new Set();
+  const session = await driverSupabase.auth.getSession();
+  const userId = session.data.session?.user?.id?.trim();
+  if (!userId) return new Set();
+  const deviceIds = await getUserDeviceIds(userId);
+  if (deviceIds.length === 0) return new Set();
+
+  const tombstones: RemoteDeletedEventTombstone[] = [];
+  for (const chunk of chunkArray(deviceIds, REMOTE_DEVICE_IDS_CHUNK_SIZE)) {
+    if (chunk.length === 0) continue;
+    const result = await driverSupabase
+      .from('deleted_event_tombstones')
+      .select('*')
+      .in('device_id', chunk)
+      .order('deleted_at', { ascending: true });
+    if (result.error) {
+      if (isMissingTableError(result.error, 'deleted_event_tombstones')) {
+        return new Set();
+      }
+      throw new Error(result.error.message || 'deleted_event_tombstones の取得に失敗しました');
+    }
+    if (Array.isArray(result.data)) {
+      tombstones.push(...(result.data as RemoteDeletedEventTombstone[]));
+    }
+  }
+
+  return new Set(tombstones.map(item => item.event_id).filter(Boolean));
+}
+
 async function removeLocalDeletedTrips(deletedTripIds: Set<string>): Promise<void> {
   if (deletedTripIds.size === 0) return;
   await withRemoteSyncSignalsSuppressed(async () => {
@@ -355,6 +395,48 @@ async function removeLocalDeletedTrips(deletedTripIds: Set<string>): Promise<voi
       await deleteTrip(tripId);
     }
   });
+}
+
+async function removeLocalDeletedEvents(deletedEventIds: Set<string>): Promise<void> {
+  if (deletedEventIds.size === 0) return;
+  await withRemoteSyncSignalsSuppressed(async () => {
+    await db.transaction('rw', db.events, db.routePoints, async () => {
+      for (const eventId of deletedEventIds) {
+        await db.events.delete(eventId);
+        await db.routePoints.delete(`${EVENT_ROUTE_POINT_ANCHOR_PREFIX}${eventId}`);
+      }
+    });
+  });
+}
+
+async function uploadDeletedEventTombstones(deviceId: string): Promise<Set<string>> {
+  const local = await getDeletedEventTombstones();
+  const ids = new Set(local.map(item => item.eventId).filter(Boolean));
+  if (local.length === 0 || !driverSupabase) return ids;
+
+  const session = await driverSupabase.auth.getSession();
+  const userId = session.data.session?.user?.id?.trim();
+  if (!userId) return ids;
+
+  const rows: RemoteDeletedEventTombstone[] = uniqueByKey(local, item => item.eventId).map(item => ({
+    event_id: item.eventId,
+    trip_id: item.tripId,
+    device_id: deviceId,
+    event_type: item.eventType ?? null,
+    event_ts: item.eventTs ?? null,
+    deleted_by: userId,
+    deleted_at: item.deletedAt,
+  }));
+  const { error } = await driverSupabase.from('deleted_event_tombstones').upsert(rows, {
+    onConflict: 'event_id',
+  });
+  if (error) {
+    if (isMissingTableError(error, 'deleted_event_tombstones')) {
+      return ids;
+    }
+    throw error;
+  }
+  return ids;
 }
 
 function normalizeHeaderStartEvent(header: RemoteTripHeader): AppEvent {
@@ -390,14 +472,24 @@ async function applyRemoteDownload(rows: {
   routePoints: RemoteRoutePoint[];
   cloudCutoff: string | null;
   deletedTripIds: Set<string>;
+  deletedEventIds: Set<string>;
 }) {
   const visibleHeaders = rows.headers.filter(item => !rows.deletedTripIds.has(item.trip_id));
   const normalizedEvents = rows.events
     .map(parseRemoteEvent)
-    .filter((item): item is AppEvent => item !== null && !rows.deletedTripIds.has(item.tripId));
+    .filter((item): item is AppEvent =>
+      item !== null &&
+      !rows.deletedTripIds.has(item.tripId) &&
+      !rows.deletedEventIds.has(item.id),
+    );
+  const deletedEventAnchorIds = new Set([...rows.deletedEventIds].map(id => `${EVENT_ROUTE_POINT_ANCHOR_PREFIX}${id}`));
   const normalizedRoutePoints = rows.routePoints
     .map(parseRemoteRoutePoint)
-    .filter((item): item is RoutePoint => item !== null && !rows.deletedTripIds.has(item.tripId));
+    .filter((item): item is RoutePoint =>
+      item !== null &&
+      !rows.deletedTripIds.has(item.tripId) &&
+      !deletedEventAnchorIds.has(item.id),
+    );
 
   const prunedHeaders = rows.cloudCutoff
     ? visibleHeaders.filter(item =>
@@ -408,6 +500,18 @@ async function applyRemoteDownload(rows: {
 
   const targetEvents = normalizedEvents.filter(item => !prunedTripIds.has(item.tripId));
   const targetRoutePoints = normalizedRoutePoints.filter(item => !prunedTripIds.has(item.tripId));
+  const targetEventIds = targetEvents.map(item => item.id);
+  const localEventsById = new Map<string, AppEvent>();
+  if (targetEventIds.length > 0) {
+    const localEvents = await db.events.bulkGet(targetEventIds);
+    for (const item of localEvents) {
+      if (item) localEventsById.set(item.id, item);
+    }
+  }
+  const remoteEventsToApply = targetEvents.filter(item => {
+    const local = localEventsById.get(item.id);
+    return !(local && local.syncStatus !== 'synced');
+  });
 
   const remoteTripIds = [...new Set(prunedHeaders.map(item => item.trip_id))];
   const localTripEvents = remoteTripIds.length > 0
@@ -426,7 +530,7 @@ async function applyRemoteDownload(rows: {
     }
   }
 
-  const mergedEvents = [...targetEvents, ...headerBoundaryEvents];
+  const mergedEvents = [...remoteEventsToApply, ...headerBoundaryEvents];
   const uniqueEvents = Object.values(
     mergedEvents.reduce<Record<string, AppEvent>>((acc, item) => {
       acc[item.id] = item;
@@ -574,9 +678,68 @@ function normalizeRoutePoint(deviceId: string, point: RoutePoint): RemoteRoutePo
   };
 }
 
-async function markAllEventsSynced() {
-  await db.events.toCollection().modify(item => {
-    item.syncStatus = 'synced';
+type EventUploadSnapshot = {
+  id: string;
+  fingerprint: string;
+};
+
+function normalizeEventFingerprintValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(normalizeEventFingerprintValue);
+  }
+  if (value && typeof value === 'object') {
+    return Object.keys(value as Record<string, unknown>)
+      .sort()
+      .reduce<Record<string, unknown>>((acc, key) => {
+        const next = normalizeEventFingerprintValue((value as Record<string, unknown>)[key]);
+        if (next !== undefined) acc[key] = next;
+        return acc;
+      }, {});
+  }
+  return value;
+}
+
+function eventUploadFingerprint(event: AppEvent): string {
+  return JSON.stringify({
+    id: event.id,
+    tripId: event.tripId,
+    type: event.type,
+    ts: event.ts,
+    address: event.address ?? null,
+    geo: event.geo
+      ? {
+          lat: event.geo.lat,
+          lng: event.geo.lng,
+          accuracy: event.geo.accuracy ?? null,
+        }
+      : null,
+    extras: event.extras ? normalizeEventFingerprintValue(event.extras) : null,
+  });
+}
+
+function buildEventUploadSnapshot(event: AppEvent): EventUploadSnapshot {
+  return {
+    id: event.id,
+    fingerprint: eventUploadFingerprint(event),
+  };
+}
+
+async function markUploadedEventsSynced(snapshots: EventUploadSnapshot[]) {
+  if (snapshots.length === 0) return;
+  const snapshotById = new Map<string, string>();
+  for (const item of snapshots) {
+    if (item.id && !snapshotById.has(item.id)) {
+      snapshotById.set(item.id, item.fingerprint);
+    }
+  }
+
+  await db.transaction('rw', db.events, async () => {
+    for (const [id, fingerprint] of snapshotById) {
+      const current = await db.events.get(id);
+      if (current && eventUploadFingerprint(current) === fingerprint) {
+        await db.events.update(id, { syncStatus: 'synced' });
+      }
+    }
   });
 }
 
@@ -675,6 +838,10 @@ export async function runRemoteSync(reason = 'manual'): Promise<RemoteSyncState>
       const deletedTripIds = await fetchUserDeletedTripIds();
       const routePointSyncStartedAt = nowIso();
       const routePointsUploadedThrough = await getRemoteRoutePointsUploadedThrough();
+      const deviceId = identity.deviceId as string;
+      const localDeletedEventIds = await uploadDeletedEventTombstones(deviceId);
+      const remoteDeletedEventIds = await fetchUserDeletedEventIds();
+      const deletedEventIds = new Set([...localDeletedEventIds, ...remoteDeletedEventIds]);
       const [events, routePoints, reportTrips, tripHeaders] = await Promise.all([
         getAllEvents(),
         listRoutePointsChangedSince(routePointsUploadedThrough),
@@ -682,11 +849,13 @@ export async function runRemoteSync(reason = 'manual'): Promise<RemoteSyncState>
         listTrips(),
       ]);
       await removeLocalDeletedTrips(deletedTripIds);
-      const visibleEvents = events.filter(item => !deletedTripIds.has(item.tripId));
+      await removeLocalDeletedEvents(deletedEventIds);
+      const visibleEvents = events.filter(item => !deletedTripIds.has(item.tripId) && !deletedEventIds.has(item.id));
+      const deletedEventAnchorIds = new Set([...deletedEventIds].map(id => `${EVENT_ROUTE_POINT_ANCHOR_PREFIX}${id}`));
       const visibleRoutePoints = routePoints.filter(item => !deletedTripIds.has(item.tripId));
+      const uploadableVisibleRoutePoints = visibleRoutePoints.filter(item => !deletedEventAnchorIds.has(item.id));
       const visibleReportTrips = reportTrips.filter(item => !deletedTripIds.has(item.id));
       const visibleTripHeaders = tripHeaders.filter(item => !deletedTripIds.has(item.tripId));
-      const deviceId = identity.deviceId as string;
       const cloudPrunedTripIds = getCloudDetailPrunedTripIds(
         visibleTripHeaders.map(item => ({
           trip_id: item.tripId,
@@ -696,7 +865,7 @@ export async function runRemoteSync(reason = 'manual'): Promise<RemoteSyncState>
         cloudDetailRetentionCutoff,
       );
       const uploadableEvents = visibleEvents.filter(item => !cloudPrunedTripIds.has(item.tripId));
-      const uploadableRoutePoints = visibleRoutePoints.filter(item => !cloudPrunedTripIds.has(item.tripId));
+      const uploadableRoutePoints = uploadableVisibleRoutePoints.filter(item => !cloudPrunedTripIds.has(item.tripId));
       const uploadableTripIds = new Set(visibleTripHeaders.map(item => item.tripId));
       const uploadableReports = visibleReportTrips.filter(item => uploadableTripIds.has(item.id) && !cloudPrunedTripIds.has(item.id));
 
@@ -713,7 +882,9 @@ export async function runRemoteSync(reason = 'manual'): Promise<RemoteSyncState>
         status: item.status,
         updated_at: nowIso(),
       }));
-      const normalizedEvents = uniqueByKey(uploadableEvents, item => item.id).map(item => normalizeTripEvent(deviceId, item));
+      const uniqueUploadableEvents = uniqueByKey(uploadableEvents, item => item.id);
+      const uploadedEventSnapshots = uniqueUploadableEvents.map(buildEventUploadSnapshot);
+      const normalizedEvents = uniqueUploadableEvents.map(item => normalizeTripEvent(deviceId, item));
       const normalizedRoutePoints = uniqueByKey(uploadableRoutePoints, item => item.id).map(item => normalizeRoutePoint(deviceId, item));
       const normalizedReports: RemoteReportSnapshot[] = uniqueByKey(uploadableReports, item => item.id).map(item => ({
         trip_id: item.id,
@@ -764,10 +935,11 @@ export async function runRemoteSync(reason = 'manual'): Promise<RemoteSyncState>
         routePoints: remoteRoutePoints,
         cloudCutoff: cloudDetailRetentionCutoff,
         deletedTripIds,
+        deletedEventIds,
       });
 
       await withRemoteSyncSignalsSuppressed(async () => {
-        await markAllEventsSynced();
+        await markUploadedEventsSynced(uploadedEventSnapshots);
         if (!routePointsUploadedThrough || routePoints.length > 0) {
           const uploadedThrough = routePoints.reduce((latest, point) => {
             const updatedAt = point.updatedAt ?? point.ts;

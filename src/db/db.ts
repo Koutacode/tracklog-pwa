@@ -9,6 +9,14 @@ export type MetaRow = {
   updatedAt: string;
 };
 
+export type DeletedEventTombstone = {
+  eventId: string;
+  tripId: string;
+  eventType?: string;
+  eventTs?: string;
+  deletedAt: string;
+};
+
 function nowIso(): string {
   return new Date().toISOString();
 }
@@ -25,6 +33,7 @@ export class TrackLogDB extends Dexie {
   meta!: Table<MetaRow, string>;
   routePoints!: Table<RoutePoint, string>;
   reportTrips!: Table<Trip, string>;
+  deletedEventTombstones!: Table<DeletedEventTombstone, string>;
 
   constructor() {
     super('tracklog_db');
@@ -42,6 +51,13 @@ export class TrackLogDB extends Dexie {
       meta: 'key, updatedAt',
       routePoints: 'id, tripId, ts, [tripId+ts]',
       reportTrips: 'id, createdAt',
+    });
+    this.version(4).stores({
+      events: 'id, tripId, type, ts, [tripId+ts], [tripId+type], [tripId+type+ts]',
+      meta: 'key, updatedAt',
+      routePoints: 'id, tripId, ts, [tripId+ts]',
+      reportTrips: 'id, createdAt',
+      deletedEventTombstones: 'eventId, tripId, deletedAt',
     });
   }
 }
@@ -85,6 +101,14 @@ function installRemoteSyncHooks() {
   });
   db.reportTrips.hook('deleting', () => {
     request('report-delete');
+  });
+
+  db.deletedEventTombstones.hook('creating', () => {
+    request('event-tombstone-create');
+  });
+  db.deletedEventTombstones.hook('updating', () => {
+    request('event-tombstone-update');
+    return undefined;
   });
 }
 

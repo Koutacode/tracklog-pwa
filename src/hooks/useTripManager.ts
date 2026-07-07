@@ -19,6 +19,7 @@ import {
   startExpressway as dbStartExpressway,
   endExpressway as dbEndExpressway,
   backfillMissingAddresses,
+  backfillPendingExpresswayIcs,
   updateExpresswayResolved,
   clearPendingExpresswayEndDecision,
 } from '../db/repositories';
@@ -183,11 +184,18 @@ export function useTripManager() {
   // Backfill logic
   useEffect(() => {
     if (!tripId) return;
-    const id = setInterval(() => {
-      backfillMissingAddresses(12, 1).then(updated => {
-        if (updated) refresh();
+    const runBackfill = () => {
+      Promise.all([
+        backfillMissingAddresses(12, 1),
+        backfillPendingExpresswayIcs(4),
+      ]).then(results => {
+        if (results.some(Boolean)) refresh();
+      }).catch(() => {
+        // Network/API failures are retried by the next backfill cycle.
       });
-    }, 20000);
+    };
+    runBackfill();
+    const id = setInterval(runBackfill, 20000);
     return () => clearInterval(id);
   }, [tripId, refresh]);
 

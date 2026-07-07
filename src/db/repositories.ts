@@ -918,6 +918,10 @@ export async function getAllEvents(): Promise<AppEvent[]> {
   return arr;
 }
 
+export async function getDeletedEventTombstones() {
+  return db.deletedEventTombstones.orderBy('deletedAt').toArray();
+}
+
 // Trip operations
 
 export async function startTrip(params: {
@@ -1426,6 +1430,64 @@ export async function getPendingExpresswayEvents(tripId?: string) {
   return arr
     .filter(e => canRetryIcResolve(e, nowMs))
     .sort((a, b) => b.ts.localeCompare(a.ts));
+}
+
+let expresswayIcBackfillInFlight: Promise<boolean> | null = null;
+
+export async function backfillPendingExpresswayIcs(limit = 8): Promise<boolean> {
+  if (expresswayIcBackfillInFlight) return expresswayIcBackfillInFlight;
+  if (typeof navigator !== 'undefined' && !navigator.onLine) return false;
+
+  expresswayIcBackfillInFlight = (async () => {
+    const candidates = (await getPendingExpresswayEvents()).slice(0, Math.max(1, limit));
+    let updatedAny = false;
+
+    for (const ev of candidates) {
+      const geo = (ev as any).geo as Geo | undefined;
+      if (!geo) {
+        await markExpresswayResolveFailure({
+          eventId: ev.id,
+          errorMessage: '位置情報が未保存のためIC解決不可',
+          nextRetryAt: null,
+        });
+        updatedAny = true;
+        continue;
+      }
+
+      try {
+        const result = await resolveNearestIC(geo.lat, geo.lng);
+        if (result) {
+          await updateExpresswayResolved({
+            eventId: ev.id,
+            status: 'resolved',
+            icName: result.icName,
+            icDistanceM: result.distanceM,
+          });
+          updatedAny = true;
+        } else {
+          await markExpresswayResolveFailure({
+            eventId: ev.id,
+            errorMessage: '近傍ICを取得できませんでした',
+          });
+          updatedAny = true;
+        }
+      } catch (error: any) {
+        await markExpresswayResolveFailure({
+          eventId: ev.id,
+          errorMessage: error?.message ?? 'IC解決に失敗しました',
+        });
+        updatedAny = true;
+      }
+    }
+
+    return updatedAny;
+  })();
+
+  try {
+    return await expresswayIcBackfillInFlight;
+  } finally {
+    expresswayIcBackfillInFlight = null;
+  }
 }
 
 export async function updateExpresswayResolved(params: {
@@ -2066,7 +2128,15 @@ export async function deleteEvent(eventId: string): Promise<void> {
   const ev = await db.events.get(eventId);
   if (!ev) return;
   if (ev.type === 'trip_start') throw new Error('運行開始イベントは削除できません（運行ごと削除してください）');
-  await db.transaction('rw', db.events, db.routePoints, async () => {
+  const deletedAt = nowIso();
+  await db.transaction('rw', db.events, db.routePoints, db.deletedEventTombstones, async () => {
+    await db.deletedEventTombstones.put({
+      eventId: ev.id,
+      tripId: ev.tripId,
+      eventType: ev.type,
+      eventTs: ev.ts,
+      deletedAt,
+    });
     await db.events.delete(eventId);
     await db.routePoints.delete(getRoutePointAnchorId(eventId));
   });

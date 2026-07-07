@@ -120,3 +120,13 @@ export type RemoteDeletedTripTombstone = {
   deleted_by: string;
   deleted_at: string;
 };
+
+export type RemoteDeletedEventTombstone = {
+  event_id: string;
+  trip_id: string;
+  device_id: string;
+  event_type: string | null;
+  event_ts: string | null;
+  deleted_by: string;
+  deleted_at: string;
+};
