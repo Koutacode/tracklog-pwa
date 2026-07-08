@@ -31,16 +31,27 @@ const LOCATION_NOTIFICATION_TEXT_KEY = 'location_notification_text';
 const MAX_NOTIFICATION_TEXT_LENGTH = 40;
 const MAX_ADMIN_MESSAGE_BODY_LENGTH = 200;
 const ADMIN_MESSAGE_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
-const FIREBASE_PROJECT_ID = Deno.env.get('FIREBASE_PROJECT_ID') ?? '';
-const FIREBASE_CLIENT_EMAIL = Deno.env.get('FIREBASE_CLIENT_EMAIL') ?? '';
-const FIREBASE_PRIVATE_KEY = (Deno.env.get('FIREBASE_PRIVATE_KEY') ?? '').replace(/\\n/g, '\n');
+const FIREBASE_PROJECT_ID_ENV = Deno.env.get('FIREBASE_PROJECT_ID') ?? '';
+const FIREBASE_CLIENT_EMAIL_ENV = Deno.env.get('FIREBASE_CLIENT_EMAIL') ?? '';
+const FIREBASE_PRIVATE_KEY_ENV = (Deno.env.get('FIREBASE_PRIVATE_KEY') ?? '').replace(/\\n/g, '\n');
 const FIREBASE_TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const FIREBASE_MESSAGING_SCOPE = 'https://www.googleapis.com/auth/firebase.messaging';
+const FIREBASE_PROJECT_ID_SECRET_KEY = 'firebase_project_id';
+const FIREBASE_CLIENT_EMAIL_SECRET_KEY = 'firebase_client_email';
+const FIREBASE_PRIVATE_KEY_SECRET_KEY = 'firebase_private_key';
+const FIREBASE_CREDENTIALS_CACHE_MS = 5 * 60 * 1000;
 const PUSH_PROVIDER_FCM = 'fcm';
 const MAX_PUSH_FAILURES = 3;
 
-let firebaseAccessToken: { token: string; expiresAt: number } | null = null;
-let firebasePrivateKey: CryptoKey | null = null;
+type FirebaseCredentials = {
+  projectId: string;
+  clientEmail: string;
+  privateKey: string;
+};
+
+let firebaseCredentialsCache: { credentials: FirebaseCredentials | null; loadedAt: number } | null = null;
+let firebaseAccessToken: { token: string; expiresAt: number; cacheKey: string } | null = null;
+let firebasePrivateKey: { key: CryptoKey; cacheKey: string } | null = null;
 
 if (!supabaseUrl || !supabaseAnonKey || !supabaseServiceRoleKey) {
   console.error('TrackLog Edge Function is missing Supabase environment variables.');
@@ -107,8 +118,62 @@ function stringArray(value: unknown, key: string) {
   return Array.from(new Set(items)).slice(0, 50);
 }
 
-function isFcmConfigured() {
-  return !!(FIREBASE_PROJECT_ID && FIREBASE_CLIENT_EMAIL && FIREBASE_PRIVATE_KEY);
+function isCompleteFirebaseCredentials(credentials: FirebaseCredentials | null | undefined): credentials is FirebaseCredentials {
+  return !!(credentials?.projectId && credentials.clientEmail && credentials.privateKey);
+}
+
+function getEnvFirebaseCredentials(): FirebaseCredentials | null {
+  const credentials = {
+    projectId: FIREBASE_PROJECT_ID_ENV,
+    clientEmail: FIREBASE_CLIENT_EMAIL_ENV,
+    privateKey: FIREBASE_PRIVATE_KEY_ENV,
+  };
+  return isCompleteFirebaseCredentials(credentials) ? credentials : null;
+}
+
+function firebaseCredentialsCacheKey(credentials: FirebaseCredentials) {
+  return `${credentials.projectId}|${credentials.clientEmail}|${credentials.privateKey}`;
+}
+
+async function getFirebaseCredentials(): Promise<FirebaseCredentials | null> {
+  const envCredentials = getEnvFirebaseCredentials();
+  if (envCredentials) return envCredentials;
+
+  if (firebaseCredentialsCache && Date.now() - firebaseCredentialsCache.loadedAt < FIREBASE_CREDENTIALS_CACHE_MS) {
+    return firebaseCredentialsCache.credentials;
+  }
+
+  const { data, error } = await adminClient
+    .from('tracklog_server_secrets')
+    .select('key, value')
+    .in('key', [
+      FIREBASE_PROJECT_ID_SECRET_KEY,
+      FIREBASE_CLIENT_EMAIL_SECRET_KEY,
+      FIREBASE_PRIVATE_KEY_SECRET_KEY,
+    ]);
+  if (error) {
+    console.warn('[tracklog-privileged] Firebase FCM server secret lookup failed', error.message);
+    firebaseCredentialsCache = { credentials: null, loadedAt: Date.now() };
+    return null;
+  }
+
+  const values = new Map(
+    ((data ?? []) as JsonRecord[]).map(row => [textValue(row.key), textValue(row.value)]),
+  );
+  const credentials = {
+    projectId: values.get(FIREBASE_PROJECT_ID_SECRET_KEY) ?? '',
+    clientEmail: values.get(FIREBASE_CLIENT_EMAIL_SECRET_KEY) ?? '',
+    privateKey: (values.get(FIREBASE_PRIVATE_KEY_SECRET_KEY) ?? '').replace(/\\n/g, '\n'),
+  };
+  firebaseCredentialsCache = {
+    credentials: isCompleteFirebaseCredentials(credentials) ? credentials : null,
+    loadedAt: Date.now(),
+  };
+  return firebaseCredentialsCache.credentials;
+}
+
+async function isFcmConfigured() {
+  return isCompleteFirebaseCredentials(await getFirebaseCredentials());
 }
 
 function normalizePushPlatform(value: unknown) {
@@ -142,25 +207,27 @@ function pemToArrayBuffer(pem: string) {
   return bytes.buffer;
 }
 
-async function getFirebasePrivateKey() {
-  if (!firebasePrivateKey) {
-    firebasePrivateKey = await crypto.subtle.importKey(
+async function getFirebasePrivateKey(credentials: FirebaseCredentials) {
+  const cacheKey = firebaseCredentialsCacheKey(credentials);
+  if (!firebasePrivateKey || firebasePrivateKey.cacheKey !== cacheKey) {
+    const key = await crypto.subtle.importKey(
       'pkcs8',
-      pemToArrayBuffer(FIREBASE_PRIVATE_KEY),
+      pemToArrayBuffer(credentials.privateKey),
       { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
       false,
       ['sign'],
     );
+    firebasePrivateKey = { key, cacheKey };
   }
-  return firebasePrivateKey;
+  return firebasePrivateKey.key;
 }
 
-async function signFirebaseJwt() {
+async function signFirebaseJwt(credentials: FirebaseCredentials) {
   const issuedAt = Math.floor(Date.now() / 1000);
   const header = { alg: 'RS256', typ: 'JWT' };
   const claim = {
-    iss: FIREBASE_CLIENT_EMAIL,
-    sub: FIREBASE_CLIENT_EMAIL,
+    iss: credentials.clientEmail,
+    sub: credentials.clientEmail,
     aud: FIREBASE_TOKEN_URL,
     scope: FIREBASE_MESSAGING_SCOPE,
     iat: issuedAt,
@@ -169,21 +236,26 @@ async function signFirebaseJwt() {
   const input = `${base64UrlEncode(JSON.stringify(header))}.${base64UrlEncode(JSON.stringify(claim))}`;
   const signature = await crypto.subtle.sign(
     'RSASSA-PKCS1-v1_5',
-    await getFirebasePrivateKey(),
+    await getFirebasePrivateKey(credentials),
     new TextEncoder().encode(input),
   );
   return `${input}.${base64UrlEncode(signature)}`;
 }
 
-async function getFirebaseAccessToken() {
-  if (!isFcmConfigured()) {
+async function getFirebaseAccessToken(credentials: FirebaseCredentials) {
+  if (!isCompleteFirebaseCredentials(credentials)) {
     throw new Error('Firebase FCM secrets are not configured');
   }
-  if (firebaseAccessToken && firebaseAccessToken.expiresAt - Date.now() > 60_000) {
+  const cacheKey = firebaseCredentialsCacheKey(credentials);
+  if (
+    firebaseAccessToken &&
+    firebaseAccessToken.cacheKey === cacheKey &&
+    firebaseAccessToken.expiresAt - Date.now() > 60_000
+  ) {
     return firebaseAccessToken.token;
   }
 
-  const assertion = await signFirebaseJwt();
+  const assertion = await signFirebaseJwt(credentials);
   const resp = await fetch(FIREBASE_TOKEN_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -202,6 +274,7 @@ async function getFirebaseAccessToken() {
   firebaseAccessToken = {
     token,
     expiresAt: Date.now() + Math.max(60, expiresIn - 30) * 1000,
+    cacheKey,
   };
   return token;
 }
@@ -512,7 +585,7 @@ async function registerPushToken(payload: JsonRecord, user: TracklogUser, admin:
   if (error) throw new HttpError(500, `Push token registration failed: ${error.message}`);
   return {
     ...data,
-    pushConfigured: isFcmConfigured(),
+    pushConfigured: await isFcmConfigured(),
   };
 }
 
@@ -558,14 +631,14 @@ function getPwaLinkForMessage(message: JsonRecord) {
   return `https://tracklog-assist.pages.dev/?${params.toString()}`;
 }
 
-async function sendFcmMessage(registration: JsonRecord, message: JsonRecord) {
+async function sendFcmMessage(registration: JsonRecord, message: JsonRecord, credentials: FirebaseCredentials) {
   const token = textValue(registration.token);
   const platform = textValue(registration.platform);
   if (!token) throw new Error('Push token is empty');
-  const accessToken = await getFirebaseAccessToken();
+  const accessToken = await getFirebaseAccessToken(credentials);
   const data = getAdminPushData(message);
   const body = textValue(message.body);
-  const resp = await fetch(`https://fcm.googleapis.com/v1/projects/${FIREBASE_PROJECT_ID}/messages:send`, {
+  const resp = await fetch(`https://fcm.googleapis.com/v1/projects/${credentials.projectId}/messages:send`, {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${accessToken}`,
@@ -673,7 +746,8 @@ async function getPushTargetDeviceIds(targetDeviceId: string | null) {
 }
 
 async function sendPushForAdminMessage(message: JsonRecord) {
-  if (!isFcmConfigured()) {
+  const credentials = await getFirebaseCredentials();
+  if (!isCompleteFirebaseCredentials(credentials)) {
     console.warn('[tracklog-privileged] Firebase FCM secrets are not configured; admin message will be delivered by polling only.');
     return { configured: false, attempted: 0, sent: 0, failed: 0 };
   }
@@ -694,7 +768,7 @@ async function sendPushForAdminMessage(message: JsonRecord) {
   let failed = 0;
   for (const registration of (data ?? []) as JsonRecord[]) {
     try {
-      await sendFcmMessage(registration, message);
+      await sendFcmMessage(registration, message, credentials);
       sent += 1;
       await markPushDelivered(textValue(registration.id));
     } catch (pushError) {
@@ -725,9 +799,10 @@ async function sendAdminMessage(payload: JsonRecord, user: TracklogUser, admin: 
     .select('*')
     .single();
   if (error) throw new HttpError(500, `Admin message send failed: ${error.message}`);
-  const pushDelivery = await sendPushForAdminMessage(data as JsonRecord).catch(pushError => {
+  const pushDelivery = await sendPushForAdminMessage(data as JsonRecord).catch(async pushError => {
     console.error('[tracklog-privileged] Admin message push delivery failed', pushError);
-    return { configured: isFcmConfigured(), attempted: 0, sent: 0, failed: 1, error: 'push delivery failed' };
+    const credentials = await getFirebaseCredentials().catch(() => null);
+    return { configured: isCompleteFirebaseCredentials(credentials), attempted: 0, sent: 0, failed: 1, error: 'push delivery failed' };
   });
   return {
     ...(data as JsonRecord),
