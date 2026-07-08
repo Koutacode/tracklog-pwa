@@ -22,6 +22,9 @@ function formatDriverLoginError(error: any) {
   const raw = `${error?.message ?? error ?? ''}`.trim();
   if (!raw) return 'ログインに失敗しました';
   const normalized = raw.toLowerCase();
+  if (isCloudSyncCheckError(error)) {
+    return 'クラウド同期の確認に失敗しました。通信状態を確認して、もう一度ログインしてください。';
+  }
   if (
     normalized.includes('rate limit') ||
     normalized.includes('email rate limit') ||
@@ -33,6 +36,11 @@ function formatDriverLoginError(error: any) {
     return '認証コードが無効です。最新のメールで再度試してください。';
   }
   return raw;
+}
+
+function isCloudSyncCheckError(error: any) {
+  const raw = `${error?.message ?? error ?? ''}`.toLowerCase();
+  return raw.includes('edge function returned a non-2xx status code');
 }
 
 export default function DriverLoginScreen() {
@@ -66,7 +74,9 @@ export default function DriverLoginScreen() {
       .catch(error => {
         if (!active) return;
         setStatus('idle');
-        setMessage(formatDriverLoginError(error));
+        if (!isCloudSyncCheckError(error)) {
+          setMessage(formatDriverLoginError(error));
+        }
       });
     const unsubscribe = onDriverAuthStateChange(event => {
       if (event !== 'SIGNED_IN') return;

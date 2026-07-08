@@ -50,6 +50,9 @@ function formatDriverAuthError(error: any) {
   const raw = `${error?.message ?? error ?? ''}`.trim();
   if (!raw) return '認証に失敗しました';
   const normalized = raw.toLowerCase();
+  if (normalized.includes('edge function returned a non-2xx status code')) {
+    return 'クラウド同期の確認に失敗しました。通信状態を確認して、認証状態を更新してください。';
+  }
   if (
     normalized.includes('rate limit') ||
     normalized.includes('email rate limit') ||
