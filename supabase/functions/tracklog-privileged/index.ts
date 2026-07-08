@@ -31,6 +31,16 @@ const LOCATION_NOTIFICATION_TEXT_KEY = 'location_notification_text';
 const MAX_NOTIFICATION_TEXT_LENGTH = 40;
 const MAX_ADMIN_MESSAGE_BODY_LENGTH = 200;
 const ADMIN_MESSAGE_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
+const FIREBASE_PROJECT_ID = Deno.env.get('FIREBASE_PROJECT_ID') ?? '';
+const FIREBASE_CLIENT_EMAIL = Deno.env.get('FIREBASE_CLIENT_EMAIL') ?? '';
+const FIREBASE_PRIVATE_KEY = (Deno.env.get('FIREBASE_PRIVATE_KEY') ?? '').replace(/\\n/g, '\n');
+const FIREBASE_TOKEN_URL = 'https://oauth2.googleapis.com/token';
+const FIREBASE_MESSAGING_SCOPE = 'https://www.googleapis.com/auth/firebase.messaging';
+const PUSH_PROVIDER_FCM = 'fcm';
+const MAX_PUSH_FAILURES = 3;
+
+let firebaseAccessToken: { token: string; expiresAt: number } | null = null;
+let firebasePrivateKey: CryptoKey | null = null;
 
 if (!supabaseUrl || !supabaseAnonKey || !supabaseServiceRoleKey) {
   console.error('TrackLog Edge Function is missing Supabase environment variables.');
@@ -95,6 +105,112 @@ function stringArray(value: unknown, key: string) {
     .filter(item => item.length > 0);
   if (items.length === 0) throw new HttpError(400, `${key} is required`);
   return Array.from(new Set(items)).slice(0, 50);
+}
+
+function isFcmConfigured() {
+  return !!(FIREBASE_PROJECT_ID && FIREBASE_CLIENT_EMAIL && FIREBASE_PRIVATE_KEY);
+}
+
+function normalizePushPlatform(value: unknown) {
+  const platform = textValue(value).toLowerCase();
+  if (platform !== 'android' && platform !== 'web') {
+    throw new HttpError(400, 'platform must be android or web');
+  }
+  return platform;
+}
+
+function base64UrlEncode(input: string | ArrayBuffer) {
+  const bytes = typeof input === 'string'
+    ? new TextEncoder().encode(input)
+    : new Uint8Array(input);
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary)
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/g, '');
+}
+
+function pemToArrayBuffer(pem: string) {
+  const base64 = pem
+    .replace(/-----BEGIN PRIVATE KEY-----/g, '')
+    .replace(/-----END PRIVATE KEY-----/g, '')
+    .replace(/\s+/g, '');
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes.buffer;
+}
+
+async function getFirebasePrivateKey() {
+  if (!firebasePrivateKey) {
+    firebasePrivateKey = await crypto.subtle.importKey(
+      'pkcs8',
+      pemToArrayBuffer(FIREBASE_PRIVATE_KEY),
+      { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
+      false,
+      ['sign'],
+    );
+  }
+  return firebasePrivateKey;
+}
+
+async function signFirebaseJwt() {
+  const issuedAt = Math.floor(Date.now() / 1000);
+  const header = { alg: 'RS256', typ: 'JWT' };
+  const claim = {
+    iss: FIREBASE_CLIENT_EMAIL,
+    sub: FIREBASE_CLIENT_EMAIL,
+    aud: FIREBASE_TOKEN_URL,
+    scope: FIREBASE_MESSAGING_SCOPE,
+    iat: issuedAt,
+    exp: issuedAt + 3600,
+  };
+  const input = `${base64UrlEncode(JSON.stringify(header))}.${base64UrlEncode(JSON.stringify(claim))}`;
+  const signature = await crypto.subtle.sign(
+    'RSASSA-PKCS1-v1_5',
+    await getFirebasePrivateKey(),
+    new TextEncoder().encode(input),
+  );
+  return `${input}.${base64UrlEncode(signature)}`;
+}
+
+async function getFirebaseAccessToken() {
+  if (!isFcmConfigured()) {
+    throw new Error('Firebase FCM secrets are not configured');
+  }
+  if (firebaseAccessToken && firebaseAccessToken.expiresAt - Date.now() > 60_000) {
+    return firebaseAccessToken.token;
+  }
+
+  const assertion = await signFirebaseJwt();
+  const resp = await fetch(FIREBASE_TOKEN_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+      assertion,
+    }),
+  });
+  const json = await resp.json().catch(() => ({})) as JsonRecord;
+  if (!resp.ok) {
+    throw new Error(`Firebase OAuth failed: ${textValue(json.error_description) || textValue(json.error) || resp.status}`);
+  }
+  const token = textValue(json.access_token);
+  if (!token) throw new Error('Firebase OAuth response did not include an access token');
+  const expiresIn = typeof json.expires_in === 'number' ? json.expires_in : 3600;
+  firebaseAccessToken = {
+    token,
+    expiresAt: Date.now() + Math.max(60, expiresIn - 30) * 1000,
+  };
+  return token;
+}
+
+async function sha256Hex(value: string) {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
+  return Array.from(new Uint8Array(digest))
+    .map(byte => byte.toString(16).padStart(2, '0'))
+    .join('');
 }
 
 function requiredText(payload: JsonRecord, key: string) {
@@ -360,6 +476,236 @@ async function updateRuntimeConfig(payload: JsonRecord, user: TracklogUser, admi
   return getRuntimeConfig();
 }
 
+async function registerPushToken(payload: JsonRecord, user: TracklogUser, admin: boolean) {
+  const deviceId = requiredText(payload, 'deviceId');
+  const token = requiredText(payload, 'token');
+  const platform = normalizePushPlatform(payload.platform);
+  const profile = await getDeviceProfile(deviceId);
+  if (!profile) throw new HttpError(404, 'Device profile not found');
+  ensureDeviceOwner(profile, user, admin, 'Device profile');
+  if (!admin && textValue(profile.auth_user_id) !== user.id) {
+    throw new HttpError(403, 'Device profile is not assigned to this account');
+  }
+  if (textValue(profile.approval_status) !== 'approved') {
+    throw new HttpError(403, 'Device profile is not approved');
+  }
+
+  const now = nowIso();
+  const tokenHash = await sha256Hex(token);
+  const { data, error } = await adminClient
+    .from('tracklog_push_registrations')
+    .upsert({
+      device_id: deviceId,
+      auth_user_id: user.id,
+      provider: PUSH_PROVIDER_FCM,
+      platform,
+      token,
+      token_hash: tokenHash,
+      enabled: true,
+      failure_count: 0,
+      last_error: null,
+      updated_at: now,
+      last_seen_at: now,
+    }, { onConflict: 'provider,token_hash' })
+    .select('id, device_id, platform, enabled, updated_at, last_seen_at')
+    .single();
+  if (error) throw new HttpError(500, `Push token registration failed: ${error.message}`);
+  return {
+    ...data,
+    pushConfigured: isFcmConfigured(),
+  };
+}
+
+async function unregisterPushToken(payload: JsonRecord, user: TracklogUser, admin: boolean) {
+  const deviceId = requiredText(payload, 'deviceId');
+  const token = requiredText(payload, 'token');
+  const profile = await getDeviceProfile(deviceId);
+  if (!profile) throw new HttpError(404, 'Device profile not found');
+  ensureDeviceOwner(profile, user, admin, 'Device profile');
+  if (!admin && textValue(profile.auth_user_id) !== user.id) {
+    throw new HttpError(403, 'Device profile is not assigned to this account');
+  }
+
+  const tokenHash = await sha256Hex(token);
+  const { error, count } = await adminClient
+    .from('tracklog_push_registrations')
+    .update({
+      enabled: false,
+      updated_at: nowIso(),
+    }, { count: 'exact' })
+    .eq('provider', PUSH_PROVIDER_FCM)
+    .eq('token_hash', tokenHash)
+    .eq('device_id', deviceId);
+  if (error) throw new HttpError(500, `Push token unregister failed: ${error.message}`);
+  return { disabledCount: count ?? 0 };
+}
+
+function getAdminPushData(message: JsonRecord) {
+  const requestLocation = booleanValue(message.request_location, true);
+  return {
+    kind: 'tracklog_admin_message_v1',
+    messageId: textValue(message.id),
+    requestLocation: requestLocation ? 'true' : 'false',
+    sentAt: textValue(message.sent_at),
+  };
+}
+
+function getPwaLinkForMessage(message: JsonRecord) {
+  const params = new URLSearchParams({
+    tracklogPushMessageId: textValue(message.id),
+    tracklogRequestLocation: booleanValue(message.request_location, true) ? '1' : '0',
+  });
+  return `https://tracklog-assist.pages.dev/?${params.toString()}`;
+}
+
+async function sendFcmMessage(registration: JsonRecord, message: JsonRecord) {
+  const token = textValue(registration.token);
+  const platform = textValue(registration.platform);
+  if (!token) throw new Error('Push token is empty');
+  const accessToken = await getFirebaseAccessToken();
+  const data = getAdminPushData(message);
+  const body = textValue(message.body);
+  const resp = await fetch(`https://fcm.googleapis.com/v1/projects/${FIREBASE_PROJECT_ID}/messages:send`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      message: {
+        token,
+        notification: {
+          title: 'TrackLog',
+          body,
+        },
+        data,
+        android: {
+          priority: 'HIGH',
+          notification: {
+            channel_id: 'tracklog_admin_messages',
+            title: 'TrackLog',
+            body,
+            click_action: 'TRACKLOG_ADMIN_MESSAGE',
+          },
+        },
+        webpush: {
+          headers: {
+            TTL: '3600',
+            Urgency: 'high',
+          },
+          notification: {
+            title: 'TrackLog',
+            body,
+            tag: `tracklog-admin-${textValue(message.id)}`,
+            renotify: true,
+            data,
+            actions: booleanValue(message.request_location, true)
+              ? [{ action: 'update_location', title: '現在地更新' }]
+              : [],
+          },
+          fcm_options: {
+            link: getPwaLinkForMessage(message),
+          },
+        },
+      },
+    }),
+  });
+  const json = await resp.json().catch(() => ({})) as JsonRecord;
+  if (!resp.ok) {
+    const error = json.error as JsonRecord | undefined;
+    const status = textValue(error?.status) || textValue(json.error) || String(resp.status);
+    const details = typeof error?.message === 'string' ? error.message : '';
+    const permanent =
+      resp.status === 404 ||
+      status === 'UNREGISTERED' ||
+      (resp.status === 400 && (status === 'INVALID_ARGUMENT' || details.includes('registration token')));
+    throw Object.assign(new Error(`${status}${details ? `: ${details}` : ''}`), {
+      permanent,
+      responseStatus: resp.status,
+      platform,
+    });
+  }
+  return textValue(json.name) || 'sent';
+}
+
+async function markPushDelivered(registrationId: string) {
+  const { error } = await adminClient
+    .from('tracklog_push_registrations')
+    .update({
+      failure_count: 0,
+      last_error: null,
+      updated_at: nowIso(),
+      last_seen_at: nowIso(),
+    })
+    .eq('id', registrationId);
+  if (error) console.error('[tracklog-privileged] push delivery state update failed', error.message);
+}
+
+async function markPushFailed(registration: JsonRecord, error: unknown) {
+  const registrationId = textValue(registration.id);
+  if (!registrationId) return;
+  const message = error instanceof Error ? error.message : 'Push delivery failed';
+  const nextFailureCount = (typeof registration.failure_count === 'number' ? registration.failure_count : 0) + 1;
+  const permanent = error instanceof Error && (error as Error & { permanent?: boolean }).permanent === true;
+  const { error: updateError } = await adminClient
+    .from('tracklog_push_registrations')
+    .update({
+      enabled: permanent || nextFailureCount >= MAX_PUSH_FAILURES ? false : true,
+      failure_count: nextFailureCount,
+      last_error: limitCharacters(message, 500),
+      updated_at: nowIso(),
+    })
+    .eq('id', registrationId);
+  if (updateError) console.error('[tracklog-privileged] push failure state update failed', updateError.message);
+}
+
+async function getPushTargetDeviceIds(targetDeviceId: string | null) {
+  if (targetDeviceId) return [targetDeviceId];
+  const { data, error } = await adminClient
+    .from('device_profiles')
+    .select('device_id')
+    .eq('approval_status', 'approved')
+    .limit(500);
+  if (error) throw new Error(`Push target lookup failed: ${error.message}`);
+  return (data ?? [])
+    .map(row => textValue((row as JsonRecord).device_id))
+    .filter(deviceId => deviceId.length > 0);
+}
+
+async function sendPushForAdminMessage(message: JsonRecord) {
+  if (!isFcmConfigured()) {
+    console.warn('[tracklog-privileged] Firebase FCM secrets are not configured; admin message will be delivered by polling only.');
+    return { configured: false, attempted: 0, sent: 0, failed: 0 };
+  }
+
+  const targetDeviceIds = await getPushTargetDeviceIds(nullableText(message.target_device_id));
+  if (targetDeviceIds.length === 0) return { configured: true, attempted: 0, sent: 0, failed: 0 };
+
+  const { data, error } = await adminClient
+    .from('tracklog_push_registrations')
+    .select('id, device_id, platform, token, failure_count')
+    .eq('provider', PUSH_PROVIDER_FCM)
+    .eq('enabled', true)
+    .in('device_id', targetDeviceIds)
+    .limit(1000);
+  if (error) throw new Error(`Push token lookup failed: ${error.message}`);
+
+  let sent = 0;
+  let failed = 0;
+  for (const registration of (data ?? []) as JsonRecord[]) {
+    try {
+      await sendFcmMessage(registration, message);
+      sent += 1;
+      await markPushDelivered(textValue(registration.id));
+    } catch (pushError) {
+      failed += 1;
+      console.error('[tracklog-privileged] FCM delivery failed', pushError);
+      await markPushFailed(registration, pushError);
+    }
+  }
+  return { configured: true, attempted: (data ?? []).length, sent, failed };
+}
+
 async function sendAdminMessage(payload: JsonRecord, user: TracklogUser, admin: boolean) {
   await requireAdmin(user, admin);
   const targetDeviceId = nullableText(payload.targetDeviceId);
@@ -379,7 +725,14 @@ async function sendAdminMessage(payload: JsonRecord, user: TracklogUser, admin: 
     .select('*')
     .single();
   if (error) throw new HttpError(500, `Admin message send failed: ${error.message}`);
-  return data;
+  const pushDelivery = await sendPushForAdminMessage(data as JsonRecord).catch(pushError => {
+    console.error('[tracklog-privileged] Admin message push delivery failed', pushError);
+    return { configured: isFcmConfigured(), attempted: 0, sent: 0, failed: 1, error: 'push delivery failed' };
+  });
+  return {
+    ...(data as JsonRecord),
+    push_delivery: pushDelivery,
+  };
 }
 
 async function listPendingAdminMessages(payload: JsonRecord, user: TracklogUser, admin: boolean) {
@@ -565,6 +918,8 @@ Deno.serve(async (req: Request) => {
     let data: unknown;
     if (action === 'getRuntimeConfig') data = await getRuntimeConfig();
     else if (action === 'updateRuntimeConfig') data = await updateRuntimeConfig(payload, user, admin);
+    else if (action === 'registerPushToken') data = await registerPushToken(payload, user, admin);
+    else if (action === 'unregisterPushToken') data = await unregisterPushToken(payload, user, admin);
     else if (action === 'sendAdminMessage') data = await sendAdminMessage(payload, user, admin);
     else if (action === 'listPendingAdminMessages') data = await listPendingAdminMessages(payload, user, admin);
     else if (action === 'ackAdminMessages') data = await ackAdminMessages(payload, user, admin);

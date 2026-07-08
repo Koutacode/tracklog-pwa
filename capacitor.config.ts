@@ -1,3 +1,5 @@
+/// <reference types="@capacitor/push-notifications" />
+
 import { CapacitorConfig } from '@capacitor/cli';
 
 const config: CapacitorConfig = {
@@ -10,6 +12,11 @@ const config: CapacitorConfig = {
   },
   android: {
     useLegacyBridge: true,
+  },
+  plugins: {
+    PushNotifications: {
+      presentationOptions: ['banner', 'list', 'sound'],
+    },
   },
 };
 

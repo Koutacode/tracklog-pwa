@@ -44,6 +44,13 @@ export type TracklogAdminMessage = {
   request_location: boolean;
   sent_by: string | null;
   sent_at: string;
+  push_delivery?: {
+    configured: boolean;
+    attempted: number;
+    sent: number;
+    failed: number;
+    error?: string;
+  };
 };
 
 export type RemoteCloudMaintenanceResult = {

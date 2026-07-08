@@ -30,6 +30,7 @@ import {
 } from '../services/locationHeartbeat';
 import { loadTracklogRuntimeConfig } from '../services/runtimeConfig';
 import { pollTracklogAdminMessages } from '../services/adminMessages';
+import { ensureTracklogPushRegistration } from '../services/pushRegistration';
 
 function hasOpenRest(events: AppEvent[]) {
   const starts = events.filter(e => e.type === 'rest_start').sort((a, b) => a.ts.localeCompare(b.ts));
@@ -115,6 +116,7 @@ export default function RouteTrackingSupervisor() {
         setLocationNotificationText(runtimeConfig.locationNotificationText);
         startLocationHeartbeat();
         await startResidentLocationUpdates('battery');
+        await ensureTracklogPushRegistration();
         maybeRequestForegroundHeartbeat();
         await pollTracklogAdminMessages();
 

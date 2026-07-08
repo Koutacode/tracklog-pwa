@@ -319,7 +319,7 @@ export default function AdminDashboard() {
     setError(null);
     setNotice(null);
     try {
-      await sendAdminMessage({
+      const sentMessage = await sendAdminMessage({
         targetDeviceId: adminMessageTargetDeviceId || null,
         body,
         requestLocation: adminMessageRequestLocation,
@@ -329,7 +329,15 @@ export default function AdminDashboard() {
       const targetLabel = adminMessageTargetDeviceId
         ? (targetDevice ? getDisplayName(targetDevice) : adminMessageTargetDeviceId)
         : '全承認端末';
-      setNotice(`${targetLabel} へメッセージを送信しました`);
+      const delivery = sentMessage.push_delivery;
+      const deliveryLabel = delivery
+        ? (
+          delivery.configured
+            ? ` / push ${delivery.sent}/${delivery.attempted}件`
+            : ' / push未設定のため同期受信'
+        )
+        : '';
+      setNotice(`${targetLabel} へメッセージを送信しました${deliveryLabel}`);
     } catch (err: any) {
       setError(err?.message ?? '管理者メッセージの送信に失敗しました');
     } finally {

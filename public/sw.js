@@ -1,4 +1,4 @@
-const CACHE_NAME = 'tracklog-shell-v2';
+const CACHE_NAME = 'tracklog-shell-v3';
 const PRECACHE = ['/', '/manifest.webmanifest', '/apple-touch-icon.png', '/pwa-192.png', '/pwa-512.png'];
 
 async function fetchAndCache(request) {
@@ -33,6 +33,83 @@ self.addEventListener('message', event => {
   if (event.data?.type === 'SKIP_WAITING') {
     self.skipWaiting();
   }
+});
+
+function readPushJson(event) {
+  if (!event.data) return {};
+  try {
+    return event.data.json();
+  } catch {
+    try {
+      return { notification: { body: event.data.text() } };
+    } catch {
+      return {};
+    }
+  }
+}
+
+function textValue(value) {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function booleanValue(value, fallback) {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'string') return value === 'true' || value === '1';
+  return fallback;
+}
+
+function normalizePushPayload(payload) {
+  const data = payload.data || payload.notification?.data || {};
+  const notification = payload.notification || payload.webpush?.notification || {};
+  return {
+    title: textValue(notification.title) || textValue(data.title) || 'TrackLog',
+    body: textValue(notification.body) || textValue(data.body) || '管理者メッセージがあります',
+    messageId: textValue(data.messageId),
+    requestLocation: booleanValue(data.requestLocation, true),
+  };
+}
+
+self.addEventListener('push', event => {
+  const payload = normalizePushPayload(readPushJson(event));
+  if (!payload.messageId) return;
+  event.waitUntil(
+    self.registration.showNotification(payload.title, {
+      body: payload.body,
+      tag: `tracklog-admin-${payload.messageId}`,
+      renotify: true,
+      data: {
+        type: 'TRACKLOG_ADMIN_PUSH_CLICK',
+        messageId: payload.messageId,
+        requestLocation: payload.requestLocation,
+      },
+      actions: payload.requestLocation
+        ? [{ action: 'update_location', title: '現在地更新' }]
+        : [],
+    }),
+  );
+});
+
+self.addEventListener('notificationclick', event => {
+  const data = event.notification?.data || {};
+  event.notification.close();
+  if (data.type !== 'TRACKLOG_ADMIN_PUSH_CLICK' || !data.messageId) return;
+  const targetUrl = new URL('/', self.location.origin);
+  targetUrl.searchParams.set('tracklogPushMessageId', data.messageId);
+  targetUrl.searchParams.set('tracklogRequestLocation', data.requestLocation ? '1' : '0');
+
+  event.waitUntil((async () => {
+    const clientsList = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    for (const client of clientsList) {
+      if ('focus' in client) {
+        client.postMessage(data);
+        await client.focus();
+        return;
+      }
+    }
+    if (self.clients.openWindow) {
+      await self.clients.openWindow(targetUrl.toString());
+    }
+  })());
 });
 
 self.addEventListener('fetch', event => {

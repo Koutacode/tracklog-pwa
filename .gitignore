@@ -6,6 +6,7 @@ pnpm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 android/local.properties
+android/app/google-services.json
 android/app/build-alt/
 android/app/build-*/
 .env.local

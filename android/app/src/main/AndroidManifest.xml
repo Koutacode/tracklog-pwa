@@ -40,7 +40,16 @@
                 <data android:scheme="@string/custom_url_scheme" android:host="auth" />
             </intent-filter>
 
+            <intent-filter>
+                <action android:name="TRACKLOG_ADMIN_MESSAGE" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+
         </activity>
+
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_channel_id"
+            android:value="@string/default_notification_channel_id" />
 
         <provider
             android:name="androidx.core.content.FileProvider"

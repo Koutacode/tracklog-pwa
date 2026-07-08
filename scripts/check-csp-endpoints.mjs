@@ -13,6 +13,9 @@ const requiredConnectSources = [
   { source: 'https://maps.mail.ru', reason: 'IC / expressway fallback resolution' },
   { source: 'https://overpass-api.de', reason: 'IC / expressway resolution' },
   { source: 'https://router.project-osrm.org', reason: 'route map correction' },
+  { source: 'https://firebaseinstallations.googleapis.com', reason: 'Firebase web push installation token' },
+  { source: 'https://fcmregistrations.googleapis.com', reason: 'Firebase web push registration token' },
+  { source: 'https://firebaselogging.googleapis.com', reason: 'Firebase push delivery/open metrics' },
 ];
 
 const cspMatch = indexHtml.match(

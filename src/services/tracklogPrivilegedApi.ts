@@ -11,6 +11,8 @@ type FunctionResponse<T> = {
 type PrivilegedAction =
   | 'getRuntimeConfig'
   | 'updateRuntimeConfig'
+  | 'registerPushToken'
+  | 'unregisterPushToken'
   | 'sendAdminMessage'
   | 'listPendingAdminMessages'
   | 'ackAdminMessages'
@@ -89,6 +91,40 @@ export async function sendTracklogAdminMessageViaFunction(input: {
 }): Promise<TracklogAdminMessage> {
   const client = requireClient(adminSupabase);
   return invokeTracklogPrivileged<TracklogAdminMessage>(client, 'sendAdminMessage', input);
+}
+
+export async function registerTracklogPushTokenViaFunction(input: {
+  deviceId: string;
+  platform: 'android' | 'web';
+  token: string;
+}): Promise<{
+  id: string;
+  device_id: string;
+  platform: 'android' | 'web';
+  enabled: boolean;
+  pushConfigured: boolean;
+  updated_at?: string | null;
+  last_seen_at?: string | null;
+}> {
+  const client = requireClient(driverSupabase);
+  return invokeTracklogPrivileged<{
+    id: string;
+    device_id: string;
+    platform: 'android' | 'web';
+    enabled: boolean;
+    pushConfigured: boolean;
+    updated_at?: string | null;
+    last_seen_at?: string | null;
+  }>(client, 'registerPushToken', input);
+}
+
+export async function unregisterTracklogPushTokenViaFunction(input: {
+  deviceId: string;
+  token: string;
+}): Promise<number> {
+  const client = requireClient(driverSupabase);
+  const result = await invokeTracklogPrivileged<{ disabledCount: number }>(client, 'unregisterPushToken', input);
+  return result.disabledCount;
 }
 
 export async function listPendingTracklogAdminMessagesViaFunction(input: {
