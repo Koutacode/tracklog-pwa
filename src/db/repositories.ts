@@ -63,6 +63,7 @@ const IC_RESOLVE_ALGORITHM_VERSION = 7;
 const IC_RESOLVE_BACKOFF_BASE_MS = 2 * 60 * 1000;
 const IC_RESOLVE_BACKOFF_CAP_MS = 60 * 60 * 1000;
 const EXPRESSWAY_EVENT_TYPES = ['expressway', 'expressway_start', 'expressway_end'] as const;
+const REPORT_MIN_DURATION_MINUTES = 15;
 
 export type AutoExpresswayConfig = {
   speedKmh: number;
@@ -1028,7 +1029,7 @@ export async function startRest(params: {
     geo: params.geo,
     address: params.address,
     syncStatus: 'pending',
-    extras: { restSessionId, odoKm: params.odoKm },
+    extras: { restSessionId, odoKm: params.odoKm, reportMinDurationMinutes: REPORT_MIN_DURATION_MINUTES },
   };
   await addEvent(e);
   return { restSessionId, event: e };
@@ -1165,7 +1166,7 @@ export async function startLoad(params: { tripId: string; geo?: Geo; address?: s
     type: 'load_start',
     geo: params.geo,
     address: params.address,
-    extras: { loadSessionId },
+    extras: { loadSessionId, reportMinDurationMinutes: REPORT_MIN_DURATION_MINUTES },
   });
   await addEvent(e);
   return { loadSessionId };
@@ -1196,7 +1197,7 @@ export async function startUnload(params: { tripId: string; geo?: Geo; address?:
     type: 'unload_start',
     geo: params.geo,
     address: params.address,
-    extras: { unloadSessionId },
+    extras: { unloadSessionId, reportMinDurationMinutes: REPORT_MIN_DURATION_MINUTES },
   });
   await addEvent(e);
   return { unloadSessionId };
@@ -1227,7 +1228,7 @@ export async function startBreak(params: { tripId: string; geo?: Geo; address?: 
     type: 'break_start',
     geo: params.geo,
     address: params.address,
-    extras: { breakSessionId },
+    extras: { breakSessionId, reportMinDurationMinutes: REPORT_MIN_DURATION_MINUTES },
   });
   await addEvent(e);
   return { breakSessionId };
@@ -1304,6 +1305,7 @@ export async function addBoarding(
         extras: {
           restSessionId: uuid(),
           odoKm: fallbackOdoKm!,
+          reportMinDurationMinutes: REPORT_MIN_DURATION_MINUTES,
         },
       };
       await putEventWithRoutePointTx(restStart);
@@ -1317,7 +1319,7 @@ export async function addBoarding(
       geo: params.geo,
       address: params.address,
       syncStatus: 'pending',
-      extras: { ferrySessionId },
+      extras: { ferrySessionId, reportMinDurationMinutes: REPORT_MIN_DURATION_MINUTES },
     } as AppEvent);
   });
   notifyRemoteMutation('ferry-boarding');

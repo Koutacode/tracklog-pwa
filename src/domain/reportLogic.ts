@@ -30,6 +30,7 @@ const REQUIRED_CONTINUOUS_DRIVE_RESET_MIN = 30;
 const LONG_DISTANCE_THRESHOLD_KM = 450;
 const DAY_TOTAL_MIN = 24 * 60;
 const QUARTER_MIN = 15;
+const REPORT_MIN_DURATION_EXTRA_KEY = 'reportMinDurationMinutes';
 
 // --- UTC→JST offset ---
 const JST_OFFSET_MS = 9 * 60 * 60 * 1000;
@@ -550,6 +551,44 @@ type DayState = {
   tripActive: boolean;
 };
 
+type ReportMinDurationPair = {
+  startType: TripEventType;
+  endType: TripEventType;
+  sessionKey: string;
+};
+
+const REPORT_MIN_DURATION_PAIRS: ReportMinDurationPair[] = [
+  { startType: 'rest_start', endType: 'rest_end', sessionKey: 'restSessionId' },
+  { startType: 'break_start', endType: 'break_end', sessionKey: 'breakSessionId' },
+  { startType: 'load_start', endType: 'load_end', sessionKey: 'loadSessionId' },
+  { startType: 'unload_start', endType: 'unload_end', sessionKey: 'unloadSessionId' },
+  { startType: 'boarding', endType: 'disembark', sessionKey: 'ferrySessionId' },
+];
+
+function getReportMinDurationMinutes(event: TripEvent): number {
+  const value = Number(event.extras?.[REPORT_MIN_DURATION_EXTRA_KEY]);
+  if (!Number.isFinite(value) || value <= 0) return 0;
+  return Math.min(DAY_TOTAL_MIN, Math.max(0, Math.round(value)));
+}
+
+function getEventSessionId(event: TripEvent, key: string): string | undefined {
+  const value = event.extras?.[key];
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function getMinDurationStartPair(type: TripEventType): ReportMinDurationPair | undefined {
+  return REPORT_MIN_DURATION_PAIRS.find(pair => pair.startType === type);
+}
+
+function getMinDurationEndPair(type: TripEventType): ReportMinDurationPair | undefined {
+  return REPORT_MIN_DURATION_PAIRS.find(pair => pair.endType === type);
+}
+
+function buildOpenMinDurationKey(pair: ReportMinDurationPair, event: TripEvent, fallbackIndex: number): string {
+  const sessionId = getEventSessionId(event, pair.sessionKey);
+  return `${pair.startType}:${pair.endType}:${sessionId ?? `event-${fallbackIndex}`}`;
+}
+
 function getReportWindow(
   day: DayRecord,
   events: TripEvent[],
@@ -668,7 +707,10 @@ function categoryAfterEvent(
 function buildRoundedIntervals(day: DayRecord, currentTs?: string): RoundedInterval[] {
   const events = [...day.events].sort((a, b) => a.ts.localeCompare(b.ts));
   const { startMin: windowStart, endMin: windowEnd } = getReportWindow(day, events, currentTs);
-  if (windowEnd <= windowStart) {
+  const hasReportMinDurationStart = events.some(event =>
+    getMinDurationStartPair(event.type) && getReportMinDurationMinutes(event) > 0,
+  );
+  if (windowEnd <= windowStart && !hasReportMinDurationStart) {
     return [];
   }
 
@@ -690,20 +732,62 @@ function buildRoundedIntervals(day: DayRecord, currentTs?: string): RoundedInter
   const initialState = inferInitialState(day, scopedEvents);
   let tripActive = initialState.tripActive;
   let currentCategory = initialState.category;
+  const activeMinDurations = new Map<string, { startMin: number; minutes: number }>();
 
-  for (const event of scopedEvents) {
-    const boundary = roundToQuarterMinutes(minuteOfDayExactJst(day.dateKey, event.ts));
+  for (let index = 0; index < scopedEvents.length; index++) {
+    const event = scopedEvents[index];
+    const rawBoundary = roundToQuarterMinutes(minuteOfDayExactJst(day.dateKey, event.ts));
+    let boundary = Math.max(rawBoundary, cursor);
+    const endPair = getMinDurationEndPair(event.type);
+    let activeMinKey: string | undefined;
+    if (endPair) {
+      const sessionId = getEventSessionId(event, endPair.sessionKey);
+      if (sessionId) {
+        activeMinKey = `${endPair.startType}:${endPair.endType}:${sessionId}`;
+      } else {
+        const prefix = `${endPair.startType}:${endPair.endType}:`;
+        activeMinKey = Array.from(activeMinDurations.keys())
+          .filter(key => key.startsWith(prefix))
+          .pop();
+      }
+      const activeMin = activeMinKey ? activeMinDurations.get(activeMinKey) : undefined;
+      if (activeMin) {
+        boundary = Math.max(
+          boundary,
+          Math.min(DAY_TOTAL_MIN, activeMin.startMin + activeMin.minutes),
+        );
+      }
+    }
+
     if (boundary > cursor) {
       intervals.push({ startMin: cursor, endMin: boundary, category: currentCategory });
     }
     const next = categoryAfterEvent(event.type, currentCategory, tripActive);
     currentCategory = next.category;
     tripActive = next.tripActive;
+    const startPair = getMinDurationStartPair(event.type);
+    if (startPair) {
+      const minDuration = getReportMinDurationMinutes(event);
+      if (minDuration > 0) {
+        activeMinDurations.set(buildOpenMinDurationKey(startPair, event, index), {
+          startMin: boundary,
+          minutes: minDuration,
+        });
+      }
+    }
+    if (activeMinKey) {
+      activeMinDurations.delete(activeMinKey);
+    }
     cursor = boundary;
   }
 
-  if (cursor < windowEnd) {
-    intervals.push({ startMin: cursor, endMin: windowEnd, category: currentCategory });
+  let finalEnd = windowEnd;
+  for (const activeMin of activeMinDurations.values()) {
+    finalEnd = Math.max(finalEnd, Math.min(DAY_TOTAL_MIN, activeMin.startMin + activeMin.minutes));
+  }
+
+  if (cursor < finalEnd) {
+    intervals.push({ startMin: cursor, endMin: finalEnd, category: currentCategory });
   }
 
   const merged: RoundedInterval[] = [];
@@ -740,7 +824,12 @@ function buildRoundedPairDetails(
     const end = ends[i];
     const startMin = roundToQuarterMinutes(minuteOfDayExactJst(day.dateKey, start.ts));
     const endMin = roundToQuarterMinutes(minuteOfDayExactJst(day.dateKey, end.ts));
-    const safeEnd = Math.max(startMin, endMin);
+    const minDuration = getReportMinDurationMinutes(start);
+    const safeEnd = Math.max(
+      startMin,
+      endMin,
+      minDuration > 0 ? Math.min(DAY_TOTAL_MIN, startMin + minDuration) : startMin,
+    );
     details.push({
       startTs: utcFromJstMinute(day.dateKey, startMin),
       endTs: utcFromJstMinute(day.dateKey, safeEnd),
@@ -973,12 +1062,17 @@ function buildTripFerrySegmentsByDay(days: DayRecord[]): Map<number, TimeSegment
       const roundedEndMin = roundToQuarterMinutes(
         minuteOfDayExactJst(day.dateKey, new Date(overlapEndMs).toISOString()),
       );
-      if (roundedEndMin <= roundedStartMin) continue;
+      const minDuration = start.dayIndex === day.dayIndex ? getReportMinDurationMinutes(start) : 0;
+      const safeEndMin = Math.max(
+        roundedEndMin,
+        minDuration > 0 ? Math.min(DAY_TOTAL_MIN, roundedStartMin + minDuration) : roundedEndMin,
+      );
+      if (safeEndMin <= roundedStartMin) continue;
       const entry = byDay.get(day.dayIndex) ?? [];
       entry.push({
         startTs: utcFromJstMinute(day.dateKey, roundedStartMin),
-        endTs: utcFromJstMinute(day.dateKey, roundedEndMin),
-        durationMinutes: roundedEndMin - roundedStartMin,
+        endTs: utcFromJstMinute(day.dateKey, safeEndMin),
+        durationMinutes: safeEndMin - roundedStartMin,
         continuesFromPreviousDay: overlapStartMs > startMs,
         continuesToNextDay: overlapEndMs < endMs,
       });
