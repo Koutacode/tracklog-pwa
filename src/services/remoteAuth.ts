@@ -9,6 +9,14 @@ import {
   claimTracklogDeviceProfileViaFunction,
   migrateTracklogDeviceRecordsViaFunction,
 } from './tracklogPrivilegedApi';
+import {
+  assertValidDriverProfile,
+  normalizeEmailInput,
+  normalizePhoneInput,
+  normalizeVehicleLabelInput,
+  sameEmailAddress,
+  validateDriverProfile,
+} from './driverProfileValidation';
 
 const META_DEVICE_ID = 'device_id';
 const META_DEVICE_DISPLAY_NAME = 'device_display_name';
@@ -49,7 +57,7 @@ function normalizeText(value: string | null | undefined) {
 }
 
 function normalizeEmail(value: string | null | undefined) {
-  return normalizeText(value).toLowerCase();
+  return normalizeEmailInput(value);
 }
 
 function normalizeApprovalStatus(value: string | null | undefined): DriverApprovalStatus {
@@ -114,7 +122,7 @@ export function isDriverProfileComplete(input: {
   if (!input.requireContactInfo) {
     return displayName.length > 0 && vehicleLabel.length > 0;
   }
-  return displayName.length > 0 && vehicleLabel.length > 0 && phone.length > 0 && email.length > 0;
+  return validateDriverProfile({ displayName, vehicleLabel, email, phone }).valid;
 }
 
 function isLegacyAnonymousDeviceId(deviceId?: string | null) {
@@ -329,22 +337,12 @@ export async function setDriverProfileLocal(input: {
   phone?: string;
   email?: string;
 }) {
-  const trimmedDisplayName = input.displayName.trim();
-  if (!trimmedDisplayName) {
-    throw new Error('表示名を入力してください');
-  }
-  const trimmedVehicleLabel = input.vehicleLabel?.trim() ?? '';
-  if (!trimmedVehicleLabel) {
-    throw new Error('車番・識別名を入力してください');
-  }
-  const trimmedPhone = input.phone?.trim() ?? '';
-  const trimmedEmail = normalizeEmail(input.email);
-  if (!trimmedPhone) {
-    throw new Error('電話番号を入力してください');
-  }
-  if (!trimmedEmail) {
-    throw new Error('メールアドレスを入力してください');
-  }
+  const normalized = assertValidDriverProfile({
+    displayName: input.displayName,
+    vehicleLabel: input.vehicleLabel,
+    phone: input.phone,
+    email: input.email,
+  });
 
   const [
     confirmed,
@@ -364,7 +362,7 @@ export async function setDriverProfileLocal(input: {
     getMeta(META_DRIVER_PHONE),
   ]);
   const lockedEmail = normalizeEmail(sessionProfile?.email) || (confirmed === 'true' ? normalizeEmail(savedEmail) : '');
-  if (lockedEmail && trimmedEmail !== lockedEmail) {
+  if (lockedEmail && !sameEmailAddress(normalized.email, lockedEmail)) {
     throw new Error(`この端末は ${lockedEmail} のアカウントに紐づいています。別メールで使う場合は管理者に切替を依頼してください。`);
   }
 
@@ -380,28 +378,28 @@ export async function setDriverProfileLocal(input: {
     });
   if (
     profileLocked &&
-    (trimmedDisplayName !== normalizeText(savedDisplayName) ||
-      trimmedVehicleLabel !== normalizeText(savedVehicleLabel) ||
-      trimmedPhone !== normalizeText(savedDriverPhone))
+    (normalized.displayName !== normalizeText(savedDisplayName) ||
+      normalized.vehicleLabel !== normalizeVehicleLabelInput(savedVehicleLabel) ||
+      normalized.phone !== normalizePhoneInput(savedDriverPhone))
   ) {
     throw new Error('登録済みの端末プロフィールは変更できません。変更が必要な場合は管理者に依頼してください。');
   }
 
   await Promise.all([
-    setMeta(META_DEVICE_DISPLAY_NAME, trimmedDisplayName),
-    setMeta(META_DEVICE_VEHICLE_LABEL, trimmedVehicleLabel),
-    setMeta(META_DRIVER_PHONE, trimmedPhone),
-    setMeta(META_DRIVER_EMAIL, trimmedEmail),
+    setMeta(META_DEVICE_DISPLAY_NAME, normalized.displayName),
+    setMeta(META_DEVICE_VEHICLE_LABEL, normalized.vehicleLabel),
+    setMeta(META_DRIVER_PHONE, normalized.phone),
+    setMeta(META_DRIVER_EMAIL, normalized.email),
   ]);
 
   const identity = await getDriverIdentity();
   if (identity.configured && identity.authInitialized && identity.deviceId) {
     const claimedProfile = await claimTracklogDeviceProfile({
       deviceId: identity.deviceId,
-      displayName: trimmedDisplayName,
-      vehicleLabel: trimmedVehicleLabel,
-      driverPhone: trimmedPhone,
-      driverEmail: trimmedEmail,
+      displayName: normalized.displayName,
+      vehicleLabel: normalized.vehicleLabel,
+      driverPhone: normalized.phone,
+      driverEmail: normalized.email,
     });
     await setMeta(META_DRIVER_APPROVAL_STATUS, normalizeApprovalStatus(claimedProfile?.approval_status));
   }
@@ -445,15 +443,32 @@ export async function getAdminSession(): Promise<AdminSession> {
     return {
       configured: false,
       authenticated: false,
+      isAdmin: false,
       email: null,
     };
   }
   const { data } = await adminSupabase.auth.getSession();
   const session = data.session;
+  if (!session?.user) {
+    return {
+      configured: true,
+      authenticated: false,
+      isAdmin: false,
+      email: null,
+    };
+  }
+  const { data: adminRows, error: adminError } = await adminSupabase
+    .from('admin_users')
+    .select('email')
+    .eq('enabled', true)
+    .ilike('email', session.user.email ?? '')
+    .limit(1);
+  if (adminError) throw adminError;
   return {
     configured: true,
-    authenticated: !!session?.user,
-    email: session?.user?.email ?? null,
+    authenticated: true,
+    isAdmin: (adminRows ?? []).length > 0,
+    email: session.user.email ?? null,
   };
 }
 
@@ -461,7 +476,7 @@ export async function sendAdminMagicLink(email: string, redirectTo?: string): Pr
   if (!SUPABASE_CONFIGURED || !adminSupabase) {
     throw new Error('Supabase が未設定です');
   }
-  const normalized = email.trim().toLowerCase();
+  const normalized = normalizeEmail(email);
   if (!normalized) {
     throw new Error('メールアドレスを入力してください');
   }
@@ -485,7 +500,7 @@ export async function sendDriverMagicLink(email: string, redirectTo?: string): P
     getMeta(META_DRIVER_EMAIL),
   ]);
   const lockedEmail = confirmed === 'true' ? normalizeEmail(savedEmail) : '';
-  if (lockedEmail && normalized !== lockedEmail) {
+  if (lockedEmail && !sameEmailAddress(normalized, lockedEmail)) {
     throw new Error(`この端末は ${lockedEmail} のアカウントに紐づいています。同じメールで再認証してください。`);
   }
   const { error } = await driverSupabase.auth.signInWithOtp({

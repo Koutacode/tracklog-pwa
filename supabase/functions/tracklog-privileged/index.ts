@@ -42,6 +42,9 @@ const FIREBASE_PRIVATE_KEY_SECRET_KEY = 'firebase_private_key';
 const FIREBASE_CREDENTIALS_CACHE_MS = 5 * 60 * 1000;
 const PUSH_PROVIDER_FCM = 'fcm';
 const MAX_PUSH_FAILURES = 3;
+const FULLWIDTH_DIGIT_OFFSET = '０'.charCodeAt(0) - '0'.charCodeAt(0);
+const VEHICLE_LABEL_PATTERN = /^[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}A-Za-z]{1,8}[0-9]{2,3}[ぁ-んA-Za-z][0-9]{1,4}$/u;
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 type FirebaseCredentials = {
   projectId: string;
@@ -107,6 +110,65 @@ function normalizeAdminMessageBody(value: unknown) {
   const text = textValue(value).replace(/\s+/g, ' ');
   if (!text) throw new HttpError(400, 'body is required');
   return limitCharacters(text, MAX_ADMIN_MESSAGE_BODY_LENGTH);
+}
+
+function toHalfWidthDigits(value: string) {
+  return value.replace(/[０-９]/g, digit =>
+    String.fromCharCode(digit.charCodeAt(0) - FULLWIDTH_DIGIT_OFFSET),
+  );
+}
+
+function normalizeDisplayName(value: unknown) {
+  return textValue(value).replace(/\s+/g, ' ');
+}
+
+function normalizeEmail(value: unknown) {
+  return textValue(value);
+}
+
+function sameEmailAddress(left: unknown, right: unknown) {
+  return normalizeEmail(left).toLowerCase() === normalizeEmail(right).toLowerCase();
+}
+
+function normalizePhone(value: unknown) {
+  return toHalfWidthDigits(textValue(value))
+    .replace(/[＋]/g, '+')
+    .replace(/[ー－―‐]/g, '-')
+    .replace(/[　]/g, ' ');
+}
+
+function normalizeVehicleLabel(value: unknown) {
+  return toHalfWidthDigits(textValue(value))
+    .replace(/[　\s\-ー－―‐]/g, '');
+}
+
+function compactPhone(value: string) {
+  return value.replace(/[()\s.-]/g, '');
+}
+
+function validateDriverProfileFields(input: {
+  displayName: string;
+  vehicleLabel: string;
+  driverPhone: string;
+  driverEmail: string;
+  userEmail: string;
+}) {
+  if (!input.displayName || input.displayName.length > 40) {
+    throw new HttpError(400, '名前を確認してください');
+  }
+  if (!input.driverEmail || input.driverEmail.length > 254 || !EMAIL_PATTERN.test(input.driverEmail)) {
+    throw new HttpError(400, 'メールアドレスの形式を確認してください');
+  }
+  if (!sameEmailAddress(input.driverEmail, input.userEmail)) {
+    throw new HttpError(403, 'メール認証済みのアドレスと登録メールが一致しません');
+  }
+  const phone = compactPhone(input.driverPhone);
+  if (!(/^0\d{9,10}$/.test(phone) || /^\+81\d{9,10}$/.test(phone))) {
+    throw new HttpError(400, '電話番号を確認してください');
+  }
+  if (!input.vehicleLabel || input.vehicleLabel.length > 24 || !VEHICLE_LABEL_PATTERN.test(input.vehicleLabel)) {
+    throw new HttpError(400, '車番は 札幌101か8916 の形式で入力してください');
+  }
 }
 
 function stringArray(value: unknown, key: string) {
@@ -352,6 +414,13 @@ async function isTracklogAdmin(user: TracklogUser) {
   return (data ?? []).length > 0;
 }
 
+function getAdminAccessState(user: TracklogUser, admin: boolean) {
+  return {
+    email: nullableText(user.email),
+    isAdmin: admin,
+  };
+}
+
 async function getDeviceProfile(deviceId: string) {
   const { data, error } = await adminClient
     .from('device_profiles')
@@ -376,16 +445,29 @@ async function claimDeviceProfile(payload: JsonRecord, user: TracklogUser, admin
 
   const approvalStatus = textValue(existing?.approval_status) || 'pending';
   const approvalRequestedAt = textValue(existing?.approval_requested_at) || nowIso();
+  const nextDisplayName =
+    normalizeDisplayName(payload.displayName) ||
+    normalizeDisplayName(existing?.display_name) ||
+    `端末-${deviceId.replace(/[^a-zA-Z0-9]/g, '').slice(-8)}`;
+  const nextVehicleLabel = normalizeVehicleLabel(payload.vehicleLabel) || normalizeVehicleLabel(existing?.vehicle_label);
+  const nextDriverPhone = normalizePhone(payload.driverPhone) || normalizePhone(existing?.driver_phone);
+  const nextDriverEmail = normalizeEmail(payload.driverEmail) || normalizeEmail(existing?.driver_email) || normalizeEmail(user.email);
+  if (approvalStatus !== 'approved') {
+    validateDriverProfileFields({
+      displayName: nextDisplayName,
+      vehicleLabel: nextVehicleLabel,
+      driverPhone: nextDriverPhone,
+      driverEmail: nextDriverEmail,
+      userEmail: normalizeEmail(user.email),
+    });
+  }
   const row = {
     device_id: deviceId,
     auth_user_id: user.id,
-    display_name:
-      nullableText(payload.displayName) ??
-      nullableText(existing?.display_name) ??
-      `端末-${deviceId.replace(/[^a-zA-Z0-9]/g, '').slice(-8)}`,
-    vehicle_label: nullableText(payload.vehicleLabel) ?? nullableText(existing?.vehicle_label),
-    driver_phone: nullableText(payload.driverPhone) ?? nullableText(existing?.driver_phone),
-    driver_email: nullableText(payload.driverEmail) ?? nullableText(existing?.driver_email) ?? nullableText(user.email),
+    display_name: nextDisplayName,
+    vehicle_label: nextVehicleLabel || null,
+    driver_phone: nextDriverPhone || null,
+    driver_email: nextDriverEmail || null,
     platform: nullableText(payload.platform) ?? nullableText(existing?.platform) ?? 'unknown',
     app_version: nullableText(payload.appVersion) ?? nullableText(existing?.app_version),
     latest_status: nullableText(payload.latestStatus) ?? nullableText(existing?.latest_status),
@@ -991,7 +1073,8 @@ Deno.serve(async (req: Request) => {
     const admin = await isTracklogAdmin(user);
 
     let data: unknown;
-    if (action === 'getRuntimeConfig') data = await getRuntimeConfig();
+    if (action === 'getAdminAccessState') data = getAdminAccessState(user, admin);
+    else if (action === 'getRuntimeConfig') data = await getRuntimeConfig();
     else if (action === 'updateRuntimeConfig') data = await updateRuntimeConfig(payload, user, admin);
     else if (action === 'registerPushToken') data = await registerPushToken(payload, user, admin);
     else if (action === 'unregisterPushToken') data = await unregisterPushToken(payload, user, admin);

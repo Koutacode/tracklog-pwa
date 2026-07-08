@@ -9,6 +9,7 @@ type FunctionResponse<T> = {
 };
 
 type PrivilegedAction =
+  | 'getAdminAccessState'
   | 'getRuntimeConfig'
   | 'updateRuntimeConfig'
   | 'registerPushToken'
@@ -68,6 +69,17 @@ export async function claimTracklogDeviceProfileViaFunction(input: {
 }): Promise<RemoteDeviceProfile> {
   const client = requireClient(driverSupabase);
   return invokeTracklogPrivileged<RemoteDeviceProfile>(client, 'claimDeviceProfile', input);
+}
+
+export async function getTracklogAdminAccessStateViaFunction(): Promise<{
+  email: string | null;
+  isAdmin: boolean;
+}> {
+  const client = requireClient(adminSupabase);
+  return invokeTracklogPrivileged<{
+    email: string | null;
+    isAdmin: boolean;
+  }>(client, 'getAdminAccessState', {});
 }
 
 export async function getTracklogRuntimeConfigViaFunction(options?: {

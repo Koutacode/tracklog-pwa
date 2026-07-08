@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Link, Navigate, useNavigate, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 import AdminMap from '../components/AdminMap';
+import AdminAccessDenied from '../components/AdminAccessDenied';
 import { deleteAdminDevice, getAdminDeviceBundle, setAdminDeviceApproval } from '../../services/remoteAdmin';
 import { getAdminSession } from '../../services/remoteAuth';
 
@@ -31,6 +32,7 @@ export default function AdminDeviceDetail() {
   const navigate = useNavigate();
   const [ready, setReady] = useState(false);
   const [authenticated, setAuthenticated] = useState(false);
+  const [isAdmin, setIsAdmin] = useState(false);
   const [bundle, setBundle] = useState<Awaited<ReturnType<typeof getAdminDeviceBundle>> | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -46,7 +48,8 @@ export default function AdminDeviceDetail() {
         const session = await getAdminSession();
         if (!active) return;
         setAuthenticated(session.authenticated);
-        if (!session.authenticated) {
+        setIsAdmin(session.isAdmin);
+        if (!session.authenticated || !session.isAdmin) {
           setReady(true);
           return;
         }
@@ -67,7 +70,7 @@ export default function AdminDeviceDetail() {
   }, [deviceId]);
 
   useEffect(() => {
-    if (!authenticated) return;
+    if (!authenticated || !isAdmin) return;
     let active = true;
 
     const refresh = async () => {
@@ -94,7 +97,7 @@ export default function AdminDeviceDetail() {
       window.clearInterval(timer);
       document.removeEventListener('visibilitychange', onVisible);
     };
-  }, [authenticated, deviceId]);
+  }, [authenticated, isAdmin, deviceId]);
 
   const marker = useMemo(() => {
     if (bundle?.profile?.latest_lat == null || bundle?.profile?.latest_lng == null) return null;
@@ -167,7 +170,7 @@ export default function AdminDeviceDetail() {
   }
 
   if (!ready) return <div className="screen-shell"><div className="screen-card">読み込み中…</div></div>;
-  if (!authenticated) return <Navigate to="/login" replace />;
+  if (!authenticated || !isAdmin) return <AdminAccessDenied authenticated={authenticated} error={error} />;
 
   return (
     <div className="screen-shell">

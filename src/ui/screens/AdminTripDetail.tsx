@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Link, Navigate, useNavigate, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 import AdminMap from '../components/AdminMap';
+import AdminAccessDenied from '../components/AdminAccessDenied';
 import { getAdminTripBundle, deleteAdminTrip } from '../../services/remoteAdmin';
 import { getAdminSession } from '../../services/remoteAuth';
 
@@ -9,6 +10,7 @@ export default function AdminTripDetail() {
   const navigate = useNavigate();
   const [ready, setReady] = useState(false);
   const [authenticated, setAuthenticated] = useState(false);
+  const [isAdmin, setIsAdmin] = useState(false);
   const [bundle, setBundle] = useState<Awaited<ReturnType<typeof getAdminTripBundle>> | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
@@ -20,7 +22,8 @@ export default function AdminTripDetail() {
         const session = await getAdminSession();
         if (!active) return;
         setAuthenticated(session.authenticated);
-        if (!session.authenticated) {
+        setIsAdmin(session.isAdmin);
+        if (!session.authenticated || !session.isAdmin) {
           setReady(true);
           return;
         }
@@ -43,7 +46,7 @@ export default function AdminTripDetail() {
   );
 
   if (!ready) return <div className="screen-shell"><div className="screen-card">読み込み中…</div></div>;
-  if (!authenticated) return <Navigate to="/login" replace />;
+  if (!authenticated || !isAdmin) return <AdminAccessDenied authenticated={authenticated} error={error} />;
 
   return (
     <div className="screen-shell">

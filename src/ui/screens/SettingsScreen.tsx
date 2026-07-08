@@ -6,6 +6,12 @@ import { getRemoteSyncState, hydrateRemoteSyncState, runRemoteSync, subscribeRem
 import { shareText } from '../../services/nativeShare';
 import { PWA_URL, DEFAULT_APK_DOWNLOAD_URL } from '../../app/releaseInfo';
 import { openAppPermissionSettings } from '../../services/nativeSetup';
+import type { DriverProfileField } from '../../services/driverProfileValidation';
+import {
+  normalizePhoneInput,
+  normalizeVehicleLabelInput,
+  validateDriverProfile,
+} from '../../services/driverProfileValidation';
 
 function isStandaloneMode() {
   return window.matchMedia?.('(display-mode: standalone)').matches || (navigator as any).standalone === true;
@@ -23,6 +29,7 @@ export default function SettingsScreen() {
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [syncState, setSyncState] = useState(getRemoteSyncState());
+  const [fieldErrors, setFieldErrors] = useState<Partial<Record<DriverProfileField, string>>>({});
 
   const isNative = Capacitor.isNativePlatform();
   const standalone = useMemo(() => isStandaloneMode(), []);
@@ -34,7 +41,7 @@ export default function SettingsScreen() {
       : approvalStatus === 'rejected'
         ? '拒否済み'
         : authInitialized
-          ? '管理者承認待ち'
+          ? '管理者認証待ち'
           : '未申請';
   const syncAvailable = syncState.configured && authInitialized && profileComplete && approvalStatus === 'approved';
 
@@ -110,25 +117,31 @@ export default function SettingsScreen() {
                 onChange={e => setDisplayName(e.target.value)}
                 placeholder="例: 札幌便 1号車"
                 disabled={profileLocked}
+                aria-invalid={fieldErrors.displayName ? true : undefined}
               />
+              {fieldErrors.displayName && <small className="settings-field-error">{fieldErrors.displayName}</small>}
             </label>
             <label className="settings-field">
               <span>車番・識別名</span>
               <input
                 value={vehicleLabel}
-                onChange={e => setVehicleLabel(e.target.value)}
-                placeholder="例: 札幌 100 あ 1234"
+                onChange={e => setVehicleLabel(normalizeVehicleLabelInput(e.target.value))}
+                placeholder="例: 札幌101か8916"
                 disabled={profileLocked}
+                aria-invalid={fieldErrors.vehicleLabel ? true : undefined}
               />
+              {fieldErrors.vehicleLabel && <small className="settings-field-error">{fieldErrors.vehicleLabel}</small>}
             </label>
             <label className="settings-field">
               <span>電話番号</span>
               <input
                 value={phone}
-                onChange={e => setPhone(e.target.value)}
+                onChange={e => setPhone(normalizePhoneInput(e.target.value))}
                 placeholder="例: 090-1234-5678"
                 disabled={profileLocked}
+                aria-invalid={fieldErrors.phone ? true : undefined}
               />
+              {fieldErrors.phone && <small className="settings-field-error">{fieldErrors.phone}</small>}
             </label>
             <label className="settings-field">
               <span>メールアドレス</span>
@@ -138,7 +151,9 @@ export default function SettingsScreen() {
                 placeholder="例: sample@example.com"
                 type="email"
                 disabled={profileLocked}
+                aria-invalid={fieldErrors.email ? true : undefined}
               />
+              {fieldErrors.email && <small className="settings-field-error">{fieldErrors.email}</small>}
             </label>
             <div className="settings-info-row">
               <span>端末ID</span>
@@ -158,7 +173,7 @@ export default function SettingsScreen() {
                 <span>
                   {approvalStatus === 'rejected'
                     ? '管理者により拒否されています。利用する場合は管理者へ確認してください。'
-                    : '管理者が許可するまで、運行記録とクラウド同期は利用できません。'}
+                    : 'メール認証は完了しています。管理者が許可するまで、運行記録とクラウド同期は利用できません。'}
                 </span>
               </div>
             )}
@@ -174,7 +189,18 @@ export default function SettingsScreen() {
                 setMessage(null);
                 setSendingMagic(true);
                 try {
-                  await sendDriverMagicLink(email);
+                  const validation = validateDriverProfile({ displayName, vehicleLabel, phone, email });
+                  setDisplayName(validation.value.displayName);
+                  setVehicleLabel(validation.value.vehicleLabel);
+                  setPhone(validation.value.phone);
+                  setEmail(validation.value.email);
+                  setFieldErrors(validation.errors);
+                  if (!validation.valid) {
+                    setMessage(validation.firstError);
+                    return;
+                  }
+                  await setDriverProfileLocal(validation.value);
+                  await sendDriverMagicLink(validation.value.email);
                   setMessage('認証リンクを送信しました。メールから開いて再度端末を更新してください。');
                 } catch (error: any) {
                   setMessage(error?.message ?? '認証リンク送信に失敗しました');
@@ -192,7 +218,17 @@ export default function SettingsScreen() {
                 setSaving(true);
                 setMessage(null);
                 try {
-                  await setDriverProfileLocal({ displayName, vehicleLabel, phone, email });
+                  const validation = validateDriverProfile({ displayName, vehicleLabel, phone, email });
+                  setDisplayName(validation.value.displayName);
+                  setVehicleLabel(validation.value.vehicleLabel);
+                  setPhone(validation.value.phone);
+                  setEmail(validation.value.email);
+                  setFieldErrors(validation.errors);
+                  if (!validation.valid) {
+                    setMessage(validation.firstError);
+                    return;
+                  }
+                  await setDriverProfileLocal(validation.value);
                   await hydrateRemoteSyncState();
                   await runRemoteSync('profile-save');
                   const identity = await getDriverIdentity();

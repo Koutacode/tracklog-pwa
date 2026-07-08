@@ -7,6 +7,12 @@ import {
   sendDriverMagicLink,
   setDriverProfileLocal,
 } from '../services/remoteAuth';
+import type { DriverProfileField } from '../services/driverProfileValidation';
+import {
+  normalizePhoneInput,
+  normalizeVehicleLabelInput,
+  validateDriverProfile,
+} from '../services/driverProfileValidation';
 import { hydrateRemoteSyncState, runRemoteSync } from '../services/remoteSync';
 import {
   checkNativeSetupReadiness,
@@ -34,7 +40,7 @@ function getApprovalLabel(identity: DriverIdentity) {
   if (!identity.profileComplete) return '登録情報不足';
   if (identity.approvalStatus === 'approved') return '承認済み';
   if (identity.approvalStatus === 'rejected') return '拒否済み';
-  return '管理者承認待ち';
+  return '管理者認証待ち';
 }
 
 function DriverRegistrationGate(props: {
@@ -49,6 +55,7 @@ function DriverRegistrationGate(props: {
   const [email, setEmail] = useState(identity.email ?? '');
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const [fieldErrors, setFieldErrors] = useState<Partial<Record<DriverProfileField, string>>>({});
 
   useEffect(() => {
     setDisplayName(identity.displayName);
@@ -59,13 +66,23 @@ function DriverRegistrationGate(props: {
 
   const handleSubmit = async (event: FormEvent) => {
     event.preventDefault();
+    const validation = validateDriverProfile({ displayName, vehicleLabel, phone, email });
+    setDisplayName(validation.value.displayName);
+    setVehicleLabel(validation.value.vehicleLabel);
+    setPhone(validation.value.phone);
+    setEmail(validation.value.email);
+    setFieldErrors(validation.errors);
+    if (!validation.valid) {
+      setMessage(validation.firstError);
+      return;
+    }
     setBusy(true);
     setMessage(null);
     try {
-      await setDriverProfileLocal({ displayName, vehicleLabel, phone, email });
+      await setDriverProfileLocal(validation.value);
       await hydrateRemoteSyncState();
       if (identity.configured && !identity.authInitialized) {
-        await sendDriverMagicLink(email);
+        await sendDriverMagicLink(validation.value.email);
         setMessage('認証メールを送信しました。メール内のリンクで認証後、「認証状態を更新」を押してください。');
       } else {
         await runRemoteSync('profile-registration');
@@ -107,7 +124,7 @@ function DriverRegistrationGate(props: {
             <span>
               {identity.approvalStatus === 'rejected'
                 ? 'この登録は管理者により拒否されています。内容を確認する場合は管理者へ連絡してください。'
-                : '登録申請は管理画面に届いています。管理者が許可するとこの端末で機能を使えるようになります。'}
+                : 'メール認証は完了しています。管理者が許可するとこの端末で機能を使えるようになります。'}
             </span>
           </div>
         )}
@@ -119,8 +136,10 @@ function DriverRegistrationGate(props: {
               value={displayName}
               onChange={event => setDisplayName(event.target.value)}
               placeholder="例: 山田 太郎"
+              aria-invalid={fieldErrors.displayName ? true : undefined}
               required
             />
+            {fieldErrors.displayName && <small className="settings-field-error">{fieldErrors.displayName}</small>}
           </label>
           <label className="settings-field">
             <span>メールアドレス</span>
@@ -129,27 +148,33 @@ function DriverRegistrationGate(props: {
               onChange={event => setEmail(event.target.value)}
               placeholder="driver@example.com"
               type="email"
+              aria-invalid={fieldErrors.email ? true : undefined}
               required
             />
+            {fieldErrors.email && <small className="settings-field-error">{fieldErrors.email}</small>}
           </label>
           <label className="settings-field">
             <span>電話番号</span>
             <input
               value={phone}
-              onChange={event => setPhone(event.target.value)}
+              onChange={event => setPhone(normalizePhoneInput(event.target.value))}
               placeholder="例: 090-1234-5678"
               inputMode="tel"
+              aria-invalid={fieldErrors.phone ? true : undefined}
               required
             />
+            {fieldErrors.phone && <small className="settings-field-error">{fieldErrors.phone}</small>}
           </label>
           <label className="settings-field">
             <span>車両番号（車番）</span>
             <input
               value={vehicleLabel}
-              onChange={event => setVehicleLabel(event.target.value)}
-              placeholder="例: 札幌 100 あ 1234"
+              onChange={event => setVehicleLabel(normalizeVehicleLabelInput(event.target.value))}
+              placeholder="例: 札幌101か8916"
+              aria-invalid={fieldErrors.vehicleLabel ? true : undefined}
               required
             />
+            {fieldErrors.vehicleLabel && <small className="settings-field-error">{fieldErrors.vehicleLabel}</small>}
           </label>
 
           <div className="settings-info-row">

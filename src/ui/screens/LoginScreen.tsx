@@ -32,15 +32,22 @@ export default function LoginScreen() {
   const [message, setMessage] = useState<string | null>(null);
   const [status, setStatus] = useState<'idle' | 'sending' | 'google'>('idle');
   const [authenticated, setAuthenticated] = useState(false);
+  const [isAdmin, setIsAdmin] = useState(false);
 
   useEffect(() => {
     let active = true;
     void getAdminSession().then(session => {
-      if (active) setAuthenticated(session.authenticated);
+      if (active) {
+        setAuthenticated(session.authenticated);
+        setIsAdmin(session.isAdmin);
+      }
     });
     const unsubscribe = onAdminAuthStateChange(async () => {
       const session = await getAdminSession();
-      if (active) setAuthenticated(session.authenticated);
+      if (active) {
+        setAuthenticated(session.authenticated);
+        setIsAdmin(session.isAdmin);
+      }
     });
     return () => {
       active = false;
@@ -60,7 +67,7 @@ export default function LoginScreen() {
             <Link to="/" className="pill-link">
               ホーム
             </Link>
-            {authenticated && (
+            {isAdmin && (
               <Link to="/admin" className="pill-link">
                 管理画面へ
               </Link>
@@ -70,6 +77,11 @@ export default function LoginScreen() {
         <div className="settings-note">
           管理者として登録されているメールアドレスでログインしてください。
         </div>
+        {authenticated && !isAdmin && (
+          <div className="settings-toast">
+            このメールアドレスは管理者として登録されていません。
+          </div>
+        )}
         {Capacitor.isNativePlatform() && (
           <div className="settings-note">
             ネイティブアプリでは magic link の戻り先を <code>{getAdminRedirectUrl()}</code> にしています。

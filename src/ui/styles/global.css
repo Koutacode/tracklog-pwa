@@ -137,6 +137,17 @@ a:hover {
   cursor: not-allowed;
 }
 
+.settings-field input[aria-invalid="true"] {
+  border-color: rgba(248, 113, 113, 0.72);
+  box-shadow: 0 0 0 1px rgba(248, 113, 113, 0.2);
+}
+
+.settings-field-error {
+  color: #fecaca;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
 .settings-field textarea,
 .settings-field select {
   width: 100%;

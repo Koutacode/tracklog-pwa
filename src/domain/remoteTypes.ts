@@ -15,6 +15,7 @@ export type DriverIdentity = {
 export type AdminSession = {
   configured: boolean;
   authenticated: boolean;
+  isAdmin: boolean;
   email: string | null;
 };
 
