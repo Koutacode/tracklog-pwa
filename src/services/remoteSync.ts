@@ -89,6 +89,11 @@ const LOCAL_SYNC_HEADER_EVENT_ID_PREFIX = 'header-sync';
 const HEADER_SYNC_EVENT_START = `${LOCAL_SYNC_HEADER_EVENT_ID_PREFIX}-trip-start`;
 const HEADER_SYNC_EVENT_END = `${LOCAL_SYNC_HEADER_EVENT_ID_PREFIX}-trip-end`;
 const EVENT_ROUTE_POINT_ANCHOR_PREFIX = 'event-anchor-';
+const EXPRESSWAY_REMOTE_EVENT_TYPES = new Set<EventType>([
+  'expressway',
+  'expressway_start',
+  'expressway_end',
+]);
 
 function emit(patch: Partial<RemoteSyncState>) {
   state = { ...state, ...patch };
@@ -220,6 +225,30 @@ function parseRemoteEvent(raw: unknown): AppEvent | null {
     syncStatus: normalizeSyncStatus(row.sync_status),
     ...(normalizeRemoteExtras(row.extras) ? { extras: normalizeRemoteExtras(row.extras)! } : {}),
   };
+}
+
+function parseExtrasPositiveInt(raw: unknown): number {
+  const value = Number(raw);
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(0, Math.floor(value));
+}
+
+function hasResolvedIcName(event: AppEvent): boolean {
+  const name = (event as any).extras?.icName;
+  return typeof name === 'string' && name.trim().length > 0;
+}
+
+function getIcResolveAlgorithmVersion(event: AppEvent): number {
+  return parseExtrasPositiveInt((event as any).extras?.icResolveAlgorithmVersion);
+}
+
+function shouldKeepLocalIcResolution(local: AppEvent | undefined, remote: AppEvent): boolean {
+  if (!local || !EXPRESSWAY_REMOTE_EVENT_TYPES.has(remote.type)) return false;
+  const localHasIc = hasResolvedIcName(local);
+  const remoteHasIc = hasResolvedIcName(remote);
+  if (localHasIc && !remoteHasIc) return true;
+  if (remoteHasIc) return false;
+  return getIcResolveAlgorithmVersion(local) > getIcResolveAlgorithmVersion(remote);
 }
 
 function parseRemoteRoutePoint(raw: unknown): RoutePoint | null {
@@ -510,7 +539,9 @@ async function applyRemoteDownload(rows: {
   }
   const remoteEventsToApply = targetEvents.filter(item => {
     const local = localEventsById.get(item.id);
-    return !(local && local.syncStatus !== 'synced');
+    if (!local) return true;
+    if (local.syncStatus !== 'synced') return false;
+    return !shouldKeepLocalIcResolution(local, item);
   });
 
   const remoteTripIds = [...new Set(prunedHeaders.map(item => item.trip_id))];

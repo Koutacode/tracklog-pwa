@@ -75,7 +75,12 @@ export function useTripManager() {
 
   const resolveExpresswayIcNow = useCallback(async (eventId: string, geo?: Geo) => {
     if (!navigator.onLine || !geo) return;
-    const result = await resolveNearestIC(geo.lat, geo.lng);
+    let result;
+    try {
+      result = await resolveNearestIC(geo.lat, geo.lng);
+    } catch {
+      return;
+    }
     if (result) {
       await updateExpresswayResolved({
         eventId,

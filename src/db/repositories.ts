@@ -58,7 +58,8 @@ const META_PENDING_EXPRESSWAY_END_PROMPT = 'pendingExpresswayEndPrompt';
 const META_PENDING_EXPRESSWAY_END_DECISION = 'pendingExpresswayEndDecision';
 const META_REMOTE_ROUTE_POINTS_UPLOADED_THROUGH = 'remoteRoutePointsUploadedThrough';
 const IC_RESOLVE_RETRY_LIMIT = 6;
-const IC_RESOLVE_ALGORITHM_VERSION = 3;
+// Bump this when resolver behavior changes so previously exhausted failures retry.
+const IC_RESOLVE_ALGORITHM_VERSION = 7;
 const IC_RESOLVE_BACKOFF_BASE_MS = 2 * 60 * 1000;
 const IC_RESOLVE_BACKOFF_CAP_MS = 60 * 60 * 1000;
 const EXPRESSWAY_EVENT_TYPES = ['expressway', 'expressway_start', 'expressway_end'] as const;
@@ -199,6 +200,14 @@ function getIcResolveRetryCount(ev: AppEvent): number {
   return parsePositiveInt((ev as any).extras?.icResolveRetryCount);
 }
 
+function getIcResolveAlgorithmVersion(ev: AppEvent): number {
+  return parsePositiveInt((ev as any).extras?.icResolveAlgorithmVersion);
+}
+
+function isStaleIcResolveAlgorithm(ev: AppEvent): boolean {
+  return getIcResolveAlgorithmVersion(ev) < IC_RESOLVE_ALGORITHM_VERSION;
+}
+
 function getIcResolveNextRetryAtMs(ev: AppEvent): number | null {
   const nextRetryAt = (ev as any).extras?.icResolveNextRetryAt;
   if (typeof nextRetryAt !== 'string' || !nextRetryAt.trim()) return null;
@@ -215,8 +224,7 @@ function canRetryIcResolve(ev: AppEvent, nowMs: number): boolean {
   const status = (ev as any).extras?.icResolveStatus;
   if (status == null || status === 'pending') return true;
   if (status !== 'failed') return false;
-  const algorithmVersion = parsePositiveInt((ev as any).extras?.icResolveAlgorithmVersion);
-  if (algorithmVersion < IC_RESOLVE_ALGORITHM_VERSION) return true;
+  if (isStaleIcResolveAlgorithm(ev)) return true;
   const retryCount = getIcResolveRetryCount(ev);
   if (retryCount >= IC_RESOLVE_RETRY_LIMIT) return false;
   const nextRetryMs = getIcResolveNextRetryAtMs(ev);
@@ -1429,7 +1437,12 @@ export async function getPendingExpresswayEvents(tripId?: string) {
   const nowMs = Date.now();
   return arr
     .filter(e => canRetryIcResolve(e, nowMs))
-    .sort((a, b) => b.ts.localeCompare(a.ts));
+    .sort((a, b) => {
+      const aStale = isStaleIcResolveAlgorithm(a);
+      const bStale = isStaleIcResolveAlgorithm(b);
+      if (aStale !== bStale) return aStale ? -1 : 1;
+      return aStale ? a.ts.localeCompare(b.ts) : b.ts.localeCompare(a.ts);
+    });
 }
 
 let expresswayIcBackfillInFlight: Promise<boolean> | null = null;

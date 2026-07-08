@@ -10,8 +10,8 @@ const requiredConnectSources = [
   { source: 'wss://*.supabase.co', reason: 'Supabase realtime/session transport' },
   { source: 'https://geoapi.heartrails.com', reason: 'reverse geocoding' },
   { source: 'https://api.github.com', reason: 'release update checks' },
+  { source: 'https://maps.mail.ru', reason: 'IC / expressway fallback resolution' },
   { source: 'https://overpass-api.de', reason: 'IC / expressway resolution' },
-  { source: 'https://overpass.kumi.systems', reason: 'IC / expressway fallback resolution' },
   { source: 'https://router.project-osrm.org', reason: 'route map correction' },
 ];
 

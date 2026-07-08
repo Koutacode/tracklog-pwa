@@ -4,6 +4,7 @@ type OverpassTags = Record<string, string | undefined>;
 
 type OverpassElement = {
   type?: string;
+  id?: number | string;
   lat?: number;
   lon?: number;
   center?: {
@@ -20,10 +21,11 @@ type IcCandidate = IcResult & {
 type CandidateSource = 'junction' | 'gate' | 'link' | 'motorway';
 
 const OVERPASS_ENDPOINTS = [
+  'https://maps.mail.ru/osm/tools/overpass/api/interpreter',
   'https://overpass-api.de/api/interpreter',
-  'https://overpass.kumi.systems/api/interpreter',
 ];
-const OVERPASS_TIMEOUT_MS = 9000;
+const OVERPASS_TIMEOUT_MS = 5000;
+const OVERPASS_QUERY_TIMEOUT_SEC = 8;
 const MAX_NAME_LEN_BY_SOURCE: Record<CandidateSource, number> = {
   junction: 34,
   gate: 48,
@@ -58,19 +60,57 @@ async function queryExpresswayOverpass(
 ): Promise<{ elements: OverpassElement[] } | null> {
   const gateRadiusM = Math.min(radiusM, 2200);
   const highwayRadiusM = Math.min(radiusM, 3000);
-  const query = `
-[out:json][timeout:12];
-(
-  node(around:${radiusM},${lat},${lon})["highway"="motorway_junction"];
-  node(around:${gateRadiusM},${lat},${lon})["barrier"="toll_booth"];
-  node(around:${gateRadiusM},${lat},${lon})["highway"="toll_gantry"];
-  way(around:500,${lat},${lon})["highway"="motorway"]["name"];
-  way(around:${highwayRadiusM},${lat},${lon})["highway"="motorway"]["ref"]["name"];
-  way(around:${radiusM},${lat},${lon})["highway"="motorway_link"]["name"];
-  way(around:${radiusM},${lat},${lon})["highway"="motorway_link"]["destination"];
-);
-out body center;
-  `.trim();
+
+  const junctionQuery =
+    `[out:json][timeout:${OVERPASS_QUERY_TIMEOUT_SEC}];node(around:${radiusM},${lat},${lon})["highway"="motorway_junction"];out body;`;
+  const fallbackQueries = [
+    `[out:json][timeout:${OVERPASS_QUERY_TIMEOUT_SEC}];node(around:${gateRadiusM},${lat},${lon})["barrier"="toll_booth"];out body;`,
+    `[out:json][timeout:${OVERPASS_QUERY_TIMEOUT_SEC}];node(around:${gateRadiusM},${lat},${lon})["highway"="toll_gantry"];out body;`,
+    `[out:json][timeout:${OVERPASS_QUERY_TIMEOUT_SEC}];way(around:${radiusM},${lat},${lon})["highway"="motorway_link"]["name"];out body center;`,
+    `[out:json][timeout:${OVERPASS_QUERY_TIMEOUT_SEC}];way(around:${radiusM},${lat},${lon})["highway"="motorway_link"]["destination"];out body center;`,
+    `[out:json][timeout:${OVERPASS_QUERY_TIMEOUT_SEC}];way(around:500,${lat},${lon})["highway"="motorway"]["name"];out body center;`,
+    `[out:json][timeout:${OVERPASS_QUERY_TIMEOUT_SEC}];way(around:${highwayRadiusM},${lat},${lon})["highway"="motorway"]["ref"]["name"];out body center;`,
+  ];
+  const merged = new Map<string, OverpassElement>();
+  let receivedAnyResponse = false;
+
+  const mergeElements = (elements: OverpassElement[]) => {
+    for (const element of elements) {
+      const key =
+        element.id != null
+          ? `${element.type ?? 'unknown'}:${element.id}`
+          : `${element.type ?? 'unknown'}:${element.lat ?? element.center?.lat}:${element.lon ?? element.center?.lon}`;
+      merged.set(key, element);
+    }
+  };
+
+  const runQuery = async (query: string) => {
+    const elements = await fetchOverpassElements(query);
+    if (elements == null) return false;
+    receivedAnyResponse = true;
+    mergeElements(elements);
+    return true;
+  };
+
+  const junctionElements = await fetchOverpassElements(junctionQuery);
+  if (junctionElements == null) return null;
+  receivedAnyResponse = true;
+  mergeElements(junctionElements);
+
+  const junctionCandidates = [...merged.values()];
+  if (buildIcCandidates(junctionCandidates, lat, lon).length > 0) {
+    return { elements: junctionCandidates };
+  }
+
+  for (const query of fallbackQueries) {
+    await runQuery(query);
+  }
+
+  if (!receivedAnyResponse) return null;
+  return { elements: [...merged.values()] };
+}
+
+async function fetchOverpassElements(query: string): Promise<OverpassElement[] | null> {
   for (const endpoint of OVERPASS_ENDPOINTS) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), OVERPASS_TIMEOUT_MS);
@@ -79,14 +119,16 @@ out body center;
         method: 'POST',
         headers: {
           'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+          Accept: 'application/json',
         },
-        body: new URLSearchParams({ data: query }),
+        body: `data=${encodeURIComponent(query)}`,
+        cache: 'no-store',
         signal: controller.signal,
       });
       if (!res.ok) continue;
       const json = await res.json();
       const elements = Array.isArray(json.elements) ? json.elements : [];
-      return { elements };
+      return elements;
     } catch {
       // continue to next endpoint
     } finally {
@@ -284,39 +326,31 @@ export async function detectExpresswaySignal(
   }
 
   const overpass = await queryExpresswayOverpass(lat, lon, radiusM);
-  if (overpass) {
-    const nodes = overpass.elements.filter(e => e?.type === 'node' && e?.tags);
-    const nearestIc = buildIcCandidates(overpass.elements, lat, lon)[0] ?? null;
-    const onExpresswayRoad = overpass.elements.some(e => {
-      if (e?.type !== 'way' || !e?.tags) return false;
-      const hw = String(e.tags.highway ?? '');
-      return hw === 'motorway' || hw === 'motorway_link';
-    });
-    const nearEtcGate = nodes.some(n => {
-      const point = elementPoint(n);
-      if (!point) return false;
-      const tags = n.tags;
-      if (!tags) return false;
-      const isEtcNode = tags.barrier === 'toll_booth' || tags.highway === 'toll_gantry';
-      if (!isEtcNode) return false;
-      return haversineM(lat, lon, point.lat, point.lon) <= 220;
-    });
-    return {
-      resolved: true,
-      provider: 'overpass',
-      onExpresswayRoad,
-      nearIc: !!nearestIc && nearestIc.distanceM <= 1200,
-      nearEtcGate,
-      nearestIc,
-    };
+  if (!overpass) {
+    throw new Error('IC候補APIに接続できませんでした');
   }
-
+  const nodes = overpass.elements.filter(e => e?.type === 'node' && e?.tags);
+  const nearestIc = buildIcCandidates(overpass.elements, lat, lon)[0] ?? null;
+  const onExpresswayRoad = overpass.elements.some(e => {
+    if (e?.type !== 'way' || !e?.tags) return false;
+    const hw = String(e.tags.highway ?? '');
+    return hw === 'motorway' || hw === 'motorway_link';
+  });
+  const nearEtcGate = nodes.some(n => {
+    const point = elementPoint(n);
+    if (!point) return false;
+    const tags = n.tags;
+    if (!tags) return false;
+    const isEtcNode = tags.barrier === 'toll_booth' || tags.highway === 'toll_gantry';
+    if (!isEtcNode) return false;
+    return haversineM(lat, lon, point.lat, point.lon) <= 220;
+  });
   return {
-    resolved: false,
-    provider: 'none',
-    onExpresswayRoad: false,
-    nearIc: false,
-    nearEtcGate: false,
-    nearestIc: null,
+    resolved: true,
+    provider: 'overpass',
+    onExpresswayRoad,
+    nearIc: !!nearestIc && nearestIc.distanceM <= 1200,
+    nearEtcGate,
+    nearestIc,
   };
 }
