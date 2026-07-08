@@ -311,9 +311,6 @@ export default function SettingsScreen() {
                 </a>
               )}
             </div>
-            <div className="settings-note" style={{ marginTop: '1rem' }}>
-              管理画面は同じ URL の <code>/admin</code> で開きます。
-            </div>
             {isNative && (
               <Link
                 to="/admin"

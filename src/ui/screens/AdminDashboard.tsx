@@ -375,7 +375,7 @@ export default function AdminDashboard() {
             <button
               className="pill-link"
               onClick={async () => {
-                const text = `【TrackLog 配布用アプリ】\nAndroidはこちらのAPKをインストールしてください。\n${DEFAULT_APK_DOWNLOAD_URL}\n\niPhoneはSafariでこちらを開いてホーム画面に追加してください。\n${PWA_URL}\n\n※管理者画面は ${PWA_URL}/admin です。`;
+                const text = `【TrackLog 配布用アプリ】\nAndroidはこちらのAPKをインストールしてください。\n${DEFAULT_APK_DOWNLOAD_URL}\n\niPhoneはSafariでこちらを開いてホーム画面に追加してください。\n${PWA_URL}`;
                 try {
                   const shared = await shareText({ title: 'TrackLog アプリを共有', text });
                   if (!shared && navigator.share) {
