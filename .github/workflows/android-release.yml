@@ -64,6 +64,19 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
+      - name: Restore TrackLog Android debug keystore
+        env:
+          TRACKLOG_ANDROID_DEBUG_KEYSTORE_BASE64: ${{ secrets.TRACKLOG_ANDROID_DEBUG_KEYSTORE_BASE64 }}
+        run: |
+          if [ -z "${TRACKLOG_ANDROID_DEBUG_KEYSTORE_BASE64:-}" ]; then
+            echo "::error::TRACKLOG_ANDROID_DEBUG_KEYSTORE_BASE64 is required for stable APK updates."
+            exit 1
+          fi
+          mkdir -p "$HOME/.android"
+          printf '%s' "$TRACKLOG_ANDROID_DEBUG_KEYSTORE_BASE64" | base64 --decode > "$HOME/.android/debug.keystore"
+          chmod 600 "$HOME/.android/debug.keystore"
+          keytool -list -keystore "$HOME/.android/debug.keystore" -storepass android -alias androiddebugkey >/dev/null
+
       - name: Build Android APK
         run: |
           cd android

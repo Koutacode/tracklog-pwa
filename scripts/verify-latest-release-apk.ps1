@@ -52,7 +52,7 @@ New-Item -ItemType Directory -Path $tempDir | Out-Null
 
 Push-Location $projectRoot
 try {
-  $releaseJson = gh release view $Tag --repo "$owner/$repo" --json tagName,isLatest,assets | ConvertFrom-Json
+  $releaseJson = gh release view $Tag --repo "$owner/$repo" --json tagName,assets | ConvertFrom-Json
   if ($releaseJson.tagName -ne $Tag) {
     throw "GitHub release tag mismatch: $($releaseJson.tagName)"
   }
@@ -101,7 +101,18 @@ if (!(Test-Path $outputDir)) {
 }
 Copy-Item -Force $downloadedApk $outputApk
 
-$sha = (Get-FileHash -Algorithm SHA256 -Path $outputApk).Hash
+$sha256 = [System.Security.Cryptography.SHA256]::Create()
+try {
+  $stream = [System.IO.File]::OpenRead($outputApk)
+  try {
+    $hashBytes = $sha256.ComputeHash($stream)
+  } finally {
+    $stream.Dispose()
+  }
+  $sha = ([System.BitConverter]::ToString($hashBytes)).Replace("-", "")
+} finally {
+  $sha256.Dispose()
+}
 Write-Host "Release APK verified"
 Write-Host "Tag: $Tag"
 Write-Host "Asset: $assetName"
