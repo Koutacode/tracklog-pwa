@@ -1,5 +1,5 @@
 import { Suspense, lazy, useEffect } from 'react';
-import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import AdminAuthBridge from './AdminAuthBridge';
 import IcResolverJob from './IcResolverJob';
 import LocalRecoveryBootstrap from './LocalRecoveryBootstrap';
@@ -8,7 +8,8 @@ import PwaBootstrap from './PwaBootstrap';
 import RequireDriverProfile from './RequireDriverProfile';
 import RemoteSyncBootstrap from './RemoteSyncBootstrap';
 import RouteTrackingSupervisor from './RouteTrackingSupervisor';
-import { onDriverAuthStateChange } from '../services/remoteAuth';
+import type { DriverIdentity } from '../domain/remoteTypes';
+import { initializeDriverIdentity, onDriverAuthStateChange } from '../services/remoteAuth';
 import { runRemoteSync } from '../services/remoteSync';
 import { APP_VERSION } from './version';
 import AdminMessageToastHost from '../ui/components/AdminMessageToastHost';
@@ -19,6 +20,7 @@ const HistoryScreen = lazy(() => import('../ui/screens/HistoryScreen'));
 const RouteMapScreen = lazy(() => import('../ui/screens/RouteMapScreen'));
 const ReportDashboard = lazy(() => import('../ui/screens/ReportDashboard'));
 const SettingsScreen = lazy(() => import('../ui/screens/SettingsScreen'));
+const DriverLoginScreen = lazy(() => import('../ui/screens/DriverLoginScreen'));
 const LoginScreen = lazy(() => import('../ui/screens/LoginScreen'));
 const AdminDashboard = lazy(() => import('../ui/screens/AdminDashboard'));
 const AdminDeviceDetail = lazy(() => import('../ui/screens/AdminDeviceDetail'));
@@ -27,25 +29,53 @@ const AdminTripDetail = lazy(() => import('../ui/screens/AdminTripDetail'));
 // Keep routing aligned with the Vite base URL.
 const routerBase = import.meta.env.BASE_URL;
 
+function canUseDriverHome(identity: DriverIdentity) {
+  return identity.configured && identity.authInitialized && identity.profileComplete && identity.approvalStatus === 'approved';
+}
+
 function AppShell() {
   const location = useLocation();
-  const isAdminRoute =
-    location.pathname.startsWith('/login') || location.pathname.startsWith('/admin');
+  const navigate = useNavigate();
+  const authRoute =
+    location.pathname.startsWith('/login') ||
+    location.pathname.startsWith('/admin') ||
+    location.pathname.startsWith('/driver-login');
 
   useEffect(() => {
-    const unsubscribe = onDriverAuthStateChange(() => {
-      void runRemoteSync('driver-auth');
+    let active = true;
+    const unsubscribe = onDriverAuthStateChange(event => {
+      void (async () => {
+        if (event === 'SIGNED_IN') {
+          try {
+            const identity = await initializeDriverIdentity();
+            await runRemoteSync('driver-auth').catch(error => {
+              console.error(error);
+            });
+            if (!active) return;
+            if (canUseDriverHome(identity) && (location.pathname === '/settings' || location.pathname === '/driver-login')) {
+              navigate('/', { replace: true });
+            } else if (location.pathname === '/driver-login') {
+              navigate('/settings', { replace: true });
+            }
+          } catch (error) {
+            console.error(error);
+          }
+          return;
+        }
+        void runRemoteSync('driver-auth');
+      })();
     });
     return () => {
+      active = false;
       unsubscribe();
     };
-  }, []);
+  }, [location.pathname, navigate]);
 
   return (
     <>
       <AdminAuthBridge />
       <PwaBootstrap />
-      {!isAdminRoute && (
+      {!authRoute && (
         <>
           <IcResolverJob />
           <LocalRecoveryBootstrap />
@@ -64,6 +94,7 @@ function AppShell() {
           <Route path="/trip/:tripId/route" element={<RequireDriverProfile><RouteMapScreen /></RequireDriverProfile>} />
           <Route path="/history" element={<RequireDriverProfile><HistoryScreen /></RequireDriverProfile>} />
           <Route path="/report" element={<RequireDriverProfile><ReportDashboard /></RequireDriverProfile>} />
+          <Route path="/driver-login" element={<DriverLoginScreen />} />
           <Route path="/login" element={<LoginScreen />} />
           <Route path="/admin" element={<AdminDashboard />} />
           <Route path="/admin/devices/:deviceId" element={<AdminDeviceDetail />} />

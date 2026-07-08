@@ -1,5 +1,6 @@
 import type { FormEvent, ReactElement } from 'react';
 import { useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
 import type { DriverIdentity } from '../domain/remoteTypes';
 import {
   getDriverIdentity,
@@ -110,6 +111,11 @@ function DriverRegistrationGate(props: {
           <div>
             <div className="screen-card__eyebrow">初回登録</div>
             <h1 className="screen-card__title">端末プロフィール登録</h1>
+          </div>
+          <div className="screen-card__actions">
+            <Link to="/driver-login" className="pill-link">
+              登録済みログイン
+            </Link>
           </div>
         </div>
 

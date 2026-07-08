@@ -284,6 +284,18 @@ export default function SettingsScreen() {
               iPhone等でPWAとして利用するには、以下の共有URLを Safari で開いて「ホーム画面に追加」してください。
               PWAの位置・同期更新はアプリを開いている間、操作時、再表示時に行います。
             </div>
+            {!isNative && !standalone && (
+              <div className="approval-wait-card">
+                <strong>ブラウザで開いています</strong>
+                <span>
+                  Safariや通常ブラウザで認証した状態は、ホーム画面に追加したTrackLog PWAと別扱いになる場合があります。
+                  運行開始はホーム画面のTrackLogから開くか、登録済みログインで同じメールアドレスを再認証してください。
+                </span>
+                <Link to="/driver-login" className="trip-btn" style={{ textAlign: 'center' }}>
+                  登録済みログインを開く
+                </Link>
+              </div>
+            )}
             <div className="settings-card__actions" style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
               <button
                 className="trip-btn"

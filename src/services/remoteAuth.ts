@@ -1,4 +1,5 @@
 import { Capacitor } from '@capacitor/core';
+import type { AuthChangeEvent } from '@supabase/supabase-js';
 import { APP_VERSION } from '../app/version';
 import { requestImmediateRemoteSync } from '../app/remoteSyncSignal';
 import { db } from '../db/db';
@@ -13,6 +14,7 @@ import {
   assertValidDriverProfile,
   normalizeEmailInput,
   normalizePhoneInput,
+  toHalfWidthDigits,
   normalizeVehicleLabelInput,
   sameEmailAddress,
   validateDriverProfile,
@@ -513,6 +515,65 @@ export async function sendDriverMagicLink(email: string, redirectTo?: string): P
   if (error) throw error;
 }
 
+export async function sendDriverLoginLink(email: string, redirectTo?: string): Promise<void> {
+  if (!SUPABASE_CONFIGURED || !driverSupabase) {
+    throw new Error('Supabase が未設定です');
+  }
+  const normalized = normalizeEmail(email);
+  if (!normalized) {
+    throw new Error('メールアドレスを入力してください');
+  }
+  const [confirmed, savedEmail] = await Promise.all([
+    getMeta(META_REMOTE_AUTH_INITIALIZED),
+    getMeta(META_DRIVER_EMAIL),
+  ]);
+  const lockedEmail = confirmed === 'true' ? normalizeEmail(savedEmail) : '';
+  if (lockedEmail && !sameEmailAddress(normalized, lockedEmail)) {
+    throw new Error(`この端末は ${lockedEmail} のアカウントに紐づいています。同じメールで再認証してください。`);
+  }
+  const { error } = await driverSupabase.auth.signInWithOtp({
+    email: normalized,
+    options: {
+      emailRedirectTo: getDriverRedirectUrl(redirectTo),
+      shouldCreateUser: false,
+    },
+  });
+  if (error) throw error;
+}
+
+export async function verifyDriverEmailOtp(email: string, token: string): Promise<DriverIdentity> {
+  if (!SUPABASE_CONFIGURED || !driverSupabase) {
+    throw new Error('Supabase が未設定です');
+  }
+  const normalized = normalizeEmail(email);
+  if (!normalized) {
+    throw new Error('メールアドレスを入力してください');
+  }
+  const normalizedToken = toHalfWidthDigits(token).replace(/\D/g, '').trim();
+  if (!/^\d{6}$/.test(normalizedToken)) {
+    throw new Error('6桁の認証コードを入力してください');
+  }
+  const [confirmed, savedEmail] = await Promise.all([
+    getMeta(META_REMOTE_AUTH_INITIALIZED),
+    getMeta(META_DRIVER_EMAIL),
+  ]);
+  const lockedEmail = confirmed === 'true' ? normalizeEmail(savedEmail) : '';
+  if (lockedEmail && !sameEmailAddress(normalized, lockedEmail)) {
+    throw new Error(`この端末は ${lockedEmail} のアカウントに紐づいています。同じメールで再認証してください。`);
+  }
+  const { error } = await driverSupabase.auth.verifyOtp({
+    email: normalized,
+    token: normalizedToken,
+    type: 'email',
+  });
+  if (error) throw error;
+  await Promise.all([
+    setMeta(META_REMOTE_AUTH_INITIALIZED, 'true'),
+    setMeta(META_DRIVER_EMAIL, normalized),
+  ]);
+  return initializeDriverIdentity();
+}
+
 export async function getAdminGoogleSignInUrl(redirectTo?: string): Promise<string> {
   if (!SUPABASE_CONFIGURED || !adminSupabase) {
     throw new Error('Supabase が未設定です');
@@ -549,10 +610,10 @@ export function onAdminAuthStateChange(callback: () => void) {
   };
 }
 
-export function onDriverAuthStateChange(callback: () => void) {
+export function onDriverAuthStateChange(callback: (event: AuthChangeEvent) => void) {
   if (!driverSupabase) return () => undefined;
-  const { data } = driverSupabase.auth.onAuthStateChange(() => {
-    callback();
+  const { data } = driverSupabase.auth.onAuthStateChange(event => {
+    callback(event);
   });
   return () => {
     data.subscription.unsubscribe();
