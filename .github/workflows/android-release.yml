@@ -75,10 +75,13 @@ jobs:
           mkdir -p "$HOME/.android"
           printf '%s' "$TRACKLOG_ANDROID_DEBUG_KEYSTORE_BASE64" | base64 --decode > "$HOME/.android/debug.keystore"
           chmod 600 "$HOME/.android/debug.keystore"
-          keytool -list -keystore "$HOME/.android/debug.keystore" -storepass android -alias androiddebugkey >/dev/null
+          keytool -list -v -keystore "$HOME/.android/debug.keystore" -storepass android -alias androiddebugkey | grep 'SHA256'
 
       - name: Build Android APK
+        env:
+          TRACKLOG_ANDROID_KEYSTORE_PATH: ${{ runner.temp }}/tracklog-debug.keystore
         run: |
+          cp "$HOME/.android/debug.keystore" "$TRACKLOG_ANDROID_KEYSTORE_PATH"
           cd android
           chmod +x gradlew
           ./gradlew assembleDebug

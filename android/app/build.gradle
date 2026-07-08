@@ -4,10 +4,21 @@ def customAppBuildDir = findProperty('tracklogAppBuildDir')
 if (customAppBuildDir) {
     layout.buildDirectory.set(file(customAppBuildDir))
 }
+def tracklogDebugKeystorePath = System.getenv('TRACKLOG_ANDROID_KEYSTORE_PATH')
 
 android {
     namespace = "com.tracklog.assist"
     compileSdk = rootProject.ext.compileSdkVersion
+    if (tracklogDebugKeystorePath) {
+        signingConfigs {
+            tracklogDebug {
+                storeFile file(tracklogDebugKeystorePath)
+                storePassword "android"
+                keyAlias "androiddebugkey"
+                keyPassword "android"
+            }
+        }
+    }
     defaultConfig {
         applicationId "com.tracklog.assist"
         minSdkVersion rootProject.ext.minSdkVersion
@@ -22,6 +33,11 @@ android {
         }
     }
     buildTypes {
+        debug {
+            if (tracklogDebugKeystorePath) {
+                signingConfig signingConfigs.tracklogDebug
+            }
+        }
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
