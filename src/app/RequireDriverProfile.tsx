@@ -7,10 +7,12 @@ import {
   initializeDriverIdentity,
   sendDriverMagicLink,
   setDriverProfileLocal,
+  verifyDriverEmailOtp,
 } from '../services/remoteAuth';
 import type { DriverProfileField } from '../services/driverProfileValidation';
 import {
   normalizePhoneInput,
+  toHalfWidthDigits,
   normalizeVehicleLabelInput,
   validateDriverProfile,
 } from '../services/driverProfileValidation';
@@ -44,6 +46,23 @@ function getApprovalLabel(identity: DriverIdentity) {
   return '管理者認証待ち';
 }
 
+function formatDriverAuthError(error: any) {
+  const raw = `${error?.message ?? error ?? ''}`.trim();
+  if (!raw) return '認証に失敗しました';
+  const normalized = raw.toLowerCase();
+  if (
+    normalized.includes('rate limit') ||
+    normalized.includes('email rate limit') ||
+    normalized.includes('over_email_send_rate_limit')
+  ) {
+    return 'メール送信の上限に達しています。少し待ってから再度試してください。';
+  }
+  if (normalized.includes('otp') || normalized.includes('token')) {
+    return '6桁コードが無効です。最新の認証メールで再度試してください。';
+  }
+  return raw;
+}
+
 function DriverRegistrationGate(props: {
   identity: DriverIdentity;
   loading: boolean;
@@ -54,6 +73,7 @@ function DriverRegistrationGate(props: {
   const [vehicleLabel, setVehicleLabel] = useState(identity.vehicleLabel);
   const [phone, setPhone] = useState(identity.phone);
   const [email, setEmail] = useState(identity.email ?? '');
+  const [otpToken, setOtpToken] = useState('');
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<Partial<Record<DriverProfileField, string>>>({});
@@ -84,14 +104,47 @@ function DriverRegistrationGate(props: {
       await hydrateRemoteSyncState();
       if (identity.configured && !identity.authInitialized) {
         await sendDriverMagicLink(validation.value.email);
-        setMessage('認証メールを送信しました。メール内のリンクで認証後、「認証状態を更新」を押してください。');
+        setMessage('認証メールを送信しました。メール本文の6桁コードをこの画面に入力してください。リンクで認証した場合は「認証状態を更新」を押してください。');
       } else {
         await runRemoteSync('profile-registration');
         setMessage('端末プロフィールを保存しました。管理者の承認後に利用できます。');
       }
       await onRefresh();
     } catch (error: any) {
-      setMessage(error?.message ?? '登録に失敗しました');
+      setMessage(formatDriverAuthError(error) || '登録に失敗しました');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleVerifyCode = async () => {
+    const validation = validateDriverProfile({ displayName, vehicleLabel, phone, email });
+    setDisplayName(validation.value.displayName);
+    setVehicleLabel(validation.value.vehicleLabel);
+    setPhone(validation.value.phone);
+    setEmail(validation.value.email);
+    setFieldErrors(validation.errors);
+    if (!validation.valid) {
+      setMessage(validation.firstError);
+      return;
+    }
+    const normalizedToken = toHalfWidthDigits(otpToken).replace(/\D/g, '').slice(0, 6);
+    setOtpToken(normalizedToken);
+    if (normalizedToken.length !== 6) {
+      setMessage('認証メールに記載された6桁コードを入力してください。');
+      return;
+    }
+    setBusy(true);
+    setMessage(null);
+    try {
+      await setDriverProfileLocal(validation.value);
+      await hydrateRemoteSyncState();
+      await verifyDriverEmailOtp(validation.value.email, normalizedToken);
+      await runRemoteSync('profile-registration-otp');
+      setMessage('メール認証が完了しました。管理者の承認状態を確認します。');
+      await onRefresh();
+    } catch (error: any) {
+      setMessage(formatDriverAuthError(error));
     } finally {
       setBusy(false);
     }
@@ -103,6 +156,7 @@ function DriverRegistrationGate(props: {
     identity.authInitialized &&
     identity.profileComplete &&
     identity.approvalStatus !== 'approved';
+  const showOtpPanel = identity.configured && !identity.authInitialized && email.trim().length > 0;
 
   return (
     <div className="screen-shell">
@@ -120,7 +174,7 @@ function DriverRegistrationGate(props: {
         </div>
 
         <div className="settings-note">
-          名前、メールアドレス、電話番号、車両番号を登録し、メール認証と管理者承認が完了するまで運行開始画面は利用できません。
+          名前、メールアドレス、電話番号、車両番号を登録し、メール本文の6桁コードで認証してください。メール認証と管理者承認が完了するまで運行開始画面は利用できません。
           {!identity.configured && ' 現在はクラウド設定を読み込めていないため、管理者承認を確認できません。'}
         </div>
 
@@ -203,6 +257,33 @@ function DriverRegistrationGate(props: {
             {loading ? '確認中…' : '認証状態を更新'}
           </button>
         </form>}
+
+        {!waitingForApproval && showOtpPanel && (
+          <div className="driver-registration">
+            <div className="settings-note">
+              iPhoneのホーム画面PWAでは、メールのリンクを押すとSafari側だけが認証される場合があります。
+              認証メールに表示された6桁コードをここに入力すると、このPWA内でログインできます。
+            </div>
+            <label className="settings-field">
+              <span>6桁コード</span>
+              <input
+                value={otpToken}
+                onChange={event => setOtpToken(toHalfWidthDigits(event.target.value).replace(/\D/g, '').slice(0, 6))}
+                placeholder="123456"
+                inputMode="numeric"
+                maxLength={6}
+              />
+            </label>
+            <button
+              className="trip-btn"
+              disabled={busy || loading || otpToken.length !== 6}
+              type="button"
+              onClick={handleVerifyCode}
+            >
+              6桁コードでメール認証
+            </button>
+          </div>
+        )}
 
         {waitingForApproval && (
           <button

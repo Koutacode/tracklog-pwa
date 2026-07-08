@@ -201,7 +201,7 @@ export default function SettingsScreen() {
                   }
                   await setDriverProfileLocal(validation.value);
                   await sendDriverMagicLink(validation.value.email);
-                  setMessage('認証リンクを送信しました。メールから開いて再度端末を更新してください。');
+                  setMessage('認証メールを送信しました。iPhone PWAではメール本文の6桁コードを登録済みログイン画面で入力してください。');
                 } catch (error: any) {
                   setMessage(error?.message ?? '認証リンク送信に失敗しました');
                 } finally {
@@ -289,7 +289,7 @@ export default function SettingsScreen() {
                 <strong>ブラウザで開いています</strong>
                 <span>
                   Safariや通常ブラウザで認証した状態は、ホーム画面に追加したTrackLog PWAと別扱いになる場合があります。
-                  運行開始はホーム画面のTrackLogから開くか、登録済みログインで同じメールアドレスを再認証してください。
+                  ホーム画面のTrackLogで使う場合は、登録済みログインから同じメールアドレスへ認証メールを送り、6桁コードでログインしてください。
                 </span>
                 <Link to="/driver-login" className="trip-btn" style={{ textAlign: 'center' }}>
                   登録済みログインを開く

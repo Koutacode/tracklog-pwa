@@ -90,7 +90,7 @@ export default function DriverLoginScreen() {
     setEmail(normalizedEmail);
     try {
       await sendDriverLoginLink(normalizedEmail);
-      setMessage('ログインメールを送信しました。メール内のリンク、または6桁コードが表示されている場合はコード入力でログインしてください。');
+      setMessage('ログインメールを送信しました。メール本文の6桁コードをこの画面に入力してください。リンクで認証した場合はホームを開き直してください。');
     } catch (error: any) {
       setMessage(formatDriverLoginError(error));
     } finally {
@@ -156,7 +156,7 @@ export default function DriverLoginScreen() {
         </form>
 
         <div className="settings-note" style={{ marginTop: 16 }}>
-          メール本文に6桁コードが表示されている場合は、リンクを押さずにこの画面へ入力すると、iPhoneのホーム画面PWA内でログインできます。
+          iPhoneのホーム画面PWAでは、メールのリンクを押すとSafari側だけが認証される場合があります。6桁コードを入力すると、このPWA内でログインできます。
         </div>
         <div className="driver-registration">
           <label className="settings-field">
