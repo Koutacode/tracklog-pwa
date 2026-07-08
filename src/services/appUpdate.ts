@@ -5,6 +5,11 @@ type AppUpdatePlugin = {
     opened: boolean;
     requiresPermission?: boolean;
     openedSettings?: boolean;
+    upToDate?: boolean;
+    downloadedPackageName?: string;
+    downloadedVersionName?: string | null;
+    downloadedVersionCode?: number;
+    currentVersionCode?: number;
   }>;
 };
 

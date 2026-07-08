@@ -8,12 +8,21 @@ import {
   setDriverProfileLocal,
 } from '../services/remoteAuth';
 import { hydrateRemoteSyncState, runRemoteSync } from '../services/remoteSync';
+import {
+  checkNativeSetupReadiness,
+  openAppPermissionSettings,
+  openExactAlarmSettings,
+  openSystemLocationSettings,
+  requestBatteryOptimizationExemption,
+  runNativeQuickSetup,
+} from '../services/nativeSetup';
+import type { NativeSetupReadiness } from '../services/nativeSetup';
 
 type Props = {
   children: ReactElement;
 };
 
-function shouldAllowApp(identity: DriverIdentity | null) {
+function hasApprovedProfile(identity: DriverIdentity | null) {
   if (!identity) return false;
   if (!identity.configured) return false;
   return identity.authInitialized && identity.profileComplete && identity.approvalStatus === 'approved';
@@ -184,9 +193,132 @@ function DriverRegistrationGate(props: {
   );
 }
 
+function DeviceSetupGate(props: {
+  readiness: NativeSetupReadiness | null;
+  loading: boolean;
+  onRefresh: () => Promise<void>;
+}) {
+  const { readiness, loading, onRefresh } = props;
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+
+  const steps = readiness?.steps ?? [];
+
+  const runAction = async (action: () => Promise<unknown>, nextMessage: string) => {
+    setBusy(true);
+    setMessage(null);
+    try {
+      await action();
+      setMessage(nextMessage);
+      await onRefresh();
+    } catch (error: any) {
+      setMessage(error?.message ?? '端末設定を確認できませんでした');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="screen-shell">
+      <div className="screen-card screen-card--narrow">
+        <div className="screen-card__header">
+          <div>
+            <div className="screen-card__eyebrow">初回設定</div>
+            <h1 className="screen-card__title">端末設定を完了してください</h1>
+          </div>
+        </div>
+
+        <div className="settings-note">
+          管理者承認は完了しています。バックグラウンド記録を安定させるため、必要な端末設定が完了するまで運行機能は使えません。
+        </div>
+
+        <div className="setup-check-list">
+          {loading && steps.length === 0 ? (
+            <div className="setup-check-row setup-check-row--warn">
+              <strong>確認中</strong>
+              <span>端末設定の状態を確認しています。</span>
+            </div>
+          ) : (
+            steps.map(step => (
+              <div className={`setup-check-row setup-check-row--${step.level}`} key={step.id}>
+                <strong>{step.label}</strong>
+                <span>{step.detail}</span>
+              </div>
+            ))
+          )}
+        </div>
+
+        <div className="setup-gate-actions">
+          <button
+            className="trip-btn trip-btn--primary"
+            disabled={busy || loading}
+            type="button"
+            onClick={() => runAction(runNativeQuickSetup, '一括セットアップを実行しました。設定画面で許可後、再確認してください。')}
+          >
+            {busy ? '処理中…' : '一括セットアップ'}
+          </button>
+          <button
+            className="trip-btn"
+            disabled={busy || loading}
+            type="button"
+            onClick={() => runAction(onRefresh, '設定状態を再確認しました。')}
+          >
+            {loading ? '確認中…' : '設定状態を再確認'}
+          </button>
+          <button
+            className="trip-btn"
+            disabled={busy}
+            type="button"
+            onClick={() => runAction(openAppPermissionSettings, 'OSのアプリ権限設定を開きました。')}
+          >
+            OS権限設定
+          </button>
+          <button
+            className="trip-btn"
+            disabled={busy}
+            type="button"
+            onClick={() => runAction(openSystemLocationSettings, '位置情報設定を開きました。')}
+          >
+            位置情報設定
+          </button>
+          <button
+            className="trip-btn"
+            disabled={busy}
+            type="button"
+            onClick={() => runAction(requestBatteryOptimizationExemption, '電池最適化設定を開きました。')}
+          >
+            電池最適化
+          </button>
+          <button
+            className="trip-btn"
+            disabled={busy}
+            type="button"
+            onClick={() => runAction(openExactAlarmSettings, 'Exact Alarm設定を開きました。')}
+          >
+            Exact Alarm
+          </button>
+        </div>
+
+        {message && <div className="settings-toast">{message}</div>}
+      </div>
+    </div>
+  );
+}
+
 export default function RequireDriverProfile({ children }: Props) {
   const [identity, setIdentity] = useState<DriverIdentity | null>(null);
   const [loading, setLoading] = useState(true);
+  const [setupReadiness, setSetupReadiness] = useState<NativeSetupReadiness | null>(null);
+  const [setupLoading, setSetupLoading] = useState(false);
+
+  const refreshNativeSetup = async () => {
+    setSetupLoading(true);
+    try {
+      setSetupReadiness(await checkNativeSetupReadiness());
+    } finally {
+      setSetupLoading(false);
+    }
+  };
 
   const refreshIdentity = async () => {
     setLoading(true);
@@ -194,6 +326,9 @@ export default function RequireDriverProfile({ children }: Props) {
       const current = await getDriverIdentity();
       const next = current.configured ? await initializeDriverIdentity() : current;
       setIdentity(next);
+      if (hasApprovedProfile(next)) {
+        await refreshNativeSetup();
+      }
     } catch {
       setIdentity(await getDriverIdentity());
     } finally {
@@ -225,16 +360,45 @@ export default function RequireDriverProfile({ children }: Props) {
     };
   }, []);
 
+  useEffect(() => {
+    if (!hasApprovedProfile(identity)) {
+      setSetupReadiness(null);
+      return;
+    }
+    let active = true;
+    setSetupLoading(true);
+    void checkNativeSetupReadiness()
+      .then(readiness => {
+        if (active) setSetupReadiness(readiness);
+      })
+      .finally(() => {
+        if (active) setSetupLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [identity?.configured, identity?.authInitialized, identity?.profileComplete, identity?.approvalStatus]);
+
   if (!identity) {
     return <div style={{ padding: 24, color: '#fff' }}>登録状態を確認中…</div>;
   }
 
-  if (!shouldAllowApp(identity)) {
+  if (!hasApprovedProfile(identity)) {
     return (
       <DriverRegistrationGate
         identity={identity as DriverIdentity}
         loading={loading}
         onRefresh={refreshIdentity}
+      />
+    );
+  }
+
+  if (!setupReadiness?.ready) {
+    return (
+      <DeviceSetupGate
+        readiness={setupReadiness}
+        loading={setupLoading}
+        onRefresh={refreshNativeSetup}
       />
     );
   }

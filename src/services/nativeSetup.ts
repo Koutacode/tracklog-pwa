@@ -43,6 +43,11 @@ export type NativePlatformInfo = {
   exactAlarmRelevant: boolean | null;
 };
 
+export type NativeSetupReadiness = {
+  ready: boolean;
+  steps: NativeSetupStep[];
+};
+
 export type NativeLocationPermissionDetail = {
   foreground: SimplePermissionState;
   background: SimplePermissionState;
@@ -385,6 +390,110 @@ export async function checkBatteryOptimizationStatus(): Promise<SimplePermission
   } catch {
     return 'unknown';
   }
+}
+
+function permissionLevel(state: SimplePermissionState): NativeSetupStep['level'] {
+  if (state === 'granted') return 'ok';
+  if (state === 'denied') return 'error';
+  return 'warn';
+}
+
+function permissionDetail(state: SimplePermissionState, ok: string, denied: string, unknown: string) {
+  if (state === 'granted') return ok;
+  if (state === 'denied') return denied;
+  return unknown;
+}
+
+export async function checkNativeSetupReadiness(): Promise<NativeSetupReadiness> {
+  if (!isNative()) {
+    return {
+      ready: true,
+      steps: [
+        {
+          id: 'native-only',
+          label: '端末設定',
+          level: 'ok',
+          detail: 'PWA/ブラウザではAndroid権限チェック対象外です。',
+        },
+      ],
+    };
+  }
+
+  const [locationDetail, notification, battery, exact, platformInfo] = await Promise.all([
+    checkNativeLocationPermissionDetail(),
+    checkNotificationPermissionStatus(),
+    checkBatteryOptimizationStatus(),
+    checkExactAlarmStatus(),
+    getNativePlatformInfo(),
+  ]);
+
+  const foreground = locationDetail.foreground;
+  const background = locationDetail.backgroundRelevant ? locationDetail.background : 'granted';
+  const exactRelevant = platformInfo.exactAlarmRelevant !== false;
+  const exactState = exactRelevant ? exact : 'granted';
+
+  const steps: NativeSetupStep[] = [
+    {
+      id: 'location-foreground',
+      label: '位置情報',
+      level: permissionLevel(foreground),
+      detail: permissionDetail(
+        foreground,
+        '許可済み',
+        '拒否されています。端末設定で位置情報を許可してください。',
+        '状態を確認できません。端末設定で位置情報を確認してください。',
+      ),
+    },
+    {
+      id: 'location-background',
+      label: '常時位置情報',
+      level: permissionLevel(background),
+      detail: permissionDetail(
+        background,
+        locationDetail.backgroundRelevant ? '常に許可済み' : 'この端末では常時許可チェック対象外です。',
+        '前景のみ許可されています。端末設定で「常に許可」に変更してください。',
+        '状態を確認できません。端末設定で「常に許可」になっているか確認してください。',
+      ),
+    },
+    {
+      id: 'notification',
+      label: '通知',
+      level: permissionLevel(notification),
+      detail: permissionDetail(
+        notification,
+        '許可済み',
+        '拒否されています。通知を許可してください。',
+        '状態を確認できません。通知設定を確認してください。',
+      ),
+    },
+    {
+      id: 'battery-opt',
+      label: '電池最適化',
+      level: permissionLevel(battery),
+      detail: permissionDetail(
+        battery,
+        '最適化除外済み',
+        '最適化対象です。バックグラウンド記録のため除外してください。',
+        '状態を確認できません。電池最適化設定を確認してください。',
+      ),
+    },
+    {
+      id: 'exact-alarm',
+      label: 'Exact Alarm',
+      level: permissionLevel(exactState),
+      detail: permissionDetail(
+        exactState,
+        exactRelevant ? '有効' : 'このAndroidバージョンでは対象外です。',
+        '無効です。正確な通知の許可を有効にしてください。',
+        '状態を確認できません。正確な通知の許可を確認してください。',
+      ),
+    },
+  ];
+
+  return {
+    ready: steps.every(step => step.level === 'ok'),
+    steps,
+  };
 }
 
 export async function requestBatteryOptimizationExemption(): Promise<{

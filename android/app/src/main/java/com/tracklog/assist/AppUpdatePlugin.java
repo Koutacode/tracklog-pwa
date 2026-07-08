@@ -2,6 +2,8 @@ package com.tracklog.assist;
 
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.PackageInfo;
+import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Build;
 import android.provider.Settings;
@@ -22,6 +24,14 @@ import java.net.URL;
 
 @CapacitorPlugin(name = "AppUpdate")
 public class AppUpdatePlugin extends Plugin {
+    private static class ApkValidationResult {
+        String packageName;
+        String versionName;
+        long versionCode;
+        long currentVersionCode;
+        boolean upToDate;
+    }
+
     private File downloadApk(String downloadUrl) throws Exception {
         Context context = getContext();
         File updateDir = new File(context.getCacheDir(), "updates");
@@ -63,6 +73,74 @@ public class AppUpdatePlugin extends Plugin {
         return apkFile;
     }
 
+    @SuppressWarnings("deprecation")
+    private PackageInfo getArchivePackageInfo(File apkFile) {
+        PackageManager packageManager = getContext().getPackageManager();
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            return packageManager.getPackageArchiveInfo(
+                apkFile.getAbsolutePath(),
+                PackageManager.PackageInfoFlags.of(0)
+            );
+        }
+        return packageManager.getPackageArchiveInfo(apkFile.getAbsolutePath(), 0);
+    }
+
+    @SuppressWarnings("deprecation")
+    private PackageInfo getInstalledPackageInfo(String packageName) throws PackageManager.NameNotFoundException {
+        PackageManager packageManager = getContext().getPackageManager();
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            return packageManager.getPackageInfo(
+                packageName,
+                PackageManager.PackageInfoFlags.of(0)
+            );
+        }
+        return packageManager.getPackageInfo(packageName, 0);
+    }
+
+    @SuppressWarnings("deprecation")
+    private long getVersionCode(PackageInfo packageInfo) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            return packageInfo.getLongVersionCode();
+        }
+        return packageInfo.versionCode;
+    }
+
+    private ApkValidationResult validateDownloadedApk(File apkFile) throws Exception {
+        PackageInfo downloaded = getArchivePackageInfo(apkFile);
+        if (downloaded == null) {
+            throw new IllegalStateException("取得したAPKの情報を読み取れませんでした。");
+        }
+
+        String currentPackageName = getContext().getPackageName();
+        if (!currentPackageName.equals(downloaded.packageName)) {
+            throw new IllegalStateException("別アプリのAPKです: " + downloaded.packageName);
+        }
+
+        PackageInfo installed = getInstalledPackageInfo(currentPackageName);
+        ApkValidationResult result = new ApkValidationResult();
+        result.packageName = downloaded.packageName;
+        result.versionName = downloaded.versionName;
+        result.versionCode = getVersionCode(downloaded);
+        result.currentVersionCode = getVersionCode(installed);
+        result.upToDate = result.versionCode <= result.currentVersionCode;
+        return result;
+    }
+
+    private JSObject buildResult(boolean opened, boolean requiresPermission, boolean openedSettings, ApkValidationResult validation) {
+        JSObject result = new JSObject();
+        result.put("opened", opened);
+        result.put("requiresPermission", requiresPermission);
+        result.put("openedSettings", openedSettings);
+        if (validation != null) {
+            result.put("upToDate", validation.upToDate);
+            result.put("downloadedPackageName", validation.packageName);
+            result.put("downloadedVersionName", validation.versionName);
+            result.put("downloadedVersionCode", validation.versionCode);
+            result.put("currentVersionCode", validation.currentVersionCode);
+        }
+        return result;
+    }
+
     private void openInstallPermissionSettings(PluginCall call) {
         try {
             Intent intent = new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES);
@@ -70,11 +148,7 @@ public class AppUpdatePlugin extends Plugin {
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
             getContext().startActivity(intent);
 
-            JSObject result = new JSObject();
-            result.put("opened", true);
-            result.put("requiresPermission", true);
-            result.put("openedSettings", true);
-            call.resolve(result);
+            call.resolve(buildResult(true, true, true, null));
         } catch (Exception ex) {
             call.reject("アプリ更新の許可設定を開けませんでした。", ex);
         }
@@ -110,14 +184,15 @@ public class AppUpdatePlugin extends Plugin {
         new Thread(() -> {
             try {
                 File apkFile = downloadApk(downloadUrl.trim());
+                ApkValidationResult validation = validateDownloadedApk(apkFile);
                 getActivity().runOnUiThread(() -> {
                     try {
+                        if (validation.upToDate) {
+                            call.resolve(buildResult(false, false, false, validation));
+                            return;
+                        }
                         openInstaller(apkFile);
-                        JSObject result = new JSObject();
-                        result.put("opened", true);
-                        result.put("requiresPermission", false);
-                        result.put("openedSettings", false);
-                        call.resolve(result);
+                        call.resolve(buildResult(true, false, false, validation));
                     } catch (Exception ex) {
                         call.reject("更新インストーラーを開けませんでした。", ex);
                     }

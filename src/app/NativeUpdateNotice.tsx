@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Capacitor } from '@capacitor/core';
-import { APP_VERSION, BUILD_DATE } from './version';
+import { APP_VERSION } from './version';
 import {
   LATEST_RELEASE_API,
   pickPreferredApkAsset,
@@ -9,7 +9,6 @@ import {
 import { startNativeAppUpdate } from '../services/appUpdate';
 
 const CHECK_INTERVAL_MS = 5 * 60 * 1000;
-const UPDATE_GRACE_MS = 10 * 60 * 1000;
 
 type ReleaseInfo = {
   tag: string;
@@ -21,17 +20,8 @@ type ReleaseInfo = {
 
 function isNewerRelease(release: ReleaseInfo) {
   const releaseVersion = release.tag.replace(/^v/i, '').trim();
-  if (releaseVersion) {
-    const versionCompare = compareVersions(releaseVersion, APP_VERSION);
-    if (versionCompare > 0) return true;
-    if (versionCompare < 0) return false;
-  }
-
-  const buildTime = Date.parse(BUILD_DATE);
-  const effectiveTime = release.assetUpdatedAt || release.publishedAt;
-  const releaseTime = Date.parse(effectiveTime);
-  if (!Number.isFinite(buildTime) || !Number.isFinite(releaseTime)) return false;
-  return releaseTime > buildTime + UPDATE_GRACE_MS;
+  if (!releaseVersion) return false;
+  return compareVersions(releaseVersion, APP_VERSION) > 0;
 }
 
 function compareVersions(a: string, b: string) {
@@ -100,7 +90,7 @@ export default function NativeUpdateNotice() {
 
   if (!isNative || !release) return null;
 
-  const published = new Date(release.assetUpdatedAt || release.publishedAt);
+  const published = new Date(release.publishedAt);
   const publishedText = Number.isFinite(published.getTime())
     ? published.toLocaleString('ja-JP')
     : release.publishedAt;
@@ -113,7 +103,7 @@ export default function NativeUpdateNotice() {
           新しいアプリがあります。OKを押すと最新版APKを取得し、Androidの更新画面を開きます。
         </div>
         <div className="native-update-card__meta">
-          現在: v{APP_VERSION} / 最新: {release.tag}（{publishedText}）
+          現在: v{APP_VERSION} / 最新: {release.tag}（公開: {publishedText}）
         </div>
         {updateMessage && <div className="native-update-card__message">{updateMessage}</div>}
         <button
@@ -126,6 +116,12 @@ export default function NativeUpdateNotice() {
               const result = await startNativeAppUpdate(release.downloadUrl);
               if (result.requiresPermission) {
                 setUpdateMessage('インストール許可の設定画面を開きました。許可後、もう一度OKを押してください。');
+                setUpdating(false);
+                return;
+              }
+              if (result.upToDate) {
+                setUpdateMessage('この端末にはすでに最新版が入っています。');
+                setRelease(null);
                 setUpdating(false);
                 return;
               }

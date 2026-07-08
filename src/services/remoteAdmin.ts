@@ -6,6 +6,11 @@ import type {
   RemoteTripHeader,
 } from '../domain/remoteTypes';
 import { adminSupabase, SUPABASE_CONFIGURED } from './supabase';
+import {
+  deleteTracklogDeviceViaFunction,
+  deleteTracklogTripViaFunction,
+  setTracklogDeviceApprovalViaFunction,
+} from './tracklogPrivilegedApi';
 
 export type AdminDeviceBundle = {
   profile: RemoteDeviceProfile | null;
@@ -37,11 +42,6 @@ function assertAdminConfigured() {
   return adminSupabase;
 }
 
-function isMissingDeleteRpc(error: { code?: string; message?: string }) {
-  const message = error.message ?? '';
-  return error.code === 'PGRST202' || message.includes('delete_tracklog_device');
-}
-
 function isHiddenDeviceProfile(profile: RemoteDeviceProfile) {
   return profile.platform === ADMIN_HIDDEN_PLATFORM || profile.latest_status === ADMIN_HIDDEN_STATUS;
 }
@@ -60,47 +60,39 @@ export async function setAdminDeviceApproval(
   deviceId: string,
   decision: ApprovalDecision,
 ): Promise<RemoteDeviceProfile> {
-  const client = assertAdminConfigured();
-  const { data, error } = await client.rpc('set_tracklog_device_approval', {
-    _device_id: deviceId,
-    _approval_status: decision,
+  assertAdminConfigured();
+  return setTracklogDeviceApprovalViaFunction({
+    deviceId,
+    approvalStatus: decision,
   });
-  if (error) throw error;
-  const profile = Array.isArray(data) ? data[0] : data;
-  if (!profile) throw new Error('承認状態の更新結果を取得できませんでした');
-  return profile as RemoteDeviceProfile;
 }
 
 export async function deleteAdminDevice(deviceId: string): Promise<DeleteAdminDeviceResult> {
-  const client = assertAdminConfigured();
-  const { error } = await client.rpc('delete_tracklog_device', {
-    _device_id: deviceId,
-  });
-  if (!error) return { mode: 'deleted' };
-  if (!isMissingDeleteRpc(error)) throw error;
-
-  const { error: hideError } = await client
-    .from('device_profiles')
-    .update({
-      platform: ADMIN_HIDDEN_PLATFORM,
-      latest_status: ADMIN_HIDDEN_STATUS,
-      latest_trip_id: null,
-      latest_lat: null,
-      latest_lng: null,
-      latest_accuracy: null,
-      last_seen_at: new Date().toISOString(),
-    })
-    .eq('device_id', deviceId);
-  if (hideError) throw hideError;
-  return { mode: 'hidden' };
+  assertAdminConfigured();
+  const deletedCount = await deleteTracklogDeviceViaFunction(deviceId);
+  if (deletedCount <= 0) {
+    const client = assertAdminConfigured();
+    const { error: hideError } = await client
+      .from('device_profiles')
+      .update({
+        platform: ADMIN_HIDDEN_PLATFORM,
+        latest_status: ADMIN_HIDDEN_STATUS,
+        latest_trip_id: null,
+        latest_lat: null,
+        latest_lng: null,
+        latest_accuracy: null,
+        last_seen_at: new Date().toISOString(),
+      })
+      .eq('device_id', deviceId);
+    if (hideError) throw hideError;
+    return { mode: 'hidden' };
+  }
+  return { mode: 'deleted' };
 }
 
 export async function deleteAdminTrip(tripId: string): Promise<boolean> {
-  const client = assertAdminConfigured();
-  const { error } = await client.rpc('delete_tracklog_trip', {
-    _trip_id: tripId,
-  });
-  if (error) throw error;
+  assertAdminConfigured();
+  await deleteTracklogTripViaFunction(tripId);
   return true;
 }
 

@@ -5,6 +5,10 @@ import { db } from '../db/db';
 import type { AdminSession, DriverApprovalStatus, DriverIdentity } from '../domain/remoteTypes';
 import { getStableDeviceKey } from './deviceIdentity';
 import { adminSupabase, driverSupabase, SUPABASE_CONFIGURED } from './supabase';
+import {
+  claimTracklogDeviceProfileViaFunction,
+  migrateTracklogDeviceRecordsViaFunction,
+} from './tracklogPrivilegedApi';
 
 const META_DEVICE_ID = 'device_id';
 const META_DEVICE_DISPLAY_NAME = 'device_display_name';
@@ -130,23 +134,21 @@ async function claimTracklogDeviceProfile(input: {
   latestAccuracy?: number | null;
 }) {
   if (!driverSupabase) return null;
-  const { data, error } = await driverSupabase.rpc('claim_tracklog_device_profile', {
-    _device_id: input.deviceId,
-    _display_name: input.displayName?.trim() || null,
-    _vehicle_label: input.vehicleLabel?.trim() || null,
-    _driver_phone: input.driverPhone?.trim() || null,
-    _driver_email: input.driverEmail?.trim() || null,
-    _platform: Capacitor.getPlatform(),
-    _app_version: APP_VERSION,
-    _latest_status: input.latestStatus ?? null,
-    _latest_trip_id: input.latestTripId ?? null,
-    _latest_lat: input.latestLat ?? null,
-    _latest_lng: input.latestLng ?? null,
-    _latest_accuracy: input.latestAccuracy ?? null,
-    _last_seen_at: nowIso(),
-  });
-  if (error) throw error;
-  return (Array.isArray(data) ? data[0] : data) as ClaimedDeviceProfile | null;
+  return claimTracklogDeviceProfileViaFunction({
+    deviceId: input.deviceId,
+    displayName: input.displayName?.trim() || null,
+    vehicleLabel: input.vehicleLabel?.trim() || null,
+    driverPhone: input.driverPhone?.trim() || null,
+    driverEmail: input.driverEmail?.trim() || null,
+    platform: Capacitor.getPlatform(),
+    appVersion: APP_VERSION,
+    latestStatus: input.latestStatus ?? null,
+    latestTripId: input.latestTripId ?? null,
+    latestLat: input.latestLat ?? null,
+    latestLng: input.latestLng ?? null,
+    latestAccuracy: input.latestAccuracy ?? null,
+    lastSeenAt: nowIso(),
+  }) as Promise<ClaimedDeviceProfile | null>;
 }
 
 async function getCurrentCloudProfile(userId: string): Promise<DriverProfileSeed | null> {
@@ -267,11 +269,10 @@ export async function initializeDriverIdentity(): Promise<DriverIdentity> {
   const cloudProfile = await getCurrentCloudProfile(user.id);
   const deviceId = stableDeviceKey;
   if (currentDeviceId && currentDeviceId !== deviceId && isLegacyAnonymousDeviceId(currentDeviceId)) {
-    const { error } = await driverSupabase.rpc('migrate_tracklog_device_records', {
-      _old_device_id: currentDeviceId,
-      _new_device_id: deviceId,
+    await migrateTracklogDeviceRecordsViaFunction({
+      oldDeviceId: currentDeviceId,
+      newDeviceId: deviceId,
     });
-    if (error) throw error;
   }
 
   const mergedDisplayName = normalizeText(savedDisplayName) || cloudProfile?.displayName || getDriverDisplayNameFallback(user) || '';

@@ -1,6 +1,6 @@
 {
   "name": "tracklog-assist",
-  "version": "0.1.17",
+  "version": "0.1.18",
   "private": true,
   "description": "Truck operation log native app with offline support and day-based segment calculations.",
   "tracklogRelease": {
@@ -20,6 +20,7 @@
     "normalize:android-assets": "powershell -ExecutionPolicy Bypass -File scripts/normalize-capacitor-assets.ps1",
     "deploy:pages": "wrangler pages deploy dist --project-name tracklog-assist",
     "release:prepare": "powershell -ExecutionPolicy Bypass -File skills/tracklog-release-notion/scripts/prepare-tracklog-release.ps1 -Build -SyncAndroid -AssembleDebug",
+    "release:verify:apk": "powershell -ExecutionPolicy Bypass -File scripts/verify-latest-release-apk.ps1",
     "sync:notion:push": "node scripts/sync_notion_from_github.mjs",
     "sync:notion:pull": "node scripts/pull_notion_status_to_repo.mjs"
   },

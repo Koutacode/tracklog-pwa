@@ -190,6 +190,61 @@ a:hover {
   background: rgba(22, 101, 52, 0.18);
 }
 
+.setup-check-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.setup-check-row {
+  display: grid;
+  gap: 4px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: rgba(15, 23, 42, 0.72);
+  border: 1px solid rgba(148, 163, 184, 0.2);
+}
+
+.setup-check-row strong {
+  font-size: 15px;
+}
+
+.setup-check-row span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.setup-check-row--ok {
+  border-color: rgba(34, 197, 94, 0.34);
+}
+
+.setup-check-row--ok span {
+  color: #bbf7d0;
+}
+
+.setup-check-row--warn {
+  border-color: rgba(250, 204, 21, 0.34);
+}
+
+.setup-check-row--warn span {
+  color: #fde68a;
+}
+
+.setup-check-row--error {
+  border-color: rgba(248, 113, 113, 0.42);
+}
+
+.setup-check-row--error span {
+  color: #fecaca;
+}
+
+.setup-gate-actions {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px;
+  margin-top: 18px;
+}
+
 .approval-wait-card {
   display: grid;
   gap: 6px;

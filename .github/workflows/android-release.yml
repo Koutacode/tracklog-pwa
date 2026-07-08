@@ -30,6 +30,25 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Validate release version
+        shell: bash
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const pkg = require('./package.json');
+          const expectedTag = `v${pkg.version}`;
+          const actualTag = process.env.GITHUB_REF_NAME;
+          if (actualTag !== expectedTag) {
+            throw new Error(`Tag ${actualTag} does not match package.json version ${pkg.version}`);
+          }
+          const gradleProps = fs.readFileSync('android/gradle.properties', 'utf8');
+          const versionName = gradleProps.match(/^tracklogVersionName=(.+)$/m)?.[1]?.trim();
+          if (versionName !== pkg.version) {
+            throw new Error(`Android versionName ${versionName} does not match package.json version ${pkg.version}`);
+          }
+          console.log(`Release version OK: ${actualTag}`);
+          NODE
+
       - name: Typecheck
         run: npm run typecheck
 
