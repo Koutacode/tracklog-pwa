@@ -73,8 +73,7 @@ export default function SettingsScreen() {
             <button
               className="pill-link"
               onClick={async () => {
-                const url = PWA_URL;
-                const text = `【TrackLog 配布用アプリ】\nAndroidはAPK、iPhoneはSafariで以下のURLを開いてホーム画面に追加してください。\n${url}`;
+                const text = `【TrackLog 配布用アプリ】\nAndroidはこちらのAPKをインストールしてください。\n${DEFAULT_APK_DOWNLOAD_URL}\n\niPhoneはSafariでこちらを開いてホーム画面に追加してください。\n${PWA_URL}`;
                 try {
                   const shared = await shareText({ title: 'TrackLog アプリを共有', text });
                   if (!shared && navigator.share) {

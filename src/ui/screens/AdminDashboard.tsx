@@ -4,7 +4,7 @@ import type { RemoteDeviceProfile } from '../../domain/remoteTypes';
 import { deleteAdminDevice, listAdminDevices, setAdminDeviceApproval } from '../../services/remoteAdmin';
 import { getAdminSession, signOutAdmin } from '../../services/remoteAuth';
 import { shareText } from '../../services/nativeShare';
-import { PWA_URL } from '../../app/releaseInfo';
+import { DEFAULT_APK_DOWNLOAD_URL, PWA_URL } from '../../app/releaseInfo';
 import AdminMap from '../components/AdminMap';
 
 function fmtDateTime(ts?: string | null) {
@@ -225,8 +225,7 @@ export default function AdminDashboard() {
             <button
               className="pill-link"
               onClick={async () => {
-                const url = PWA_URL;
-                const text = `【TrackLog 配布用アプリ】\n以下のURLからアプリを開き、Androidの場合はインストールしてください。\n${url}\n\n※管理者画面は ${url}/admin です。`;
+                const text = `【TrackLog 配布用アプリ】\nAndroidはこちらのAPKをインストールしてください。\n${DEFAULT_APK_DOWNLOAD_URL}\n\niPhoneはSafariでこちらを開いてホーム画面に追加してください。\n${PWA_URL}\n\n※管理者画面は ${PWA_URL}/admin です。`;
                 try {
                   const shared = await shareText({ title: 'TrackLog アプリを共有', text });
                   if (!shared && navigator.share) {
