@@ -1,44 +1,14 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Capacitor } from '@capacitor/core';
 import { APP_VERSION } from './version';
-import {
-  LATEST_RELEASE_API,
-  pickPreferredApkAsset,
-  resolveApkDownloadUrl,
-} from './releaseInfo';
+import { checkLatestAndroidRelease, type AndroidReleaseCheck } from '../services/appVersionCheck';
 import { startNativeAppUpdate } from '../services/appUpdate';
 
 const CHECK_INTERVAL_MS = 5 * 60 * 1000;
 
-type ReleaseInfo = {
-  tag: string;
-  publishedAt: string;
-  assetUpdatedAt?: string | null;
-  htmlUrl: string | null;
-  downloadUrl: string;
-};
-
-function isNewerRelease(release: ReleaseInfo) {
-  const releaseVersion = release.tag.replace(/^v/i, '').trim();
-  if (!releaseVersion) return false;
-  return compareVersions(releaseVersion, APP_VERSION) > 0;
-}
-
-function compareVersions(a: string, b: string) {
-  const aParts = a.split(/[.-]/).map(part => Number.parseInt(part, 10));
-  const bParts = b.split(/[.-]/).map(part => Number.parseInt(part, 10));
-  const len = Math.max(aParts.length, bParts.length);
-  for (let i = 0; i < len; i += 1) {
-    const av = Number.isFinite(aParts[i]) ? aParts[i] : 0;
-    const bv = Number.isFinite(bParts[i]) ? bParts[i] : 0;
-    if (av !== bv) return av > bv ? 1 : -1;
-  }
-  return 0;
-}
-
 export default function NativeUpdateNotice() {
   const isNative = useMemo(() => Capacitor.isNativePlatform(), []);
-  const [release, setRelease] = useState<ReleaseInfo | null>(null);
+  const [release, setRelease] = useState<AndroidReleaseCheck | null>(null);
   const [updating, setUpdating] = useState(false);
   const [updateMessage, setUpdateMessage] = useState<string | null>(null);
 
@@ -47,24 +17,10 @@ export default function NativeUpdateNotice() {
     let cancelled = false;
     const runCheck = async () => {
       try {
-        const resp = await fetch(LATEST_RELEASE_API, {
-          headers: { Accept: 'application/vnd.github+json' },
-        });
-        if (!resp.ok) return;
-        const data = await resp.json();
-        const assets = Array.isArray(data?.assets) ? data.assets : [];
-        const apkAsset = pickPreferredApkAsset(assets);
-        const info: ReleaseInfo = {
-          tag: data?.tag_name ?? '',
-          publishedAt: data?.published_at ?? '',
-          assetUpdatedAt: apkAsset?.updated_at ?? apkAsset?.created_at ?? null,
-          htmlUrl: data?.html_url ?? null,
-          downloadUrl: resolveApkDownloadUrl(apkAsset),
-        };
-        if (!info.tag || !info.publishedAt) return;
-        if (!isNewerRelease(info)) return;
+        const info = await checkLatestAndroidRelease();
+        if (!info.updateAvailable) return;
         if (cancelled) return;
-        if (!cancelled) setRelease(info);
+        setRelease(info);
       } catch {
         // ignore
       }
@@ -90,10 +46,10 @@ export default function NativeUpdateNotice() {
 
   if (!isNative || !release) return null;
 
-  const published = new Date(release.publishedAt);
+  const published = new Date(release.publishedAt ?? '');
   const publishedText = Number.isFinite(published.getTime())
     ? published.toLocaleString('ja-JP')
-    : release.publishedAt;
+    : release.publishedAt ?? '不明';
 
   return (
     <div className="native-update-modal" role="dialog" aria-modal="true" aria-labelledby="native-update-title">

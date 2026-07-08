@@ -1,10 +1,19 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Capacitor } from '@capacitor/core';
+import { APP_VERSION, BUILD_DATE } from '../../app/version';
 import { getDriverIdentity, sendDriverMagicLink, setDriverProfileLocal } from '../../services/remoteAuth';
 import { getRemoteSyncState, hydrateRemoteSyncState, runRemoteSync, subscribeRemoteSyncState } from '../../services/remoteSync';
 import { shareText } from '../../services/nativeShare';
 import { PWA_URL, DEFAULT_APK_DOWNLOAD_URL } from '../../app/releaseInfo';
+import {
+  checkLatestAndroidRelease,
+  checkLatestPwaBuild,
+  reloadPwaForLatestBuild,
+  type AndroidReleaseCheck,
+  type PwaBuildCheck,
+} from '../../services/appVersionCheck';
+import { startNativeAppUpdate } from '../../services/appUpdate';
 import {
   checkLocationPermissionStatus,
   checkNotificationPermissionStatus,
@@ -31,6 +40,18 @@ function permissionLabel(state: SimplePermissionState) {
   return '未確認';
 }
 
+function formatDateTime(value: string | null | undefined) {
+  if (!value) return '未確認';
+  const date = new Date(value);
+  return Number.isFinite(date.getTime()) ? date.toLocaleString('ja-JP') : value;
+}
+
+function latestVersionLabel(check: AndroidReleaseCheck | PwaBuildCheck | null) {
+  if (!check) return '未確認';
+  if (check.kind === 'android') return `v${check.latestVersion}`;
+  return check.latestVersion ? `v${check.latestVersion}` : '不明';
+}
+
 export default function SettingsScreen() {
   const [displayName, setDisplayName] = useState('');
   const [vehicleLabel, setVehicleLabel] = useState('');
@@ -47,6 +68,9 @@ export default function SettingsScreen() {
   const [pwaLocationPermission, setPwaLocationPermission] = useState<SimplePermissionState>('unknown');
   const [pwaNotificationPermission, setPwaNotificationPermission] = useState<SimplePermissionState>('unknown');
   const [pwaPermissionBusy, setPwaPermissionBusy] = useState<string | null>(null);
+  const [versionCheck, setVersionCheck] = useState<AndroidReleaseCheck | PwaBuildCheck | null>(null);
+  const [versionChecking, setVersionChecking] = useState(false);
+  const [versionUpdating, setVersionUpdating] = useState(false);
 
   const isNative = Capacitor.isNativePlatform();
   const standalone = useMemo(() => isStandaloneMode(), []);
@@ -61,6 +85,24 @@ export default function SettingsScreen() {
           ? '管理者認証待ち'
           : '未申請';
   const syncAvailable = syncState.configured && authInitialized && profileComplete && approvalStatus === 'approved';
+
+  const runVersionCheck = async () => {
+    setVersionChecking(true);
+    setMessage(null);
+    try {
+      const result = isNative ? await checkLatestAndroidRelease() : await checkLatestPwaBuild();
+      setVersionCheck(result);
+      setMessage(result.updateAvailable
+        ? isNative
+          ? '新しいAndroid APKがあります。下のボタンから更新できます。'
+          : '新しいPWAがあります。下のボタンから最新版を読み込めます。'
+        : 'この端末は最新版です');
+    } catch (error: any) {
+      setMessage(error?.message ?? 'バージョン確認に失敗しました。通信状態を確認してください。');
+    } finally {
+      setVersionChecking(false);
+    }
+  };
 
   useEffect(() => {
     let active = true;
@@ -383,6 +425,88 @@ export default function SettingsScreen() {
               </button>
             </article>
           )}
+
+          <article className="card settings-panel">
+            <div className="settings-panel__title">アプリバージョン</div>
+            <div className="settings-info-row">
+              <span>現在</span>
+              <strong>v{APP_VERSION}</strong>
+            </div>
+            <div className="settings-info-row">
+              <span>現在のビルド</span>
+              <strong>{formatDateTime(BUILD_DATE)}</strong>
+            </div>
+            <div className="settings-info-row">
+              <span>{isNative ? '最新APK' : '最新PWA'}</span>
+              <strong>{latestVersionLabel(versionCheck)}</strong>
+            </div>
+            {versionCheck?.kind === 'pwa' && (
+              <div className="settings-info-row">
+                <span>最新ビルド</span>
+                <strong>{formatDateTime(versionCheck.latestBuildDate)}</strong>
+              </div>
+            )}
+            <div className="settings-info-row">
+              <span>最終確認</span>
+              <strong>{formatDateTime(versionCheck?.checkedAt)}</strong>
+            </div>
+            <div className="settings-info-row">
+              <span>判定</span>
+              <strong>{versionCheck ? (versionCheck.updateAvailable ? '更新あり' : '最新版') : '未確認'}</strong>
+            </div>
+            <button
+              className="trip-btn trip-btn--primary"
+              disabled={versionChecking || versionUpdating}
+              onClick={runVersionCheck}
+            >
+              {versionChecking ? '確認中…' : '最新版を確認'}
+            </button>
+            {versionCheck?.updateAvailable && versionCheck.kind === 'android' && (
+              <button
+                className="trip-btn"
+                disabled={versionChecking || versionUpdating}
+                onClick={async () => {
+                  setVersionUpdating(true);
+                  setMessage('更新ファイルを準備しています...');
+                  try {
+                    const result = await startNativeAppUpdate(versionCheck.downloadUrl);
+                    if (result.requiresPermission) {
+                      setMessage('インストール許可の設定画面を開きました。許可後、もう一度更新を開始してください。');
+                      return;
+                    }
+                    if (result.upToDate) {
+                      setMessage('この端末にはすでに最新版が入っています。');
+                      await runVersionCheck();
+                      return;
+                    }
+                    setMessage('Androidの更新画面を開きました。画面の案内に従って更新してください。');
+                  } catch (error: any) {
+                    setMessage(error?.message ?? 'アップデートを開始できませんでした。通信状態を確認してください。');
+                  } finally {
+                    setVersionUpdating(false);
+                  }
+                }}
+              >
+                {versionUpdating ? '準備中…' : 'アップデートを開始'}
+              </button>
+            )}
+            {versionCheck?.updateAvailable && versionCheck.kind === 'pwa' && (
+              <button
+                className="trip-btn"
+                disabled={versionChecking || versionUpdating}
+                onClick={async () => {
+                  setVersionUpdating(true);
+                  setMessage('最新版を読み込んでいます...');
+                  await reloadPwaForLatestBuild({
+                    version: versionCheck.latestVersion ?? undefined,
+                    buildDate: versionCheck.latestBuildDate ?? undefined,
+                  }, { force: true });
+                }}
+              >
+                {versionUpdating ? '読み込み中…' : '最新版を読み込む'}
+              </button>
+            )}
+          </article>
 
           <article className="card settings-panel">
             <div className="settings-panel__title">PWA / 配布</div>
