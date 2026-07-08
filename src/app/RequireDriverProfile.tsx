@@ -104,7 +104,7 @@ function DriverRegistrationGate(props: {
       await hydrateRemoteSyncState();
       if (identity.configured && !identity.authInitialized) {
         await sendDriverMagicLink(validation.value.email);
-        setMessage('認証メールを送信しました。メール本文の6桁コードをこの画面に入力してください。リンクで認証した場合は「認証状態を更新」を押してください。');
+        setMessage('認証メールを送信しました。メール本文の6桁コードをこの画面に入力してください。');
       } else {
         await runRemoteSync('profile-registration');
         setMessage('端末プロフィールを保存しました。管理者の承認後に利用できます。');
@@ -261,8 +261,7 @@ function DriverRegistrationGate(props: {
         {!waitingForApproval && showOtpPanel && (
           <div className="driver-registration">
             <div className="settings-note">
-              iPhoneのホーム画面PWAでは、メールのリンクを押すとSafari側だけが認証される場合があります。
-              認証メールに表示された6桁コードをここに入力すると、このPWA内でログインできます。
+              認証メールに表示された6桁コードをここに入力すると、このPWA内でメール認証が完了します。
             </div>
             <label className="settings-field">
               <span>6桁コード</span>

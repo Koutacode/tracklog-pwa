@@ -30,7 +30,7 @@ function formatDriverLoginError(error: any) {
     return 'メール送信の上限に達しています。少し待ってから再度試してください。';
   }
   if (normalized.includes('otp') || normalized.includes('token')) {
-    return '認証コードまたはログインリンクが無効です。最新のメールで再度試してください。';
+    return '認証コードが無効です。最新のメールで再度試してください。';
   }
   return raw;
 }
@@ -90,7 +90,7 @@ export default function DriverLoginScreen() {
     setEmail(normalizedEmail);
     try {
       await sendDriverLoginLink(normalizedEmail);
-      setMessage('ログインメールを送信しました。メール本文の6桁コードをこの画面に入力してください。リンクで認証した場合はホームを開き直してください。');
+      setMessage('ログインメールを送信しました。メール本文の6桁コードをこの画面に入力してください。');
     } catch (error: any) {
       setMessage(formatDriverLoginError(error));
     } finally {
@@ -156,7 +156,7 @@ export default function DriverLoginScreen() {
         </form>
 
         <div className="settings-note" style={{ marginTop: 16 }}>
-          iPhoneのホーム画面PWAでは、メールのリンクを押すとSafari側だけが認証される場合があります。6桁コードを入力すると、このPWA内でログインできます。
+          メール本文の6桁コードを入力すると、このPWA内でログインできます。
         </div>
         <div className="driver-registration">
           <label className="settings-field">

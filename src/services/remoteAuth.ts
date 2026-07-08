@@ -489,6 +489,27 @@ export async function sendAdminMagicLink(email: string, redirectTo?: string): Pr
   if (error) throw error;
 }
 
+export async function verifyAdminEmailOtp(email: string, token: string): Promise<AdminSession> {
+  if (!SUPABASE_CONFIGURED || !adminSupabase) {
+    throw new Error('Supabase が未設定です');
+  }
+  const normalized = normalizeEmail(email);
+  if (!normalized) {
+    throw new Error('メールアドレスを入力してください');
+  }
+  const normalizedToken = toHalfWidthDigits(token).replace(/\D/g, '').trim();
+  if (!/^\d{6}$/.test(normalizedToken)) {
+    throw new Error('6桁の認証コードを入力してください');
+  }
+  const { error } = await adminSupabase.auth.verifyOtp({
+    email: normalized,
+    token: normalizedToken,
+    type: 'email',
+  });
+  if (error) throw error;
+  return getAdminSession();
+}
+
 export async function sendDriverMagicLink(email: string, redirectTo?: string): Promise<void> {
   if (!SUPABASE_CONFIGURED || !driverSupabase) {
     throw new Error('Supabase が未設定です');

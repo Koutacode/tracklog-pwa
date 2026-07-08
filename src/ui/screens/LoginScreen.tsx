@@ -3,16 +3,17 @@ import { Capacitor } from '@capacitor/core';
 import { Link } from 'react-router-dom';
 import {
   getAdminGoogleSignInUrl,
-  getAdminRedirectUrl,
   getAdminSession,
   onAdminAuthStateChange,
   sendAdminMagicLink,
+  verifyAdminEmailOtp,
 } from '../../services/remoteAuth';
 import { openExternalUrl } from '../../services/nativeShare';
+import { normalizeEmailInput, toHalfWidthDigits } from '../../services/driverProfileValidation';
 
 function formatLoginError(error: any) {
   const raw = `${error?.message ?? error ?? ''}`.trim();
-  if (!raw) return 'リンク送信に失敗しました';
+  if (!raw) return '認証に失敗しました';
   const normalized = raw.toLowerCase();
   if (
     normalized.includes('rate limit') ||
@@ -22,15 +23,19 @@ function formatLoginError(error: any) {
     return 'メール送信の上限に達しています。少し待つか、下の「ブラウザで管理画面を開く」を使ってください。';
   }
   if (normalized.includes('unsupported provider') || normalized.includes('provider is not enabled')) {
-    return 'Supabase の Google ログインがまだ有効化されていません。Google provider を有効化するまではメールリンクで入ってください。';
+    return 'Supabase の Google ログインがまだ有効化されていません。Google provider を有効化するまではメールコードで入ってください。';
+  }
+  if (normalized.includes('otp') || normalized.includes('token')) {
+    return '認証コードが無効です。最新のメールで再度試してください。';
   }
   return raw;
 }
 
 export default function LoginScreen() {
   const [email, setEmail] = useState('');
+  const [token, setToken] = useState('');
   const [message, setMessage] = useState<string | null>(null);
-  const [status, setStatus] = useState<'idle' | 'sending' | 'google'>('idle');
+  const [status, setStatus] = useState<'idle' | 'sending' | 'verifying' | 'google'>('idle');
   const [authenticated, setAuthenticated] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
 
@@ -84,11 +89,6 @@ export default function LoginScreen() {
         )}
         {Capacitor.isNativePlatform() && (
           <div className="settings-note">
-            ネイティブアプリでは magic link の戻り先を <code>{getAdminRedirectUrl()}</code> にしています。
-          </div>
-        )}
-        {Capacitor.isNativePlatform() && (
-          <div className="settings-note">
             メール送信の上限に当たった時は、Googleログインか、既定ブラウザで <code>/admin</code> を開いて管理画面へ入れます。
           </div>
         )}
@@ -116,17 +116,19 @@ export default function LoginScreen() {
         </button>
         <label className="settings-field">
           <span>メールアドレス</span>
-          <input value={email} onChange={e => setEmail(e.target.value)} placeholder="admin@example.com" />
+          <input value={email} onChange={e => setEmail(e.target.value)} placeholder="admin@example.com" type="email" />
         </label>
         <button
           className="trip-btn"
-          disabled={status !== 'idle'}
+          disabled={status !== 'idle' || !email.trim()}
           onClick={async () => {
             setStatus('sending');
             setMessage(null);
+            const normalizedEmail = normalizeEmailInput(email);
+            setEmail(normalizedEmail);
             try {
-              await sendAdminMagicLink(email);
-              setMessage('ログインリンクを送信しました。メールから開いてください。');
+              await sendAdminMagicLink(normalizedEmail);
+              setMessage('ログインコードを送信しました。メール本文の6桁コードを入力してください。');
             } catch (error: any) {
               setMessage(formatLoginError(error));
             } finally {
@@ -134,7 +136,41 @@ export default function LoginScreen() {
             }
           }}
         >
-          {status === 'sending' ? '送信中…' : 'ログインリンクを送る'}
+          {status === 'sending' ? '送信中…' : 'ログインコードを送る'}
+        </button>
+        <label className="settings-field">
+          <span>6桁コード</span>
+          <input
+            value={token}
+            onChange={event => setToken(toHalfWidthDigits(event.target.value).replace(/\D/g, '').slice(0, 6))}
+            placeholder="123456"
+            inputMode="numeric"
+            maxLength={6}
+          />
+        </label>
+        <button
+          className="trip-btn trip-btn--primary"
+          disabled={status !== 'idle' || !email.trim() || token.length !== 6}
+          onClick={async () => {
+            setStatus('verifying');
+            setMessage(null);
+            const normalizedEmail = normalizeEmailInput(email);
+            const normalizedToken = toHalfWidthDigits(token).replace(/\D/g, '').slice(0, 6);
+            setEmail(normalizedEmail);
+            setToken(normalizedToken);
+            try {
+              const session = await verifyAdminEmailOtp(normalizedEmail, normalizedToken);
+              setAuthenticated(session.authenticated);
+              setIsAdmin(session.isAdmin);
+              setMessage(session.isAdmin ? '認証しました。管理画面を開けます。' : '認証しましたが、このメールアドレスは管理者として登録されていません。');
+            } catch (error: any) {
+              setMessage(formatLoginError(error));
+            } finally {
+              setStatus('idle');
+            }
+          }}
+        >
+          {status === 'verifying' ? '確認中…' : '6桁コードでログイン'}
         </button>
         {Capacitor.isNativePlatform() && (
           <Link
@@ -152,7 +188,7 @@ export default function LoginScreen() {
               setMessage(null);
               try {
                 await openExternalUrl('https://mail.google.com/');
-                setMessage('Gmail を開きました。最新の magic link を使ってください。');
+                setMessage('Gmail を開きました。最新の6桁コードを使ってください。');
               } catch (error: any) {
                 setMessage(error?.message ?? 'Gmail を開けませんでした');
               }

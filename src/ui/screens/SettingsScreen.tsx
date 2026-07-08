@@ -203,7 +203,7 @@ export default function SettingsScreen() {
                   await sendDriverMagicLink(validation.value.email);
                   setMessage('認証メールを送信しました。iPhone PWAではメール本文の6桁コードを登録済みログイン画面で入力してください。');
                 } catch (error: any) {
-                  setMessage(error?.message ?? '認証リンク送信に失敗しました');
+                  setMessage(error?.message ?? '認証メール送信に失敗しました');
                 } finally {
                   setSendingMagic(false);
                 }
