@@ -6,10 +6,26 @@ import { getAdminSession, signOutAdmin } from '../../services/remoteAuth';
 import { shareText } from '../../services/nativeShare';
 import { DEFAULT_APK_DOWNLOAD_URL, PWA_URL } from '../../app/releaseInfo';
 import AdminMap from '../components/AdminMap';
+import {
+  DEFAULT_LOCATION_NOTIFICATION_TEXT,
+  loadTracklogRuntimeConfig,
+  normalizeLocationNotificationText,
+  saveTracklogRuntimeConfig,
+} from '../../services/runtimeConfig';
 
 function fmtDateTime(ts?: string | null) {
   if (!ts) return '-';
   return new Date(ts).toLocaleString('ja-JP');
+}
+
+function getLocationTimestamp(profile: RemoteDeviceProfile) {
+  if (profile.latest_lat == null || profile.latest_lng == null) return null;
+  return profile.latest_location_at ?? profile.last_seen_at ?? null;
+}
+
+function formatAccuracy(value?: number | null) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return null;
+  return `精度 約${Math.round(value)}m`;
 }
 
 type DeviceSeenStatus = {
@@ -77,6 +93,11 @@ export default function AdminDashboard() {
   const [notice, setNotice] = useState<string | null>(null);
   const [deletingDeviceId, setDeletingDeviceId] = useState<string | null>(null);
   const [approvingDeviceId, setApprovingDeviceId] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [lastLoadedAt, setLastLoadedAt] = useState<string | null>(null);
+  const [notificationText, setNotificationText] = useState(DEFAULT_LOCATION_NOTIFICATION_TEXT);
+  const [notificationDraft, setNotificationDraft] = useState(DEFAULT_LOCATION_NOTIFICATION_TEXT);
+  const [savingNotificationText, setSavingNotificationText] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -89,9 +110,15 @@ export default function AdminDashboard() {
           setReady(true);
           return;
         }
-        const nextDevices = await listAdminDevices();
+        const [nextDevices, runtimeConfig] = await Promise.all([
+          listAdminDevices(),
+          loadTracklogRuntimeConfig({ force: true, admin: true }),
+        ]);
         if (!active) return;
         setDevices(nextDevices);
+        setNotificationText(runtimeConfig.locationNotificationText);
+        setNotificationDraft(runtimeConfig.locationNotificationText);
+        setLastLoadedAt(new Date().toISOString());
       } catch (err: any) {
         if (active) setError(err?.message ?? '管理画面の読み込みに失敗しました');
       } finally {
@@ -102,6 +129,36 @@ export default function AdminDashboard() {
       active = false;
     };
   }, []);
+
+  useEffect(() => {
+    if (!authenticated) return;
+    let active = true;
+
+    const refresh = async () => {
+      if (!active || document.visibilityState !== 'visible') return;
+      try {
+        const nextDevices = await listAdminDevices();
+        if (!active) return;
+        setDevices(nextDevices);
+        setLastLoadedAt(new Date().toISOString());
+      } catch (err: any) {
+        if (active) setError(err?.message ?? '端末一覧の再取得に失敗しました');
+      }
+    };
+
+    const timer = window.setInterval(() => {
+      void refresh();
+    }, 15000);
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') void refresh();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, [authenticated]);
 
   const deviceStatus = useMemo(
     () => new Map(devices.map(device => [device.device_id, getSeenStatus(device.last_seen_at)])),
@@ -137,6 +194,8 @@ export default function AdminDashboard() {
           const latestStatus = device.latest_status ?? '-';
           const vehicleLabel = device.vehicle_label ?? '-';
           const lastSeen = fmtDateTime(device.last_seen_at);
+          const locationAt = fmtDateTime(getLocationTimestamp(device));
+          const accuracy = formatAccuracy(device.latest_accuracy);
           const label = `${displayName} / ${seenStatus.label} / ${vehicleLabel}`;
           return {
             lat: device.latest_lat as number,
@@ -149,12 +208,29 @@ export default function AdminDashboard() {
               `車番: ${escapeHtml(vehicleLabel)}`,
               `メール: ${escapeHtml(formatProfileValue(device.driver_email))}`,
               `電話: ${escapeHtml(formatProfileValue(device.driver_phone))}`,
+              `現在地更新: ${escapeHtml(locationAt)}`,
+              ...(accuracy ? [`${escapeHtml(accuracy)}`] : []),
               `最終同期: ${escapeHtml(lastSeen)}`,
             ].join('<br />'),
           };
         }),
     [deviceStatus, devices],
   );
+
+  async function refreshAdminDevices() {
+    setRefreshing(true);
+    setError(null);
+    try {
+      const nextDevices = await listAdminDevices();
+      setDevices(nextDevices);
+      setLastLoadedAt(new Date().toISOString());
+      setNotice('端末一覧を再取得しました');
+    } catch (err: any) {
+      setError(err?.message ?? '端末一覧の再取得に失敗しました');
+    } finally {
+      setRefreshing(false);
+    }
+  }
 
   async function handleDeleteDevice(device: RemoteDeviceProfile) {
     const displayName = getDisplayName(device);
@@ -206,6 +282,23 @@ export default function AdminDashboard() {
     }
   }
 
+  async function handleSaveNotificationText() {
+    const nextText = normalizeLocationNotificationText(notificationDraft);
+    setSavingNotificationText(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const config = await saveTracklogRuntimeConfig({ locationNotificationText: nextText });
+      setNotificationText(config.locationNotificationText);
+      setNotificationDraft(config.locationNotificationText);
+      setNotice('常駐通知文を保存しました');
+    } catch (err: any) {
+      setError(err?.message ?? '常駐通知文の保存に失敗しました');
+    } finally {
+      setSavingNotificationText(false);
+    }
+  }
+
   if (!ready) {
     return <div className="screen-shell"><div className="screen-card">読み込み中…</div></div>;
   }
@@ -222,6 +315,14 @@ export default function AdminDashboard() {
             <h1 className="screen-card__title">端末一覧</h1>
           </div>
           <div className="screen-card__actions">
+            <button
+              className="pill-link"
+              disabled={refreshing}
+              onClick={() => void refreshAdminDevices()}
+              type="button"
+            >
+              {refreshing ? '再取得中' : '再取得'}
+            </button>
             <button
               className="pill-link"
               onClick={async () => {
@@ -257,8 +358,37 @@ export default function AdminDashboard() {
             </button>
           </div>
         </div>
+        <div className="settings-note">端末一覧は15秒ごとに自動更新します。最終再取得: {fmtDateTime(lastLoadedAt)}</div>
         {error && <div className="settings-toast">{error}</div>}
         {notice && <div className="settings-toast settings-toast--success">{notice}</div>}
+        <section className="approval-admin-panel">
+          <div className="approval-admin-panel__header">
+            <div>
+              <div className="settings-panel__title">常駐通知文</div>
+              <p>Android端末の位置記録通知に表示する文言です。端末側の次回同期で反映されます。</p>
+            </div>
+            <strong>{notificationText}</strong>
+          </div>
+          <label className="settings-field">
+            <span>通知文</span>
+            <input
+              value={notificationDraft}
+              maxLength={40}
+              onChange={event => setNotificationDraft(event.target.value)}
+              placeholder={DEFAULT_LOCATION_NOTIFICATION_TEXT}
+            />
+          </label>
+          <div className="approval-request__actions">
+            <button
+              type="button"
+              className="pill-link pill-link--approve"
+              disabled={savingNotificationText}
+              onClick={() => void handleSaveNotificationText()}
+            >
+              {savingNotificationText ? '保存中' : '保存'}
+            </button>
+          </div>
+        </section>
         <section className="approval-admin-panel">
           <div className="approval-admin-panel__header">
             <div>
@@ -369,7 +499,15 @@ export default function AdminDashboard() {
                   </td>
                   <td>
                     {device.latest_lat != null && device.latest_lng != null
-                      ? `${device.latest_lat.toFixed(4)}, ${device.latest_lng.toFixed(4)}`
+                      ? (
+                        <>
+                          <span>{device.latest_lat.toFixed(4)}, {device.latest_lng.toFixed(4)}</span>
+                          <div className="admin-table__subtext">
+                            {fmtDateTime(getLocationTimestamp(device))}
+                            {formatAccuracy(device.latest_accuracy) ? ` / ${formatAccuracy(device.latest_accuracy)}` : ''}
+                          </div>
+                        </>
+                      )
                       : '-'}
                   </td>
                   <td>{fmtDateTime(device.last_seen_at)}</td>

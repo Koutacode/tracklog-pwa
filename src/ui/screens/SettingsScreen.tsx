@@ -246,6 +246,7 @@ export default function SettingsScreen() {
             </div>
             <div className="settings-note">
               iPhone等でPWAとして利用するには、以下の共有URLを Safari で開いて「ホーム画面に追加」してください。
+              PWAの位置・同期更新はアプリを開いている間、操作時、再表示時に行います。
             </div>
             <div className="settings-card__actions" style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
               <button

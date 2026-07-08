@@ -1,5 +1,5 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
-import type { RemoteDeviceProfile } from '../domain/remoteTypes';
+import type { RemoteDeviceProfile, TracklogRuntimeConfig } from '../domain/remoteTypes';
 import { SUPABASE_CONFIGURED, adminSupabase, driverSupabase } from './supabase';
 
 type FunctionResponse<T> = {
@@ -9,7 +9,10 @@ type FunctionResponse<T> = {
 };
 
 type PrivilegedAction =
+  | 'getRuntimeConfig'
+  | 'updateRuntimeConfig'
   | 'claimDeviceProfile'
+  | 'updateDeviceLocation'
   | 'migrateDeviceRecords'
   | 'setDeviceApproval'
   | 'deleteDevice'
@@ -62,12 +65,40 @@ export async function claimTracklogDeviceProfileViaFunction(input: {
   return invokeTracklogPrivileged<RemoteDeviceProfile>(client, 'claimDeviceProfile', input);
 }
 
+export async function getTracklogRuntimeConfigViaFunction(options?: {
+  admin?: boolean;
+}): Promise<TracklogRuntimeConfig> {
+  const client = requireClient(options?.admin ? adminSupabase : driverSupabase);
+  return invokeTracklogPrivileged<TracklogRuntimeConfig>(client, 'getRuntimeConfig', {});
+}
+
+export async function updateTracklogRuntimeConfigViaFunction(input: {
+  locationNotificationText: string;
+}): Promise<TracklogRuntimeConfig> {
+  const client = requireClient(adminSupabase);
+  return invokeTracklogPrivileged<TracklogRuntimeConfig>(client, 'updateRuntimeConfig', input);
+}
+
 export async function migrateTracklogDeviceRecordsViaFunction(input: {
   oldDeviceId: string;
   newDeviceId: string;
 }): Promise<void> {
   const client = requireClient(driverSupabase);
   await invokeTracklogPrivileged<{ migrated: boolean }>(client, 'migrateDeviceRecords', input);
+}
+
+export async function updateTracklogDeviceLocationViaFunction(input: {
+  deviceId: string;
+  latestStatus?: string | null;
+  latestTripId?: string | null;
+  latestLat: number;
+  latestLng: number;
+  latestAccuracy?: number | null;
+  latestLocationAt: string;
+  lastSeenAt: string;
+}): Promise<RemoteDeviceProfile> {
+  const client = requireClient(driverSupabase);
+  return invokeTracklogPrivileged<RemoteDeviceProfile>(client, 'updateDeviceLocation', input);
 }
 
 export async function setTracklogDeviceApprovalViaFunction(input: {

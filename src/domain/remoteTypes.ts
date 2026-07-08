@@ -32,6 +32,11 @@ export type RemoteSyncState = {
   approvalStatus: DriverApprovalStatus;
 };
 
+export type TracklogRuntimeConfig = {
+  locationNotificationText: string;
+  updatedAt: string | null;
+};
+
 export type RemoteCloudMaintenanceResult = {
   database_bytes?: number;
   threshold_bytes?: number;
@@ -56,6 +61,7 @@ export type RemoteDeviceProfile = {
   latest_lat: number | null;
   latest_lng: number | null;
   latest_accuracy: number | null;
+  latest_location_at?: string | null;
   last_seen_at: string;
   created_at?: string;
   approval_status?: DriverApprovalStatus;

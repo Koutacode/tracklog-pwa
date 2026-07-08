@@ -81,6 +81,7 @@ export async function deleteAdminDevice(deviceId: string): Promise<DeleteAdminDe
         latest_lat: null,
         latest_lng: null,
         latest_accuracy: null,
+        latest_location_at: null,
         last_seen_at: new Date().toISOString(),
       })
       .eq('device_id', deviceId);

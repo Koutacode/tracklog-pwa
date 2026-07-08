@@ -26,6 +26,9 @@ const corsHeaders = {
 const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? '';
 const supabaseAnonKey = Deno.env.get('SUPABASE_ANON_KEY') ?? '';
 const supabaseServiceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
+const DEFAULT_LOCATION_NOTIFICATION_TEXT = '位置記録中';
+const LOCATION_NOTIFICATION_TEXT_KEY = 'location_notification_text';
+const MAX_NOTIFICATION_TEXT_LENGTH = 40;
 
 if (!supabaseUrl || !supabaseAnonKey || !supabaseServiceRoleKey) {
   console.error('TrackLog Edge Function is missing Supabase environment variables.');
@@ -62,6 +65,16 @@ function nullableText(value: unknown) {
   return text.length > 0 ? text : null;
 }
 
+function limitCharacters(value: string, maxLength: number) {
+  return Array.from(value).slice(0, maxLength).join('');
+}
+
+function normalizeLocationNotificationText(value: unknown) {
+  const text = textValue(value);
+  if (!text) return DEFAULT_LOCATION_NOTIFICATION_TEXT;
+  return limitCharacters(text, MAX_NOTIFICATION_TEXT_LENGTH);
+}
+
 function requiredText(payload: JsonRecord, key: string) {
   const value = textValue(payload[key]);
   if (!value) throw new HttpError(400, `${key} is required`);
@@ -70,6 +83,21 @@ function requiredText(payload: JsonRecord, key: string) {
 
 function nullableNumber(value: unknown) {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function requiredNumber(payload: JsonRecord, key: string, min: number, max: number) {
+  const value = Number(payload[key]);
+  if (!Number.isFinite(value) || value < min || value > max) {
+    throw new HttpError(400, `${key} is invalid`);
+  }
+  return value;
+}
+
+function requiredIso(payload: JsonRecord, key: string) {
+  const value = requiredText(payload, key);
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) throw new HttpError(400, `${key} is invalid`);
+  return new Date(parsed).toISOString();
 }
 
 async function requireUser(req: Request): Promise<TracklogUser> {
@@ -154,6 +182,10 @@ async function claimDeviceProfile(payload: JsonRecord, user: TracklogUser, admin
     latest_lat: nullableNumber(payload.latestLat) ?? nullableNumber(existing?.latest_lat),
     latest_lng: nullableNumber(payload.latestLng) ?? nullableNumber(existing?.latest_lng),
     latest_accuracy: nullableNumber(payload.latestAccuracy) ?? nullableNumber(existing?.latest_accuracy),
+    latest_location_at:
+      nullableText(payload.latestLocationAt) ??
+      nullableText(existing?.latest_location_at) ??
+      (nullableNumber(payload.latestLat) != null && nullableNumber(payload.latestLng) != null ? nowIso() : null),
     last_seen_at: nullableText(payload.lastSeenAt) ?? nowIso(),
     approval_status: approvalStatus,
     approval_requested_at: approvalRequestedAt,
@@ -167,6 +199,42 @@ async function claimDeviceProfile(payload: JsonRecord, user: TracklogUser, admin
     .select('*')
     .single();
   if (error) throw new HttpError(500, `Device profile claim failed: ${error.message}`);
+  return data;
+}
+
+async function updateDeviceLocation(payload: JsonRecord, user: TracklogUser, admin: boolean) {
+  const deviceId = requiredText(payload, 'deviceId');
+  const existing = await getDeviceProfile(deviceId);
+  if (!existing) throw new HttpError(404, 'Device profile not found');
+  ensureDeviceOwner(existing, user, admin, 'Device profile');
+  if (!textValue(existing.auth_user_id) && !admin) {
+    throw new HttpError(403, 'Device profile is not assigned to this account');
+  }
+  if (textValue(existing.approval_status) !== 'approved') {
+    throw new HttpError(403, 'Device profile is not approved');
+  }
+
+  const lat = requiredNumber(payload, 'latestLat', -90, 90);
+  const lng = requiredNumber(payload, 'latestLng', -180, 180);
+  const accuracy = nullableNumber(payload.latestAccuracy);
+  const latestLocationAt = requiredIso(payload, 'latestLocationAt');
+  const lastSeenAt = requiredIso(payload, 'lastSeenAt');
+
+  const { data, error } = await adminClient
+    .from('device_profiles')
+    .update({
+      latest_status: nullableText(payload.latestStatus) ?? nullableText(existing.latest_status),
+      latest_trip_id: nullableText(payload.latestTripId),
+      latest_lat: lat,
+      latest_lng: lng,
+      latest_accuracy: accuracy != null && accuracy >= 0 ? accuracy : null,
+      latest_location_at: latestLocationAt,
+      last_seen_at: lastSeenAt,
+    })
+    .eq('device_id', deviceId)
+    .select('*')
+    .single();
+  if (error) throw new HttpError(500, `Device location update failed: ${error.message}`);
   return data;
 }
 
@@ -204,6 +272,9 @@ async function migrateDeviceRecords(payload: JsonRecord, user: TracklogUser, adm
     latest_lat: nullableNumber(newProfile?.latest_lat) ?? nullableNumber(oldProfile.latest_lat),
     latest_lng: nullableNumber(newProfile?.latest_lng) ?? nullableNumber(oldProfile.latest_lng),
     latest_accuracy: nullableNumber(newProfile?.latest_accuracy) ?? nullableNumber(oldProfile.latest_accuracy),
+    latest_location_at:
+      nullableText(newProfile?.latest_location_at) ??
+      nullableText(oldProfile.latest_location_at),
     last_seen_at: nullableText(newProfile?.last_seen_at) ?? nullableText(oldProfile.last_seen_at) ?? nowIso(),
     approval_status: resolveMigrationApprovalStatus(oldProfile, newProfile),
     approval_requested_at:
@@ -237,6 +308,34 @@ async function requireAdmin(user: TracklogUser, admin: boolean) {
   if (!admin) {
     throw new HttpError(403, `Admin privileges required for ${textValue(user.email) || user.id}`);
   }
+}
+
+async function getRuntimeConfig() {
+  const { data, error } = await adminClient
+    .from('tracklog_runtime_config')
+    .select('key, value, updated_at')
+    .eq('key', LOCATION_NOTIFICATION_TEXT_KEY)
+    .maybeSingle();
+  if (error) throw new HttpError(500, `Runtime config lookup failed: ${error.message}`);
+  return {
+    locationNotificationText: normalizeLocationNotificationText((data as JsonRecord | null)?.value),
+    updatedAt: nullableText((data as JsonRecord | null)?.updated_at),
+  };
+}
+
+async function updateRuntimeConfig(payload: JsonRecord, user: TracklogUser, admin: boolean) {
+  await requireAdmin(user, admin);
+  const locationNotificationText = normalizeLocationNotificationText(payload.locationNotificationText);
+  const { error } = await adminClient
+    .from('tracklog_runtime_config')
+    .upsert({
+      key: LOCATION_NOTIFICATION_TEXT_KEY,
+      value: locationNotificationText,
+      updated_at: nowIso(),
+      updated_by: user.id,
+    }, { onConflict: 'key' });
+  if (error) throw new HttpError(500, `Runtime config update failed: ${error.message}`);
+  return getRuntimeConfig();
 }
 
 async function setDeviceApproval(payload: JsonRecord, user: TracklogUser, admin: boolean) {
@@ -344,7 +443,10 @@ Deno.serve(async (req: Request) => {
     const admin = await isTracklogAdmin(user);
 
     let data: unknown;
-    if (action === 'claimDeviceProfile') data = await claimDeviceProfile(payload, user, admin);
+    if (action === 'getRuntimeConfig') data = await getRuntimeConfig();
+    else if (action === 'updateRuntimeConfig') data = await updateRuntimeConfig(payload, user, admin);
+    else if (action === 'claimDeviceProfile') data = await claimDeviceProfile(payload, user, admin);
+    else if (action === 'updateDeviceLocation') data = await updateDeviceLocation(payload, user, admin);
     else if (action === 'migrateDeviceRecords') data = await migrateDeviceRecords(payload, user, admin);
     else if (action === 'setDeviceApproval') data = await setDeviceApproval(payload, user, admin);
     else if (action === 'deleteDevice') data = await deleteDevice(payload, user, admin);

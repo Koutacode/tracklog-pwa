@@ -16,6 +16,16 @@ function getApprovalLabel(profile: NonNullable<Awaited<ReturnType<typeof getAdmi
   return '承認待ち';
 }
 
+function fmtDateTime(ts?: string | null) {
+  if (!ts) return '-';
+  return new Date(ts).toLocaleString('ja-JP');
+}
+
+function formatAccuracy(value?: number | null) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return '-';
+  return `約${Math.round(value)}m`;
+}
+
 export default function AdminDeviceDetail() {
   const { deviceId = '' } = useParams();
   const navigate = useNavigate();
@@ -26,6 +36,8 @@ export default function AdminDeviceDetail() {
   const [notice, setNotice] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [approving, setApproving] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [lastLoadedAt, setLastLoadedAt] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -39,7 +51,10 @@ export default function AdminDeviceDetail() {
           return;
         }
         const nextBundle = await getAdminDeviceBundle(deviceId);
-        if (active) setBundle(nextBundle);
+        if (active) {
+          setBundle(nextBundle);
+          setLastLoadedAt(new Date().toISOString());
+        }
       } catch (err: any) {
         if (active) setError(err?.message ?? '端末詳細の取得に失敗しました');
       } finally {
@@ -50,6 +65,36 @@ export default function AdminDeviceDetail() {
       active = false;
     };
   }, [deviceId]);
+
+  useEffect(() => {
+    if (!authenticated) return;
+    let active = true;
+
+    const refresh = async () => {
+      if (!active || document.visibilityState !== 'visible') return;
+      try {
+        const nextBundle = await getAdminDeviceBundle(deviceId);
+        if (!active) return;
+        setBundle(nextBundle);
+        setLastLoadedAt(new Date().toISOString());
+      } catch (err: any) {
+        if (active) setError(err?.message ?? '端末詳細の再取得に失敗しました');
+      }
+    };
+
+    const timer = window.setInterval(() => {
+      void refresh();
+    }, 15000);
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') void refresh();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, [authenticated, deviceId]);
 
   const marker = useMemo(() => {
     if (bundle?.profile?.latest_lat == null || bundle?.profile?.latest_lng == null) return null;
@@ -79,6 +124,21 @@ export default function AdminDeviceDetail() {
     } catch (err: any) {
       setError(err?.message ?? '端末IDの消去に失敗しました');
       setDeleting(false);
+    }
+  }
+
+  async function handleRefresh() {
+    setRefreshing(true);
+    setError(null);
+    try {
+      const nextBundle = await getAdminDeviceBundle(deviceId);
+      setBundle(nextBundle);
+      setLastLoadedAt(new Date().toISOString());
+      setNotice('端末詳細を再取得しました');
+    } catch (err: any) {
+      setError(err?.message ?? '端末詳細の再取得に失敗しました');
+    } finally {
+      setRefreshing(false);
     }
   }
 
@@ -119,6 +179,14 @@ export default function AdminDeviceDetail() {
           </div>
           <div className="screen-card__actions">
             <Link to="/admin" className="pill-link">一覧へ戻る</Link>
+            <button
+              type="button"
+              className="pill-link"
+              disabled={refreshing}
+              onClick={() => void handleRefresh()}
+            >
+              {refreshing ? '再取得中' : '再取得'}
+            </button>
             {bundle?.profile && (
               <>
                 {getApprovalStatus(bundle.profile) !== 'approved' && (
@@ -153,6 +221,7 @@ export default function AdminDeviceDetail() {
             )}
           </div>
         </div>
+        <div className="settings-note">端末詳細は15秒ごとに自動更新します。最終再取得: {fmtDateTime(lastLoadedAt)}</div>
         {error && <div className="settings-toast">{error}</div>}
         {notice && <div className="settings-toast settings-toast--success">{notice}</div>}
         {bundle?.profile && (
@@ -172,7 +241,9 @@ export default function AdminDeviceDetail() {
               <div className="settings-info-row"><span>承認/拒否日時</span><strong>{bundle.profile.approval_decided_at ? new Date(bundle.profile.approval_decided_at).toLocaleString('ja-JP') : '-'}</strong></div>
               <div className="settings-info-row"><span>状態</span><strong>{bundle.profile.latest_status ?? '-'}</strong></div>
               <div className="settings-info-row"><span>車番</span><strong>{bundle.profile.vehicle_label ?? '-'}</strong></div>
-              <div className="settings-info-row"><span>最終同期</span><strong>{bundle.profile.last_seen_at ? new Date(bundle.profile.last_seen_at).toLocaleString('ja-JP') : '-'}</strong></div>
+              <div className="settings-info-row"><span>現在地更新</span><strong>{fmtDateTime(bundle.profile.latest_location_at ?? bundle.profile.last_seen_at)}</strong></div>
+              <div className="settings-info-row"><span>位置精度</span><strong>{formatAccuracy(bundle.profile.latest_accuracy)}</strong></div>
+              <div className="settings-info-row"><span>最終同期</span><strong>{fmtDateTime(bundle.profile.last_seen_at)}</strong></div>
             </article>
             <article className="card settings-panel settings-panel--full">
               <div className="settings-panel__title">運行一覧</div>

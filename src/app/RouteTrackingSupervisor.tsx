@@ -11,10 +11,24 @@ import {
   updateExpresswayResolved,
 } from '../db/repositories';
 import type { AppEvent } from '../domain/types';
-import { startRouteTracking, stopRouteTracking } from '../services/routeTracking';
+import {
+  setLocationNotificationText,
+  startResidentLocationUpdates,
+  startRouteTracking,
+  stopResidentLocationUpdates,
+  stopRouteTracking,
+} from '../services/routeTracking';
 import { cancelNativeExpresswayEndPrompt } from '../services/nativeExpresswayPrompt';
 import { resolveNearestIC } from '../services/icResolver';
 import { ROUTE_TRACKING_SYNC_EVENT } from './routeTrackingSignal';
+import { getDriverIdentity } from '../services/remoteAuth';
+import { checkNativeSetupReadiness } from '../services/nativeSetup';
+import {
+  requestLocationHeartbeatNow,
+  startLocationHeartbeat,
+  stopLocationHeartbeat,
+} from '../services/locationHeartbeat';
+import { loadTracklogRuntimeConfig } from '../services/runtimeConfig';
 
 function hasOpenRest(events: AppEvent[]) {
   const starts = events.filter(e => e.type === 'rest_start').sort((a, b) => a.ts.localeCompare(b.ts));
@@ -59,10 +73,49 @@ export default function RouteTrackingSupervisor() {
   useEffect(() => {
     let disposed = false;
     let inFlight = false;
+    let foregroundHeartbeatRequestedAt = 0;
+
+    const stopAllLocationWork = async () => {
+      stopLocationHeartbeat();
+      await stopResidentLocationUpdates();
+      await stopRouteTracking();
+    };
+
+    const maybeRequestForegroundHeartbeat = () => {
+      if (document.visibilityState !== 'visible') return;
+      const now = Date.now();
+      if (now - foregroundHeartbeatRequestedAt < 30000) return;
+      foregroundHeartbeatRequestedAt = now;
+      void requestLocationHeartbeatNow();
+    };
+
     const sync = async () => {
       if (disposed || inFlight) return;
       inFlight = true;
       try {
+        const identity = await getDriverIdentity();
+        const approved =
+          identity.configured &&
+          identity.authInitialized &&
+          identity.profileComplete &&
+          identity.approvalStatus === 'approved';
+        if (!approved) {
+          await stopAllLocationWork();
+          return;
+        }
+
+        const readiness = await checkNativeSetupReadiness();
+        if (!readiness.ready) {
+          await stopAllLocationWork();
+          return;
+        }
+
+        const runtimeConfig = await loadTracklogRuntimeConfig();
+        setLocationNotificationText(runtimeConfig.locationNotificationText);
+        startLocationHeartbeat();
+        await startResidentLocationUpdates('battery');
+        maybeRequestForegroundHeartbeat();
+
         const tripId = await getActiveTripId();
         if (!tripId) {
           await stopRouteTracking();
@@ -132,6 +185,7 @@ export default function RouteTrackingSupervisor() {
 
     const onVisible = () => {
       if (document.visibilityState === 'visible') {
+        maybeRequestForegroundHeartbeat();
         void sync();
       }
     };

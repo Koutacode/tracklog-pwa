@@ -8,8 +8,15 @@ const BackgroundGeolocation = registerPlugin<BackgroundGeolocationPlugin>('Backg
 let bgWatcherId: string | null = null;
 let webWatchId: number | null = null;
 let activeTripId: string | null = null;
+let residentEnabled = false;
 let lastPoint: { lat: number; lng: number; at: number } | null = null;
 let currentMode: RouteTrackingMode = 'precision';
+let activeRouteMode: RouteTrackingMode = 'precision';
+let residentMode: RouteTrackingMode = 'battery';
+let watcherMode: RouteTrackingMode | null = null;
+let watcherPurpose: 'route' | 'resident' | null = null;
+let watcherNotificationText: string | null = null;
+let locationNotificationText = '位置記録中';
 let recordQueue: Promise<void> = Promise.resolve();
 let pendingRecordCount = 0;
 let droppedRecordCount = 0;
@@ -60,7 +67,7 @@ const MODE_CONFIG: Record<RouteTrackingMode, ModeConfig> = {
 
 let modeConfig = MODE_CONFIG.precision;
 
-type LocationPayload = {
+export type LocationPayload = {
   lat: number;
   lng: number;
   accuracy?: number | null;
@@ -69,6 +76,10 @@ type LocationPayload = {
   time?: number | null;
   source: 'foreground' | 'background';
 };
+
+type LocationUpdateListener = (location: LocationPayload) => void | Promise<void>;
+
+const locationListeners = new Set<LocationUpdateListener>();
 
 function applyMode(mode: RouteTrackingMode) {
   const config = MODE_CONFIG[mode] ?? MODE_CONFIG.precision;
@@ -80,6 +91,14 @@ function applyMode(mode: RouteTrackingMode) {
 function resetTrackingRuntime() {
   lastPoint = null;
   smoothedSpeedKmh = null;
+}
+
+function emitLocationUpdate(location: LocationPayload) {
+  for (const listener of locationListeners) {
+    Promise.resolve(listener(location)).catch(() => {
+      // keep the location stream independent from heartbeat failures
+    });
+  }
 }
 
 function maybeRunRoutePointRetention() {
@@ -231,32 +250,81 @@ function enqueueRecordLocation(params: LocationPayload): Promise<void> {
   return recordQueue;
 }
 
-export async function startRouteTracking(tripId: string, mode: RouteTrackingMode = 'precision') {
-  const shouldRestart = (bgWatcherId || webWatchId != null) && (currentMode !== mode || activeTripId !== tripId);
-  if (shouldRestart) {
-    await stopRouteTracking();
+async function removeLocationWatcher() {
+  if (bgWatcherId) {
+    const id = bgWatcherId;
+    bgWatcherId = null;
+    try {
+      await BackgroundGeolocation.removeWatcher({ id });
+    } catch {
+      // ignore cleanup errors
+    }
   }
-  if ((bgWatcherId || webWatchId != null) && currentMode === mode && activeTripId === tripId) {
+  if (webWatchId != null && navigator.geolocation) {
+    navigator.geolocation.clearWatch(webWatchId);
+    webWatchId = null;
+  }
+  watcherMode = null;
+  watcherPurpose = null;
+  watcherNotificationText = null;
+}
+
+function buildBackgroundMessage() {
+  return '';
+}
+
+function normalizeLocationNotificationText(text?: string | null) {
+  const normalized = typeof text === 'string' ? text.trim() : '';
+  return normalized || '位置記録中';
+}
+
+export function setLocationNotificationText(text?: string | null) {
+  locationNotificationText = normalizeLocationNotificationText(text);
+}
+
+async function handleLocation(location: {
+  latitude: number;
+  longitude: number;
+  accuracy?: number | null;
+  speed?: number | null;
+  bearing?: number | null;
+  time?: number | null;
+}, source: LocationPayload['source']) {
+  const payload: LocationPayload = {
+    lat: location.latitude,
+    lng: location.longitude,
+    accuracy: location.accuracy ?? null,
+    speed: location.speed ?? null,
+    heading: location.bearing ?? null,
+    time: location.time ?? null,
+    source,
+  };
+  emitLocationUpdate(payload);
+  await enqueueRecordLocation(payload);
+}
+
+async function ensureLocationWatcher(purpose: 'route' | 'resident', mode: RouteTrackingMode) {
+  const notificationText = normalizeLocationNotificationText(locationNotificationText);
+  if (
+    (bgWatcherId || webWatchId != null) &&
+    watcherPurpose === purpose &&
+    watcherMode === mode &&
+    watcherNotificationText === notificationText
+  ) {
     return;
   }
+
+  await removeLocationWatcher();
   const config = applyMode(mode);
-  activeTripId = tripId;
-  resetTrackingRuntime();
-  recordQueue = Promise.resolve();
-  pendingRecordCount = 0;
-  droppedRecordCount = 0;
-  lastDropWarningAt = 0;
-  maybeRunRoutePointRetention();
 
   if (Capacitor.isNativePlatform()) {
-    if (bgWatcherId) return;
     bgWatcherId = await BackgroundGeolocation.addWatcher(
       {
         requestPermissions: true,
-        stale: config.stale,
-        distanceFilter: config.distanceFilter,
-        backgroundTitle: 'TrackLog運行アシスト',
-        backgroundMessage: `ルートを記録中（${config.label}）。停止はアプリから行ってください。`,
+        stale: purpose === 'resident' ? true : config.stale,
+        distanceFilter: purpose === 'resident' ? Math.min(config.distanceFilter, 25) : config.distanceFilter,
+        backgroundTitle: notificationText,
+        backgroundMessage: buildBackgroundMessage(),
       },
       async (location, error) => {
         if (error) {
@@ -264,39 +332,75 @@ export async function startRouteTracking(tripId: string, mode: RouteTrackingMode
           return;
         }
         if (!location) return;
-        await enqueueRecordLocation({
-          lat: location.latitude,
-          lng: location.longitude,
-          accuracy: location.accuracy ?? null,
-          speed: location.speed ?? null,
-          heading: location.bearing ?? null,
-          time: location.time ?? null,
-          source: 'background',
-        });
+        await handleLocation(location, 'background');
       },
     );
+    watcherMode = mode;
+    watcherPurpose = purpose;
+    watcherNotificationText = notificationText;
     return;
   }
 
-  if (webWatchId != null) return;
   if (!navigator.geolocation) throw new Error('位置情報が利用できません');
   webWatchId = navigator.geolocation.watchPosition(
     async pos => {
-      await enqueueRecordLocation({
-        lat: pos.coords.latitude,
-        lng: pos.coords.longitude,
-        accuracy: pos.coords.accuracy,
-        speed: pos.coords.speed ?? null,
-        heading: pos.coords.heading ?? null,
-        time: pos.timestamp ?? Date.now(),
-        source: 'foreground',
-      });
+      await handleLocation(
+        {
+          latitude: pos.coords.latitude,
+          longitude: pos.coords.longitude,
+          accuracy: pos.coords.accuracy,
+          speed: pos.coords.speed ?? null,
+          bearing: pos.coords.heading ?? null,
+          time: pos.timestamp ?? Date.now(),
+        },
+        'foreground',
+      );
     },
     err => {
       console.warn('[routeTracking] web watcher error', err);
     },
-    config.webOptions,
+    purpose === 'resident'
+      ? { enableHighAccuracy: true, maximumAge: 30000, timeout: 10000 }
+      : config.webOptions,
   );
+  watcherMode = mode;
+  watcherPurpose = purpose;
+  watcherNotificationText = notificationText;
+}
+
+async function reconcileLocationWatcher() {
+  if (activeTripId) {
+    await ensureLocationWatcher('route', activeRouteMode);
+    return;
+  }
+  if (residentEnabled) {
+    await ensureLocationWatcher('resident', residentMode);
+    return;
+  }
+  await removeLocationWatcher();
+}
+
+export async function startRouteTracking(tripId: string, mode: RouteTrackingMode = 'precision') {
+  const isAlreadyRunning =
+    (bgWatcherId || webWatchId != null) &&
+    watcherPurpose === 'route' &&
+    watcherMode === mode &&
+    activeTripId === tripId;
+  if (isAlreadyRunning) {
+    return;
+  }
+  const tripChanged = activeTripId !== tripId;
+  activeTripId = tripId;
+  activeRouteMode = mode;
+  if (tripChanged || currentMode !== mode) {
+    resetTrackingRuntime();
+    recordQueue = Promise.resolve();
+    pendingRecordCount = 0;
+    droppedRecordCount = 0;
+    lastDropWarningAt = 0;
+  }
+  maybeRunRoutePointRetention();
+  await reconcileLocationWatcher();
 }
 
 export async function stopRouteTracking() {
@@ -306,19 +410,33 @@ export async function stopRouteTracking() {
   pendingRecordCount = 0;
   droppedRecordCount = 0;
   lastDropWarningAt = 0;
-  if (bgWatcherId) {
-    const id = bgWatcherId;
-    bgWatcherId = null;
-    await BackgroundGeolocation.removeWatcher({ id });
-  }
-  if (webWatchId != null && navigator.geolocation) {
-    navigator.geolocation.clearWatch(webWatchId);
-    webWatchId = null;
-  }
+  await reconcileLocationWatcher();
+}
+
+export async function startResidentLocationUpdates(mode: RouteTrackingMode = 'battery') {
+  residentEnabled = true;
+  residentMode = mode;
+  await reconcileLocationWatcher();
+}
+
+export async function stopResidentLocationUpdates() {
+  residentEnabled = false;
+  await reconcileLocationWatcher();
 }
 
 export function isRouteTrackingRunning() {
+  return activeTripId !== null && (!!bgWatcherId || webWatchId != null);
+}
+
+export function isLocationWatcherRunning() {
   return !!bgWatcherId || webWatchId != null;
+}
+
+export function subscribeLocationUpdates(listener: LocationUpdateListener) {
+  locationListeners.add(listener);
+  return () => {
+    locationListeners.delete(listener);
+  };
 }
 
 export async function openNativeSettings() {
