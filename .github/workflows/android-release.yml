@@ -66,6 +66,19 @@ jobs:
             exit 1
           fi
 
+      - name: Configure native push build flag
+        shell: bash
+        env:
+          TRACKLOG_GOOGLE_SERVICES_JSON_BASE64: ${{ secrets.TRACKLOG_GOOGLE_SERVICES_JSON_BASE64 }}
+        run: |
+          if [ -n "${TRACKLOG_GOOGLE_SERVICES_JSON_BASE64:-}" ]; then
+            echo "VITE_TRACKLOG_NATIVE_PUSH_ENABLED=true" >> "$GITHUB_ENV"
+            echo "Native FCM registration enabled for this build."
+          else
+            echo "VITE_TRACKLOG_NATIVE_PUSH_ENABLED=false" >> "$GITHUB_ENV"
+            echo "Native FCM registration disabled because Firebase Android config is not set."
+          fi
+
       - name: Typecheck
         run: npm run typecheck
 

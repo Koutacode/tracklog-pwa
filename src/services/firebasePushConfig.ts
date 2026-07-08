@@ -10,6 +10,11 @@ function envText(value: unknown) {
   return typeof value === 'string' ? value.trim() : '';
 }
 
+function envFlag(value: unknown) {
+  const text = envText(value).toLowerCase();
+  return text === '1' || text === 'true' || text === 'yes' || text === 'on';
+}
+
 export const FIREBASE_PUSH_CONFIG: FirebasePushConfig = {
   apiKey: envText(import.meta.env.VITE_FIREBASE_API_KEY),
   authDomain: envText(import.meta.env.VITE_FIREBASE_AUTH_DOMAIN),
@@ -19,6 +24,7 @@ export const FIREBASE_PUSH_CONFIG: FirebasePushConfig = {
 };
 
 export const FIREBASE_WEB_VAPID_KEY = envText(import.meta.env.VITE_FIREBASE_VAPID_KEY);
+export const FIREBASE_NATIVE_PUSH_ENABLED = envFlag(import.meta.env.VITE_TRACKLOG_NATIVE_PUSH_ENABLED);
 
 export function isFirebaseWebPushConfigured() {
   return (

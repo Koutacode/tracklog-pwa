@@ -1,7 +1,12 @@
 import { Capacitor } from '@capacitor/core';
 import { PushNotifications, type ActionPerformed, type PushNotificationSchema, type Token } from '@capacitor/push-notifications';
 import { pollTracklogAdminMessages, requestLocationFromAdminMessage } from './adminMessages';
-import { FIREBASE_PUSH_CONFIG, FIREBASE_WEB_VAPID_KEY, isFirebaseWebPushConfigured } from './firebasePushConfig';
+import {
+  FIREBASE_NATIVE_PUSH_ENABLED,
+  FIREBASE_PUSH_CONFIG,
+  FIREBASE_WEB_VAPID_KEY,
+  isFirebaseWebPushConfigured,
+} from './firebasePushConfig';
 import { getDriverIdentity } from './remoteAuth';
 import { registerTracklogPushTokenViaFunction } from './tracklogPrivilegedApi';
 
@@ -235,6 +240,7 @@ export async function ensureTracklogPushRegistration(options?: { force?: boolean
   if (!deviceId) return;
 
   if (Capacitor.isNativePlatform()) {
+    if (!FIREBASE_NATIVE_PUSH_ENABLED) return;
     if (nativeRegistrationStarted && !options?.force) return;
     await ensureNativePushRegistration().catch(error => {
       console.warn('[pushRegistration] native push setup failed', error);
