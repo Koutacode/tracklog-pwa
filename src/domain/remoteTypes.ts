@@ -37,6 +37,15 @@ export type TracklogRuntimeConfig = {
   updatedAt: string | null;
 };
 
+export type TracklogAdminMessage = {
+  id: string;
+  target_device_id: string | null;
+  body: string;
+  request_location: boolean;
+  sent_by: string | null;
+  sent_at: string;
+};
+
 export type RemoteCloudMaintenanceResult = {
   database_bytes?: number;
   threshold_bytes?: number;

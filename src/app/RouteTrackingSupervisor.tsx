@@ -29,6 +29,7 @@ import {
   stopLocationHeartbeat,
 } from '../services/locationHeartbeat';
 import { loadTracklogRuntimeConfig } from '../services/runtimeConfig';
+import { pollTracklogAdminMessages } from '../services/adminMessages';
 
 function hasOpenRest(events: AppEvent[]) {
   const starts = events.filter(e => e.type === 'rest_start').sort((a, b) => a.ts.localeCompare(b.ts));
@@ -115,6 +116,7 @@ export default function RouteTrackingSupervisor() {
         startLocationHeartbeat();
         await startResidentLocationUpdates('battery');
         maybeRequestForegroundHeartbeat();
+        await pollTracklogAdminMessages();
 
         const tripId = await getActiveTripId();
         if (!tripId) {
@@ -186,6 +188,7 @@ export default function RouteTrackingSupervisor() {
     const onVisible = () => {
       if (document.visibilityState === 'visible') {
         maybeRequestForegroundHeartbeat();
+        void pollTracklogAdminMessages({ force: true });
         void sync();
       }
     };

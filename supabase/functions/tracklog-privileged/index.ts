@@ -29,6 +29,8 @@ const supabaseServiceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
 const DEFAULT_LOCATION_NOTIFICATION_TEXT = '位置記録中';
 const LOCATION_NOTIFICATION_TEXT_KEY = 'location_notification_text';
 const MAX_NOTIFICATION_TEXT_LENGTH = 40;
+const MAX_ADMIN_MESSAGE_BODY_LENGTH = 200;
+const ADMIN_MESSAGE_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
 
 if (!supabaseUrl || !supabaseAnonKey || !supabaseServiceRoleKey) {
   console.error('TrackLog Edge Function is missing Supabase environment variables.');
@@ -73,6 +75,26 @@ function normalizeLocationNotificationText(value: unknown) {
   const text = textValue(value);
   if (!text) return DEFAULT_LOCATION_NOTIFICATION_TEXT;
   return limitCharacters(text, MAX_NOTIFICATION_TEXT_LENGTH);
+}
+
+function booleanValue(value: unknown, fallback: boolean) {
+  if (typeof value === 'boolean') return value;
+  return fallback;
+}
+
+function normalizeAdminMessageBody(value: unknown) {
+  const text = textValue(value).replace(/\s+/g, ' ');
+  if (!text) throw new HttpError(400, 'body is required');
+  return limitCharacters(text, MAX_ADMIN_MESSAGE_BODY_LENGTH);
+}
+
+function stringArray(value: unknown, key: string) {
+  if (!Array.isArray(value)) throw new HttpError(400, `${key} must be an array`);
+  const items = value
+    .map(item => textValue(item))
+    .filter(item => item.length > 0);
+  if (items.length === 0) throw new HttpError(400, `${key} is required`);
+  return Array.from(new Set(items)).slice(0, 50);
 }
 
 function requiredText(payload: JsonRecord, key: string) {
@@ -338,6 +360,104 @@ async function updateRuntimeConfig(payload: JsonRecord, user: TracklogUser, admi
   return getRuntimeConfig();
 }
 
+async function sendAdminMessage(payload: JsonRecord, user: TracklogUser, admin: boolean) {
+  await requireAdmin(user, admin);
+  const targetDeviceId = nullableText(payload.targetDeviceId);
+  if (targetDeviceId) {
+    const profile = await getDeviceProfile(targetDeviceId);
+    if (!profile) throw new HttpError(404, 'Target device profile not found');
+  }
+
+  const { data, error } = await adminClient
+    .from('tracklog_admin_messages')
+    .insert({
+      target_device_id: targetDeviceId,
+      body: normalizeAdminMessageBody(payload.body),
+      request_location: booleanValue(payload.requestLocation, true),
+      sent_by: user.id,
+    })
+    .select('*')
+    .single();
+  if (error) throw new HttpError(500, `Admin message send failed: ${error.message}`);
+  return data;
+}
+
+async function listPendingAdminMessages(payload: JsonRecord, user: TracklogUser, admin: boolean) {
+  const deviceId = requiredText(payload, 'deviceId');
+  const profile = await getDeviceProfile(deviceId);
+  if (!profile) throw new HttpError(404, 'Device profile not found');
+  ensureDeviceOwner(profile, user, admin, 'Device profile');
+  if (!admin && textValue(profile.auth_user_id) !== user.id) {
+    throw new HttpError(403, 'Device profile is not assigned to this account');
+  }
+  if (textValue(profile.approval_status) !== 'approved') {
+    throw new HttpError(403, 'Device profile is not approved');
+  }
+
+  const since = new Date(Date.now() - ADMIN_MESSAGE_LOOKBACK_MS).toISOString();
+  const [broadcastResult, targetedResult, receiptResult] = await Promise.all([
+    adminClient
+      .from('tracklog_admin_messages')
+      .select('*')
+      .is('target_device_id', null)
+      .gte('sent_at', since)
+      .order('sent_at', { ascending: false })
+      .limit(50),
+    adminClient
+      .from('tracklog_admin_messages')
+      .select('*')
+      .eq('target_device_id', deviceId)
+      .gte('sent_at', since)
+      .order('sent_at', { ascending: false })
+      .limit(50),
+    adminClient
+      .from('tracklog_admin_message_receipts')
+      .select('message_id')
+      .eq('device_id', deviceId)
+      .gte('received_at', since),
+  ]);
+  if (broadcastResult.error) throw new HttpError(500, `Admin message lookup failed: ${broadcastResult.error.message}`);
+  if (targetedResult.error) throw new HttpError(500, `Admin message lookup failed: ${targetedResult.error.message}`);
+  if (receiptResult.error) throw new HttpError(500, `Admin message receipt lookup failed: ${receiptResult.error.message}`);
+
+  const received = new Set((receiptResult.data ?? []).map(row => textValue((row as JsonRecord).message_id)));
+  const merged = new Map<string, JsonRecord>();
+  for (const row of [...(broadcastResult.data ?? []), ...(targetedResult.data ?? [])] as JsonRecord[]) {
+    const id = textValue(row.id);
+    if (id && !received.has(id)) merged.set(id, row);
+  }
+  return Array.from(merged.values())
+    .sort((a, b) => textValue(a.sent_at).localeCompare(textValue(b.sent_at)))
+    .slice(0, 20);
+}
+
+async function ackAdminMessages(payload: JsonRecord, user: TracklogUser, admin: boolean) {
+  const deviceId = requiredText(payload, 'deviceId');
+  const messageIds = stringArray(payload.messageIds, 'messageIds');
+  const profile = await getDeviceProfile(deviceId);
+  if (!profile) throw new HttpError(404, 'Device profile not found');
+  ensureDeviceOwner(profile, user, admin, 'Device profile');
+  if (!admin && textValue(profile.auth_user_id) !== user.id) {
+    throw new HttpError(403, 'Device profile is not assigned to this account');
+  }
+  if (textValue(profile.approval_status) !== 'approved') {
+    throw new HttpError(403, 'Device profile is not approved');
+  }
+  const locationRequestedAt = nullableText(payload.locationRequestedAt);
+  const receivedAt = nowIso();
+  const rows = messageIds.map(messageId => ({
+    message_id: messageId,
+    device_id: deviceId,
+    received_at: receivedAt,
+    location_requested_at: locationRequestedAt,
+  }));
+  const { error } = await adminClient
+    .from('tracklog_admin_message_receipts')
+    .upsert(rows, { onConflict: 'message_id,device_id' });
+  if (error) throw new HttpError(500, `Admin message ack failed: ${error.message}`);
+  return { acknowledged: rows.length };
+}
+
 async function setDeviceApproval(payload: JsonRecord, user: TracklogUser, admin: boolean) {
   await requireAdmin(user, admin);
   const deviceId = requiredText(payload, 'deviceId');
@@ -445,6 +565,9 @@ Deno.serve(async (req: Request) => {
     let data: unknown;
     if (action === 'getRuntimeConfig') data = await getRuntimeConfig();
     else if (action === 'updateRuntimeConfig') data = await updateRuntimeConfig(payload, user, admin);
+    else if (action === 'sendAdminMessage') data = await sendAdminMessage(payload, user, admin);
+    else if (action === 'listPendingAdminMessages') data = await listPendingAdminMessages(payload, user, admin);
+    else if (action === 'ackAdminMessages') data = await ackAdminMessages(payload, user, admin);
     else if (action === 'claimDeviceProfile') data = await claimDeviceProfile(payload, user, admin);
     else if (action === 'updateDeviceLocation') data = await updateDeviceLocation(payload, user, admin);
     else if (action === 'migrateDeviceRecords') data = await migrateDeviceRecords(payload, user, admin);

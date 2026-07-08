@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, Navigate } from 'react-router-dom';
 import type { RemoteDeviceProfile } from '../../domain/remoteTypes';
-import { deleteAdminDevice, listAdminDevices, setAdminDeviceApproval } from '../../services/remoteAdmin';
+import { deleteAdminDevice, listAdminDevices, sendAdminMessage, setAdminDeviceApproval } from '../../services/remoteAdmin';
 import { getAdminSession, signOutAdmin } from '../../services/remoteAuth';
 import { shareText } from '../../services/nativeShare';
 import { DEFAULT_APK_DOWNLOAD_URL, PWA_URL } from '../../app/releaseInfo';
@@ -98,6 +98,10 @@ export default function AdminDashboard() {
   const [notificationText, setNotificationText] = useState(DEFAULT_LOCATION_NOTIFICATION_TEXT);
   const [notificationDraft, setNotificationDraft] = useState(DEFAULT_LOCATION_NOTIFICATION_TEXT);
   const [savingNotificationText, setSavingNotificationText] = useState(false);
+  const [adminMessageDraft, setAdminMessageDraft] = useState('');
+  const [adminMessageTargetDeviceId, setAdminMessageTargetDeviceId] = useState('');
+  const [adminMessageRequestLocation, setAdminMessageRequestLocation] = useState(true);
+  const [sendingAdminMessage, setSendingAdminMessage] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -181,6 +185,11 @@ export default function AdminDashboard() {
 
   const pendingDevices = useMemo(
     () => devices.filter(device => getApprovalStatus(device) === 'pending'),
+    [devices],
+  );
+
+  const approvedDevices = useMemo(
+    () => devices.filter(device => getApprovalStatus(device) === 'approved'),
     [devices],
   );
 
@@ -299,6 +308,35 @@ export default function AdminDashboard() {
     }
   }
 
+  async function handleSendAdminMessage() {
+    const body = adminMessageDraft.trim();
+    if (!body) {
+      setError('送信するメッセージを入力してください');
+      return;
+    }
+
+    setSendingAdminMessage(true);
+    setError(null);
+    setNotice(null);
+    try {
+      await sendAdminMessage({
+        targetDeviceId: adminMessageTargetDeviceId || null,
+        body,
+        requestLocation: adminMessageRequestLocation,
+      });
+      setAdminMessageDraft('');
+      const targetDevice = devices.find(device => device.device_id === adminMessageTargetDeviceId);
+      const targetLabel = adminMessageTargetDeviceId
+        ? (targetDevice ? getDisplayName(targetDevice) : adminMessageTargetDeviceId)
+        : '全承認端末';
+      setNotice(`${targetLabel} へメッセージを送信しました`);
+    } catch (err: any) {
+      setError(err?.message ?? '管理者メッセージの送信に失敗しました');
+    } finally {
+      setSendingAdminMessage(false);
+    }
+  }
+
   if (!ready) {
     return <div className="screen-shell"><div className="screen-card">読み込み中…</div></div>;
   }
@@ -387,6 +425,60 @@ export default function AdminDashboard() {
             >
               {savingNotificationText ? '保存中' : '保存'}
             </button>
+          </div>
+        </section>
+        <section className="approval-admin-panel">
+          <div className="approval-admin-panel__header">
+            <div>
+              <div className="settings-panel__title">管理者メッセージ</div>
+              <p>端末に通知を表示し、必要に応じて現在地を再取得します。</p>
+            </div>
+            <strong>{approvedDevices.length}台</strong>
+          </div>
+          <div className="admin-message-form">
+            <div className="admin-message-form__row">
+              <label className="settings-field">
+                <span>送信先</span>
+                <select
+                  value={adminMessageTargetDeviceId}
+                  onChange={event => setAdminMessageTargetDeviceId(event.target.value)}
+                >
+                  <option value="">全承認端末</option>
+                  {approvedDevices.map(device => (
+                    <option value={device.device_id} key={device.device_id}>
+                      {getDisplayName(device)} / {formatProfileValue(device.vehicle_label)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="settings-field">
+                <span>通知文</span>
+                <textarea
+                  value={adminMessageDraft}
+                  maxLength={200}
+                  onChange={event => setAdminMessageDraft(event.target.value)}
+                  placeholder="こんにちは"
+                />
+              </label>
+            </div>
+            <label className="settings-checkbox">
+              <input
+                type="checkbox"
+                checked={adminMessageRequestLocation}
+                onChange={event => setAdminMessageRequestLocation(event.target.checked)}
+              />
+              通知タップ時に位置情報を更新する
+            </label>
+            <div className="approval-request__actions">
+              <button
+                type="button"
+                className="pill-link pill-link--approve"
+                disabled={sendingAdminMessage || !adminMessageDraft.trim()}
+                onClick={() => void handleSendAdminMessage()}
+              >
+                {sendingAdminMessage ? '送信中' : '送信'}
+              </button>
+            </div>
           </div>
         </section>
         <section className="approval-admin-panel">

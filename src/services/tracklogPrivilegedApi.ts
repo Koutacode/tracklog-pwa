@@ -1,5 +1,5 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
-import type { RemoteDeviceProfile, TracklogRuntimeConfig } from '../domain/remoteTypes';
+import type { RemoteDeviceProfile, TracklogAdminMessage, TracklogRuntimeConfig } from '../domain/remoteTypes';
 import { SUPABASE_CONFIGURED, adminSupabase, driverSupabase } from './supabase';
 
 type FunctionResponse<T> = {
@@ -11,6 +11,9 @@ type FunctionResponse<T> = {
 type PrivilegedAction =
   | 'getRuntimeConfig'
   | 'updateRuntimeConfig'
+  | 'sendAdminMessage'
+  | 'listPendingAdminMessages'
+  | 'ackAdminMessages'
   | 'claimDeviceProfile'
   | 'updateDeviceLocation'
   | 'migrateDeviceRecords'
@@ -77,6 +80,32 @@ export async function updateTracklogRuntimeConfigViaFunction(input: {
 }): Promise<TracklogRuntimeConfig> {
   const client = requireClient(adminSupabase);
   return invokeTracklogPrivileged<TracklogRuntimeConfig>(client, 'updateRuntimeConfig', input);
+}
+
+export async function sendTracklogAdminMessageViaFunction(input: {
+  targetDeviceId?: string | null;
+  body: string;
+  requestLocation?: boolean;
+}): Promise<TracklogAdminMessage> {
+  const client = requireClient(adminSupabase);
+  return invokeTracklogPrivileged<TracklogAdminMessage>(client, 'sendAdminMessage', input);
+}
+
+export async function listPendingTracklogAdminMessagesViaFunction(input: {
+  deviceId: string;
+}): Promise<TracklogAdminMessage[]> {
+  const client = requireClient(driverSupabase);
+  return invokeTracklogPrivileged<TracklogAdminMessage[]>(client, 'listPendingAdminMessages', input);
+}
+
+export async function ackTracklogAdminMessagesViaFunction(input: {
+  deviceId: string;
+  messageIds: string[];
+  locationRequestedAt?: string | null;
+}): Promise<number> {
+  const client = requireClient(driverSupabase);
+  const result = await invokeTracklogPrivileged<{ acknowledged: number }>(client, 'ackAdminMessages', input);
+  return result.acknowledged;
 }
 
 export async function migrateTracklogDeviceRecordsViaFunction(input: {

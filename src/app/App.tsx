@@ -11,6 +11,7 @@ import RouteTrackingSupervisor from './RouteTrackingSupervisor';
 import { onDriverAuthStateChange } from '../services/remoteAuth';
 import { runRemoteSync } from '../services/remoteSync';
 import { APP_VERSION } from './version';
+import AdminMessageToastHost from '../ui/components/AdminMessageToastHost';
 
 const HomeScreen = lazy(() => import('../ui/screens/HomeScreen'));
 const TripDetail = lazy(() => import('../ui/screens/TripDetail'));
@@ -49,6 +50,7 @@ function AppShell() {
           <IcResolverJob />
           <LocalRecoveryBootstrap />
           <NativeUpdateNotice />
+          <AdminMessageToastHost />
           <RouteTrackingSupervisor />
           <RemoteSyncBootstrap />
         </>

@@ -137,6 +137,22 @@ a:hover {
   cursor: not-allowed;
 }
 
+.settings-field textarea,
+.settings-field select {
+  width: 100%;
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  background: rgba(15, 23, 42, 0.84);
+  color: var(--text);
+  font: inherit;
+}
+
+.settings-field textarea {
+  min-height: 96px;
+  resize: vertical;
+}
+
 .driver-registration {
   display: grid;
   gap: 14px;
@@ -503,6 +519,10 @@ a:hover {
   .settings-info-row strong {
     text-align: left;
   }
+
+  .admin-message-form__row {
+    grid-template-columns: 1fr;
+  }
 }
 
 .card {
@@ -624,6 +644,62 @@ a:hover {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.admin-message-form {
+  display: grid;
+  gap: 12px;
+}
+
+.admin-message-form__row {
+  display: grid;
+  grid-template-columns: minmax(180px, 280px) minmax(0, 1fr);
+  gap: 12px;
+}
+
+.admin-message-toast-host {
+  position: fixed;
+  left: 14px;
+  right: 14px;
+  bottom: calc(30px + env(safe-area-inset-bottom));
+  z-index: 10020;
+  display: grid;
+  gap: 10px;
+  pointer-events: none;
+}
+
+.admin-message-toast {
+  width: min(520px, 100%);
+  margin-left: auto;
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(56, 189, 248, 0.38);
+  background: rgba(15, 23, 42, 0.94);
+  color: var(--text);
+  box-shadow: 0 18px 45px rgba(2, 6, 23, 0.48);
+  pointer-events: auto;
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+}
+
+.admin-message-toast strong,
+.admin-message-toast span,
+.admin-message-toast em {
+  display: block;
+}
+
+.admin-message-toast span {
+  color: #dbeafe;
+  margin-top: 2px;
+}
+
+.admin-message-toast em {
+  margin-top: 6px;
+  color: #67e8f9;
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 800;
 }
 
 .approval-badge {

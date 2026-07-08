@@ -10,6 +10,7 @@ import {
   deleteTracklogDeviceViaFunction,
   deleteTracklogTripViaFunction,
   setTracklogDeviceApprovalViaFunction,
+  sendTracklogAdminMessageViaFunction,
 } from './tracklogPrivilegedApi';
 
 export type AdminDeviceBundle = {
@@ -65,6 +66,15 @@ export async function setAdminDeviceApproval(
     deviceId,
     approvalStatus: decision,
   });
+}
+
+export async function sendAdminMessage(input: {
+  targetDeviceId?: string | null;
+  body: string;
+  requestLocation?: boolean;
+}) {
+  assertAdminConfigured();
+  return sendTracklogAdminMessageViaFunction(input);
 }
 
 export async function deleteAdminDevice(deviceId: string): Promise<DeleteAdminDeviceResult> {
