@@ -30,6 +30,8 @@ const META_REMOTE_AUTH_INITIALIZED = 'remote_auth_initialized';
 const META_DRIVER_APPROVAL_STATUS = 'driver_approval_status';
 const NATIVE_ADMIN_REDIRECT = 'com.tracklog.assist://auth?next=%2Fadmin';
 const NATIVE_DRIVER_REDIRECT = 'com.tracklog.assist://auth?next=%2Fsettings';
+const EMAIL_OTP_PATTERN = /^\d{6,10}$/;
+const EMAIL_OTP_ERROR_MESSAGE = 'メール本文に表示された認証コードをそのまま入力してください';
 
 type DriverProfileSeed = {
   displayName: string;
@@ -498,8 +500,8 @@ export async function verifyAdminEmailOtp(email: string, token: string): Promise
     throw new Error('メールアドレスを入力してください');
   }
   const normalizedToken = toHalfWidthDigits(token).replace(/\D/g, '').trim();
-  if (!/^\d{6}$/.test(normalizedToken)) {
-    throw new Error('6桁の認証コードを入力してください');
+  if (!EMAIL_OTP_PATTERN.test(normalizedToken)) {
+    throw new Error(EMAIL_OTP_ERROR_MESSAGE);
   }
   const { error } = await adminSupabase.auth.verifyOtp({
     email: normalized,
@@ -571,8 +573,8 @@ export async function verifyDriverEmailOtp(email: string, token: string): Promis
     throw new Error('メールアドレスを入力してください');
   }
   const normalizedToken = toHalfWidthDigits(token).replace(/\D/g, '').trim();
-  if (!/^\d{6}$/.test(normalizedToken)) {
-    throw new Error('6桁の認証コードを入力してください');
+  if (!EMAIL_OTP_PATTERN.test(normalizedToken)) {
+    throw new Error(EMAIL_OTP_ERROR_MESSAGE);
   }
   const [confirmed, savedEmail] = await Promise.all([
     getMeta(META_REMOTE_AUTH_INITIALIZED),

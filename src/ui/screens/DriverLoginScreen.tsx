@@ -100,7 +100,7 @@ export default function DriverLoginScreen() {
     setEmail(normalizedEmail);
     try {
       await sendDriverLoginLink(normalizedEmail);
-      setMessage('ログインメールを送信しました。メール本文の6桁コードをこの画面に入力してください。');
+      setMessage('ログインメールを送信しました。メール本文の認証コードをこの画面に入力してください。');
     } catch (error: any) {
       setMessage(formatDriverLoginError(error));
     } finally {
@@ -112,7 +112,7 @@ export default function DriverLoginScreen() {
     setStatus('verifying');
     setMessage(null);
     const normalizedEmail = normalizeEmailInput(email);
-    const normalizedToken = toHalfWidthDigits(token).replace(/\D/g, '').slice(0, 6);
+    const normalizedToken = toHalfWidthDigits(token).replace(/\D/g, '').slice(0, 10);
     setEmail(normalizedEmail);
     setToken(normalizedToken);
     try {
@@ -166,21 +166,21 @@ export default function DriverLoginScreen() {
         </form>
 
         <div className="settings-note" style={{ marginTop: 16 }}>
-          メール本文の6桁コードを入力すると、このPWA内でログインできます。
+          メール本文の認証コードを入力すると、このPWA内でログインできます。
         </div>
         <div className="driver-registration">
           <label className="settings-field">
-            <span>6桁コード</span>
+            <span>認証コード</span>
             <input
               value={token}
-              onChange={event => setToken(toHalfWidthDigits(event.target.value).replace(/\D/g, '').slice(0, 6))}
-              placeholder="123456"
+              onChange={event => setToken(toHalfWidthDigits(event.target.value).replace(/\D/g, '').slice(0, 10))}
+              placeholder="40055812"
               inputMode="numeric"
-              maxLength={6}
+              maxLength={10}
             />
           </label>
-          <button className="trip-btn" disabled={busy || !email.trim() || token.length !== 6} type="button" onClick={handleVerifyCode}>
-            {status === 'verifying' ? '確認中…' : '6桁コードでログイン'}
+          <button className="trip-btn" disabled={busy || !email.trim() || token.length < 6 || token.length > 10} type="button" onClick={handleVerifyCode}>
+            {status === 'verifying' ? '確認中…' : '認証コードでログイン'}
           </button>
         </div>
 

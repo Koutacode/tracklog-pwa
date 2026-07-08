@@ -61,7 +61,7 @@ function formatDriverAuthError(error: any) {
     return 'メール送信の上限に達しています。少し待ってから再度試してください。';
   }
   if (normalized.includes('otp') || normalized.includes('token')) {
-    return '6桁コードが無効です。最新の認証メールで再度試してください。';
+    return '認証コードが無効です。最新の認証メールで再度試してください。';
   }
   return raw;
 }
@@ -107,7 +107,7 @@ function DriverRegistrationGate(props: {
       await hydrateRemoteSyncState();
       if (identity.configured && !identity.authInitialized) {
         await sendDriverMagicLink(validation.value.email);
-        setMessage('認証メールを送信しました。メール本文の6桁コードをこの画面に入力してください。');
+        setMessage('認証メールを送信しました。メール本文の認証コードをこの画面に入力してください。');
       } else {
         await runRemoteSync('profile-registration');
         setMessage('端末プロフィールを保存しました。管理者の承認後に利用できます。');
@@ -131,10 +131,10 @@ function DriverRegistrationGate(props: {
       setMessage(validation.firstError);
       return;
     }
-    const normalizedToken = toHalfWidthDigits(otpToken).replace(/\D/g, '').slice(0, 6);
+    const normalizedToken = toHalfWidthDigits(otpToken).replace(/\D/g, '').slice(0, 10);
     setOtpToken(normalizedToken);
-    if (normalizedToken.length !== 6) {
-      setMessage('認証メールに記載された6桁コードを入力してください。');
+    if (normalizedToken.length < 6 || normalizedToken.length > 10) {
+      setMessage('認証メールに記載された認証コードを入力してください。');
       return;
     }
     setBusy(true);
@@ -177,7 +177,7 @@ function DriverRegistrationGate(props: {
         </div>
 
         <div className="settings-note">
-          名前、メールアドレス、電話番号、車両番号を登録し、メール本文の6桁コードで認証してください。メール認証と管理者承認が完了するまで運行開始画面は利用できません。
+          名前、メールアドレス、電話番号、車両番号を登録し、メール本文の認証コードで認証してください。メール認証と管理者承認が完了するまで運行開始画面は利用できません。
           {!identity.configured && ' 現在はクラウド設定を読み込めていないため、管理者承認を確認できません。'}
         </div>
 
@@ -264,25 +264,25 @@ function DriverRegistrationGate(props: {
         {!waitingForApproval && showOtpPanel && (
           <div className="driver-registration">
             <div className="settings-note">
-              認証メールに表示された6桁コードをここに入力すると、このPWA内でメール認証が完了します。
+              認証メールに表示された認証コードをここに入力すると、このPWA内でメール認証が完了します。
             </div>
             <label className="settings-field">
-              <span>6桁コード</span>
+              <span>認証コード</span>
               <input
                 value={otpToken}
-                onChange={event => setOtpToken(toHalfWidthDigits(event.target.value).replace(/\D/g, '').slice(0, 6))}
-                placeholder="123456"
+                onChange={event => setOtpToken(toHalfWidthDigits(event.target.value).replace(/\D/g, '').slice(0, 10))}
+                placeholder="40055812"
                 inputMode="numeric"
-                maxLength={6}
+                maxLength={10}
               />
             </label>
             <button
               className="trip-btn"
-              disabled={busy || loading || otpToken.length !== 6}
+              disabled={busy || loading || otpToken.length < 6 || otpToken.length > 10}
               type="button"
               onClick={handleVerifyCode}
             >
-              6桁コードでメール認証
+              認証コードでメール認証
             </button>
           </div>
         )}

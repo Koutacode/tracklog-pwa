@@ -128,7 +128,7 @@ export default function LoginScreen() {
             setEmail(normalizedEmail);
             try {
               await sendAdminMagicLink(normalizedEmail);
-              setMessage('ログインコードを送信しました。メール本文の6桁コードを入力してください。');
+              setMessage('ログインコードを送信しました。メール本文の認証コードを入力してください。');
             } catch (error: any) {
               setMessage(formatLoginError(error));
             } finally {
@@ -139,23 +139,23 @@ export default function LoginScreen() {
           {status === 'sending' ? '送信中…' : 'ログインコードを送る'}
         </button>
         <label className="settings-field">
-          <span>6桁コード</span>
+          <span>認証コード</span>
           <input
             value={token}
-            onChange={event => setToken(toHalfWidthDigits(event.target.value).replace(/\D/g, '').slice(0, 6))}
-            placeholder="123456"
+            onChange={event => setToken(toHalfWidthDigits(event.target.value).replace(/\D/g, '').slice(0, 10))}
+            placeholder="40055812"
             inputMode="numeric"
-            maxLength={6}
+            maxLength={10}
           />
         </label>
         <button
           className="trip-btn trip-btn--primary"
-          disabled={status !== 'idle' || !email.trim() || token.length !== 6}
+          disabled={status !== 'idle' || !email.trim() || token.length < 6 || token.length > 10}
           onClick={async () => {
             setStatus('verifying');
             setMessage(null);
             const normalizedEmail = normalizeEmailInput(email);
-            const normalizedToken = toHalfWidthDigits(token).replace(/\D/g, '').slice(0, 6);
+            const normalizedToken = toHalfWidthDigits(token).replace(/\D/g, '').slice(0, 10);
             setEmail(normalizedEmail);
             setToken(normalizedToken);
             try {
@@ -170,7 +170,7 @@ export default function LoginScreen() {
             }
           }}
         >
-          {status === 'verifying' ? '確認中…' : '6桁コードでログイン'}
+          {status === 'verifying' ? '確認中…' : '認証コードでログイン'}
         </button>
         {Capacitor.isNativePlatform() && (
           <Link
@@ -188,7 +188,7 @@ export default function LoginScreen() {
               setMessage(null);
               try {
                 await openExternalUrl('https://mail.google.com/');
-                setMessage('Gmail を開きました。最新の6桁コードを使ってください。');
+                setMessage('Gmail を開きました。最新の認証コードを使ってください。');
               } catch (error: any) {
                 setMessage(error?.message ?? 'Gmail を開けませんでした');
               }
