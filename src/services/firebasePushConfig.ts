@@ -32,7 +32,6 @@ export function isFirebaseWebPushConfigured() {
     !!FIREBASE_PUSH_CONFIG.authDomain &&
     !!FIREBASE_PUSH_CONFIG.projectId &&
     !!FIREBASE_PUSH_CONFIG.messagingSenderId &&
-    !!FIREBASE_PUSH_CONFIG.appId &&
-    !!FIREBASE_WEB_VAPID_KEY
+    !!FIREBASE_PUSH_CONFIG.appId
   );
 }

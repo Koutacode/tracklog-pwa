@@ -221,10 +221,11 @@ async function ensureWebPushRegistration() {
   const app = appModule.getApps().find(item => item.name === 'tracklog-push') ??
     appModule.initializeApp(FIREBASE_PUSH_CONFIG, 'tracklog-push');
   const messaging = messagingModule.getMessaging(app);
-  const token = await messagingModule.getToken(messaging, {
-    vapidKey: FIREBASE_WEB_VAPID_KEY,
+  const tokenOptions: { serviceWorkerRegistration: ServiceWorkerRegistration; vapidKey?: string } = {
     serviceWorkerRegistration: registration,
-  });
+  };
+  if (FIREBASE_WEB_VAPID_KEY) tokenOptions.vapidKey = FIREBASE_WEB_VAPID_KEY;
+  const token = await messagingModule.getToken(messaging, tokenOptions);
   if (!token) return false;
   webRegistrationStarted = true;
   await savePushToken(token, 'web');
