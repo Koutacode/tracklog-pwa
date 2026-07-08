@@ -349,6 +349,7 @@ export default function HomeScreen() {
               </div>
             </div>
             <div className="start-hero__nav-actions">
+              <Link to="/messages" className="pill-link">メッセージ</Link>
               <Link to="/settings" className="pill-link">同期/端末</Link>
               <Link to="/history" className="pill-link">運行履歴</Link>
               <Link to="/report" className="pill-link">運行日報</Link>
@@ -419,6 +420,7 @@ export default function HomeScreen() {
               {focusDriving ? '通常表示' : '運転集中'}
             </button>
             <Link to="/admin" className="pill-link">管理</Link>
+            <Link to="/messages" className="pill-link">メッセージ</Link>
             <Link to="/settings" className="pill-link">設定</Link>
             <Link to={`/trip/${tripId}`} className="pill-link">詳細</Link>
           </div>

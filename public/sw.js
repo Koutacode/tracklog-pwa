@@ -66,6 +66,7 @@ function normalizePushPayload(payload) {
     body: textValue(notification.body) || textValue(data.body) || '管理者メッセージがあります',
     messageId: textValue(data.messageId),
     requestLocation: booleanValue(data.requestLocation, true),
+    sentAt: textValue(data.sentAt),
   };
 }
 
@@ -80,7 +81,9 @@ self.addEventListener('push', event => {
       data: {
         type: 'TRACKLOG_ADMIN_PUSH_CLICK',
         messageId: payload.messageId,
+        body: payload.body,
         requestLocation: payload.requestLocation,
+        sentAt: payload.sentAt,
       },
       actions: payload.requestLocation
         ? [{ action: 'update_location', title: '現在地更新' }]
@@ -93,16 +96,28 @@ self.addEventListener('notificationclick', event => {
   const data = event.notification?.data || {};
   event.notification.close();
   if (data.type !== 'TRACKLOG_ADMIN_PUSH_CLICK' || !data.messageId) return;
-  const targetUrl = new URL('/', self.location.origin);
+  const targetUrl = new URL('/messages', self.location.origin);
+  targetUrl.searchParams.set('messageId', data.messageId);
   targetUrl.searchParams.set('tracklogPushMessageId', data.messageId);
   targetUrl.searchParams.set('tracklogRequestLocation', data.requestLocation ? '1' : '0');
+  if (data.body) targetUrl.searchParams.set('tracklogPushBody', data.body);
+  if (data.sentAt) targetUrl.searchParams.set('tracklogPushSentAt', data.sentAt);
 
   event.waitUntil((async () => {
     const clientsList = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
     for (const client of clientsList) {
       if ('focus' in client) {
-        client.postMessage(data);
-        await client.focus();
+        let targetClient = client;
+        try {
+          if ('navigate' in client) {
+            targetClient = await client.navigate(targetUrl.toString()) || client;
+          } else {
+            targetClient.postMessage(data);
+          }
+        } catch {
+          targetClient.postMessage(data);
+        }
+        await targetClient.focus();
         return;
       }
     }

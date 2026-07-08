@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
 import { Capacitor } from '@capacitor/core';
 import { APP_VERSION, BUILD_DATE } from './version';
+import { initializeTracklogPushOpenHandlers } from '../services/pushRegistration';
 
 const PWA_UPDATE_CHECK_INTERVAL_MS = 60 * 1000;
 const PWA_RELOAD_KEY = 'tracklog-pwa-reloaded-build';
@@ -51,6 +52,8 @@ export default function PwaBootstrap() {
     if (Capacitor.isNativePlatform()) return;
     if (!('serviceWorker' in navigator)) return;
     let cancelled = false;
+
+    initializeTracklogPushOpenHandlers();
 
     navigator.serviceWorker.register('/sw.js').then(registration => {
       void registration.update();

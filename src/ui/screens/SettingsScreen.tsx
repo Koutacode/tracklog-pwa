@@ -5,7 +5,15 @@ import { getDriverIdentity, sendDriverMagicLink, setDriverProfileLocal } from '.
 import { getRemoteSyncState, hydrateRemoteSyncState, runRemoteSync, subscribeRemoteSyncState } from '../../services/remoteSync';
 import { shareText } from '../../services/nativeShare';
 import { PWA_URL, DEFAULT_APK_DOWNLOAD_URL } from '../../app/releaseInfo';
-import { openAppPermissionSettings } from '../../services/nativeSetup';
+import {
+  checkLocationPermissionStatus,
+  checkNotificationPermissionStatus,
+  openAppPermissionSettings,
+  requestLocationPermission,
+  requestNotificationPermission,
+  type SimplePermissionState,
+} from '../../services/nativeSetup';
+import { ensureTracklogPushRegistration } from '../../services/pushRegistration';
 import type { DriverProfileField } from '../../services/driverProfileValidation';
 import {
   normalizePhoneInput,
@@ -15,6 +23,12 @@ import {
 
 function isStandaloneMode() {
   return window.matchMedia?.('(display-mode: standalone)').matches || (navigator as any).standalone === true;
+}
+
+function permissionLabel(state: SimplePermissionState) {
+  if (state === 'granted') return '許可済み';
+  if (state === 'denied') return '拒否';
+  return '未確認';
 }
 
 export default function SettingsScreen() {
@@ -30,6 +44,9 @@ export default function SettingsScreen() {
   const [message, setMessage] = useState<string | null>(null);
   const [syncState, setSyncState] = useState(getRemoteSyncState());
   const [fieldErrors, setFieldErrors] = useState<Partial<Record<DriverProfileField, string>>>({});
+  const [pwaLocationPermission, setPwaLocationPermission] = useState<SimplePermissionState>('unknown');
+  const [pwaNotificationPermission, setPwaNotificationPermission] = useState<SimplePermissionState>('unknown');
+  const [pwaPermissionBusy, setPwaPermissionBusy] = useState<string | null>(null);
 
   const isNative = Capacitor.isNativePlatform();
   const standalone = useMemo(() => isStandaloneMode(), []);
@@ -59,6 +76,14 @@ export default function SettingsScreen() {
       setApprovalStatus(identity.approvalStatus);
     })();
     void hydrateRemoteSyncState();
+    void Promise.all([
+      checkLocationPermissionStatus(),
+      checkNotificationPermissionStatus(),
+    ]).then(([location, notification]) => {
+      if (!active) return;
+      setPwaLocationPermission(location);
+      setPwaNotificationPermission(notification);
+    });
     const unsubscribe = subscribeRemoteSyncState(next => {
       if (active) setSyncState(next);
     });
@@ -100,6 +125,9 @@ export default function SettingsScreen() {
             </button>
             <Link to="/" className="pill-link">
               ホーム
+            </Link>
+            <Link to="/messages" className="pill-link">
+              メッセージ
             </Link>
             <Link to="/login" className="pill-link">
               管理者ログイン
@@ -273,6 +301,88 @@ export default function SettingsScreen() {
               今すぐ同期
             </button>
           </article>
+
+          {!isNative && (
+            <article className="card settings-panel">
+              <div className="settings-panel__title">PWAの権限</div>
+              <div className="settings-note">
+                iPhone PWAでは常時バックグラウンド記録はできません。アプリを開いた状態で位置情報と通知を使うため、ここで許可してください。
+              </div>
+              <div className="settings-info-row">
+                <span>位置情報</span>
+                <strong>{permissionLabel(pwaLocationPermission)}</strong>
+              </div>
+              <div className="settings-info-row">
+                <span>通知</span>
+                <strong>{permissionLabel(pwaNotificationPermission)}</strong>
+              </div>
+              <button
+                className="trip-btn trip-btn--primary"
+                disabled={pwaPermissionBusy !== null}
+                onClick={async () => {
+                  setPwaPermissionBusy('location');
+                  setMessage(null);
+                  try {
+                    const state = await requestLocationPermission();
+                    setPwaLocationPermission(state);
+                    setMessage(state === 'granted'
+                      ? '位置情報を許可しました'
+                      : state === 'denied'
+                        ? '位置情報が拒否されています。iPhoneの設定またはSafari/PWAのサイト設定で許可してください。'
+                        : '位置情報の状態を確認できませんでした');
+                  } finally {
+                    setPwaPermissionBusy(null);
+                  }
+                }}
+              >
+                {pwaPermissionBusy === 'location' ? '確認中…' : '位置情報を許可'}
+              </button>
+              <button
+                className="trip-btn"
+                disabled={pwaPermissionBusy !== null}
+                onClick={async () => {
+                  setPwaPermissionBusy('notification');
+                  setMessage(null);
+                  try {
+                    const state = await requestNotificationPermission();
+                    setPwaNotificationPermission(state);
+                    if (state === 'granted') {
+                      await ensureTracklogPushRegistration({ force: true });
+                      setMessage('通知を許可しました。承認済み端末では管理者メッセージ通知を受け取れます。');
+                    } else if (state === 'denied') {
+                      setMessage('通知が拒否されています。iPhoneの設定またはPWAの通知設定で許可してください。');
+                    } else {
+                      setMessage('このブラウザでは通知許可を確認できませんでした。ホーム画面に追加したPWAから再度試してください。');
+                    }
+                  } finally {
+                    setPwaPermissionBusy(null);
+                  }
+                }}
+              >
+                {pwaPermissionBusy === 'notification' ? '確認中…' : '通知を許可'}
+              </button>
+              <button
+                className="trip-btn trip-btn--ghost"
+                disabled={pwaPermissionBusy !== null}
+                onClick={async () => {
+                  setPwaPermissionBusy('refresh');
+                  try {
+                    const [location, notification] = await Promise.all([
+                      checkLocationPermissionStatus(),
+                      checkNotificationPermissionStatus(),
+                    ]);
+                    setPwaLocationPermission(location);
+                    setPwaNotificationPermission(notification);
+                    setMessage('PWA権限の状態を更新しました');
+                  } finally {
+                    setPwaPermissionBusy(null);
+                  }
+                }}
+              >
+                {pwaPermissionBusy === 'refresh' ? '更新中…' : '権限状態を更新'}
+              </button>
+            </article>
+          )}
 
           <article className="card settings-panel">
             <div className="settings-panel__title">PWA / 配布</div>

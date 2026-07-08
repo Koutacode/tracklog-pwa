@@ -700,6 +700,7 @@ function getAdminPushData(message: JsonRecord) {
   return {
     kind: 'tracklog_admin_message_v1',
     messageId: textValue(message.id),
+    body: textValue(message.body),
     requestLocation: requestLocation ? 'true' : 'false',
     sentAt: textValue(message.sent_at),
   };
@@ -707,10 +708,13 @@ function getAdminPushData(message: JsonRecord) {
 
 function getPwaLinkForMessage(message: JsonRecord) {
   const params = new URLSearchParams({
+    messageId: textValue(message.id),
     tracklogPushMessageId: textValue(message.id),
     tracklogRequestLocation: booleanValue(message.request_location, true) ? '1' : '0',
+    tracklogPushBody: textValue(message.body),
+    tracklogPushSentAt: textValue(message.sent_at),
   });
-  return `https://tracklog-assist.pages.dev/?${params.toString()}`;
+  return `https://tracklog-assist.pages.dev/messages?${params.toString()}`;
 }
 
 async function sendFcmMessage(registration: JsonRecord, message: JsonRecord, credentials: FirebaseCredentials) {

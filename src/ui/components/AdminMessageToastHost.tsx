@@ -1,6 +1,11 @@
 import { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import type { TracklogAdminMessage } from '../../domain/remoteTypes';
-import { requestLocationFromAdminMessage, TRACKLOG_ADMIN_MESSAGE_EVENT } from '../../services/adminMessages';
+import {
+  markAdminMessageRead,
+  requestLocationFromAdminMessage,
+  TRACKLOG_ADMIN_MESSAGE_EVENT,
+} from '../../services/adminMessages';
 
 type ToastItem = {
   id: string;
@@ -9,6 +14,7 @@ type ToastItem = {
 };
 
 export default function AdminMessageToastHost() {
+  const navigate = useNavigate();
   const [items, setItems] = useState<ToastItem[]>([]);
   const [requestingId, setRequestingId] = useState<string | null>(null);
 
@@ -31,8 +37,10 @@ export default function AdminMessageToastHost() {
   if (items.length === 0) return null;
 
   const handleTap = async (item: ToastItem) => {
+    markAdminMessageRead(item.id);
+    navigate(`/messages?messageId=${encodeURIComponent(item.id)}`);
+    setItems(current => current.filter(existing => existing.id !== item.id));
     if (!item.requestLocation) {
-      setItems(current => current.filter(existing => existing.id !== item.id));
       return;
     }
     const id = item.id;
@@ -41,7 +49,6 @@ export default function AdminMessageToastHost() {
       await requestLocationFromAdminMessage(id);
     } finally {
       setRequestingId(null);
-      setItems(current => current.filter(existing => existing.id !== id));
     }
   };
 
@@ -59,8 +66,8 @@ export default function AdminMessageToastHost() {
           <span>{item.body}</span>
           <em>
             {item.requestLocation
-              ? (requestingId === item.id ? '現在地を更新中' : 'タップで現在地を更新')
-              : 'タップで閉じる'}
+              ? (requestingId === item.id ? '現在地を更新中' : 'タップで開いて現在地更新')
+              : 'タップでメッセージを開く'}
           </em>
         </button>
       ))}

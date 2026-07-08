@@ -20,6 +20,7 @@ const HistoryScreen = lazy(() => import('../ui/screens/HistoryScreen'));
 const RouteMapScreen = lazy(() => import('../ui/screens/RouteMapScreen'));
 const ReportDashboard = lazy(() => import('../ui/screens/ReportDashboard'));
 const SettingsScreen = lazy(() => import('../ui/screens/SettingsScreen'));
+const MessageInboxScreen = lazy(() => import('../ui/screens/MessageInboxScreen'));
 const DriverLoginScreen = lazy(() => import('../ui/screens/DriverLoginScreen'));
 const LoginScreen = lazy(() => import('../ui/screens/LoginScreen'));
 const AdminDashboard = lazy(() => import('../ui/screens/AdminDashboard'));
@@ -94,6 +95,7 @@ function AppShell() {
           <Route path="/trip/:tripId/route" element={<RequireDriverProfile><RouteMapScreen /></RequireDriverProfile>} />
           <Route path="/history" element={<RequireDriverProfile><HistoryScreen /></RequireDriverProfile>} />
           <Route path="/report" element={<RequireDriverProfile><ReportDashboard /></RequireDriverProfile>} />
+          <Route path="/messages" element={<RequireDriverProfile><MessageInboxScreen /></RequireDriverProfile>} />
           <Route path="/driver-login" element={<DriverLoginScreen />} />
           <Route path="/login" element={<LoginScreen />} />
           <Route path="/admin" element={<AdminDashboard />} />

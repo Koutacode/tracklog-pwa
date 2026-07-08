@@ -227,7 +227,14 @@ function clearLocationPermissionCache() {
 }
 
 export async function requestLocationPermission(): Promise<SimplePermissionState> {
-  if (!isNative()) return 'unknown';
+  if (!isNative()) {
+    const current = await checkLocationPermissionStatus();
+    if (current === 'granted' || current === 'denied') return current;
+    const probed = await probeGeoPermissionByFix();
+    clearLocationPermissionCache();
+    locationStatusCache = { value: probed, at: Date.now() };
+    return probed;
+  }
   let watcherId: string | null = null;
   let deniedByPlugin = false;
   try {
@@ -277,7 +284,10 @@ export async function requestLocationPermission(): Promise<SimplePermissionState
 }
 
 export async function checkNotificationPermissionStatus(): Promise<SimplePermissionState> {
-  if (!isNative()) return 'unknown';
+  if (!isNative()) {
+    if (typeof Notification === 'undefined') return 'unknown';
+    return toSimpleState(Notification.permission);
+  }
   let state: SimplePermissionState = 'unknown';
   try {
     const current = await LocalNotifications.checkPermissions();
@@ -301,7 +311,18 @@ export async function checkNotificationPermissionStatus(): Promise<SimplePermiss
 }
 
 export async function requestNotificationPermission(): Promise<SimplePermissionState> {
-  if (!isNative()) return 'unknown';
+  if (!isNative()) {
+    if (typeof Notification === 'undefined') return 'unknown';
+    const currentState = await checkNotificationPermissionStatus();
+    if (currentState === 'granted' || currentState === 'denied') {
+      return currentState;
+    }
+    try {
+      return toSimpleState(await Notification.requestPermission());
+    } catch {
+      return checkNotificationPermissionStatus();
+    }
+  }
   const currentState = await checkNotificationPermissionStatus();
   if (currentState === 'granted' || currentState === 'denied') {
     return currentState;

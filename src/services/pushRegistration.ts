@@ -1,6 +1,11 @@
 import { Capacitor } from '@capacitor/core';
 import { PushNotifications, type ActionPerformed, type PushNotificationSchema, type Token } from '@capacitor/push-notifications';
-import { pollTracklogAdminMessages, requestLocationFromAdminMessage } from './adminMessages';
+import {
+  openAdminMessageInbox,
+  pollTracklogAdminMessages,
+  rememberAdminMessageFromPush,
+  requestLocationFromAdminMessage,
+} from './adminMessages';
 import {
   FIREBASE_NATIVE_PUSH_ENABLED,
   FIREBASE_PUSH_CONFIG,
@@ -85,6 +90,17 @@ async function handlePushTap(data: Record<string, unknown>) {
     await pollTracklogAdminMessages({ force: true });
     return;
   }
+  const body = getPushString(data, 'body') || getPushString(data, 'messageBody');
+  rememberAdminMessageFromPush({
+    id: messageId,
+    body,
+    requestLocation: getPushBoolean(data, 'requestLocation', true),
+    sentAt: getPushString(data, 'sentAt'),
+  });
+  openAdminMessageInbox(messageId);
+  if (!body) {
+    await pollTracklogAdminMessages({ force: true });
+  }
   if (getPushBoolean(data, 'requestLocation', true)) {
     await requestLocationFromAdminMessage(messageId);
   } else {
@@ -159,7 +175,9 @@ function handleServiceWorkerMessage(event: MessageEvent) {
   if (payload.type !== 'TRACKLOG_ADMIN_PUSH_CLICK') return;
   void handlePushTap({
     messageId: getPushString(payload, 'messageId'),
+    body: getPushString(payload, 'body') || getPushString(payload, 'messageBody'),
     requestLocation: getPushBoolean(payload, 'requestLocation', true) ? 'true' : 'false',
+    sentAt: getPushString(payload, 'sentAt'),
   }).catch(error => {
     console.warn('[pushRegistration] service worker push click handling failed', error);
   });
@@ -171,21 +189,32 @@ function consumePushUrlParams() {
   const messageId = url.searchParams.get('tracklogPushMessageId')?.trim();
   if (!messageId) return;
   const requestLocation = url.searchParams.get('tracklogRequestLocation') !== '0';
+  const body = url.searchParams.get('tracklogPushBody')?.trim() || '';
+  const sentAt = url.searchParams.get('tracklogPushSentAt')?.trim() || '';
   url.searchParams.delete('tracklogPushMessageId');
   url.searchParams.delete('tracklogRequestLocation');
+  url.searchParams.delete('tracklogPushBody');
+  url.searchParams.delete('tracklogPushSentAt');
   window.history.replaceState({}, document.title, `${url.pathname}${url.search}${url.hash}`);
   void handlePushTap({
     messageId,
+    body,
     requestLocation: requestLocation ? 'true' : 'false',
+    sentAt,
   }).catch(error => {
     console.warn('[pushRegistration] push URL handling failed', error);
   });
 }
 
-async function ensureWebPushListeners() {
+export function initializeTracklogPushOpenHandlers() {
   if (webListenersReady) return;
   navigator.serviceWorker?.addEventListener('message', handleServiceWorkerMessage);
   consumePushUrlParams();
+  webListenersReady = true;
+}
+
+async function ensureWebPushListeners() {
+  initializeTracklogPushOpenHandlers();
 
   const messagingModule = await import('firebase/messaging');
   const supported = await messagingModule.isSupported().catch(() => false);
@@ -200,7 +229,6 @@ async function ensureWebPushListeners() {
       });
     });
   }
-  webListenersReady = true;
 }
 
 async function ensureWebPushRegistration() {
