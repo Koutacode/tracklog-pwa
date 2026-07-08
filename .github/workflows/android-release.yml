@@ -10,6 +10,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write # リリース作成に必要
+    env:
+      VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+      VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
 
     steps:
       - name: Checkout code
@@ -48,6 +51,14 @@ jobs:
           }
           console.log(`Release version OK: ${actualTag}`);
           NODE
+
+      - name: Validate Supabase build config
+        shell: bash
+        run: |
+          if [ -z "${VITE_SUPABASE_URL:-}" ] || [ -z "${VITE_SUPABASE_ANON_KEY:-}" ]; then
+            echo "::error::VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY are required for release builds."
+            exit 1
+          fi
 
       - name: Typecheck
         run: npm run typecheck
