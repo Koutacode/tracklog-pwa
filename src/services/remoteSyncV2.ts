@@ -12,6 +12,11 @@ import type {
   RemoteTripHeader,
 } from '../domain/remoteTypes';
 import type { AppEvent, EventType, RoutePoint } from '../domain/types';
+import {
+  normalizeRoutePointAccuracy,
+  normalizeRoutePointHeading,
+  normalizeRoutePointSpeed,
+} from '../domain/routePointTelemetry';
 import { withRemoteSyncSignalsSuppressed } from '../app/remoteSyncSignal';
 import { driverSupabase } from './supabase';
 
@@ -257,9 +262,9 @@ function routePointPayload(point: RoutePoint): Record<string, unknown> {
     ts: point.ts,
     lat: point.lat,
     lng: point.lng,
-    accuracy: point.accuracy ?? null,
-    speed: point.speed ?? null,
-    heading: point.heading ?? null,
+    accuracy: normalizeRoutePointAccuracy(point.accuracy),
+    speed: normalizeRoutePointSpeed(point.speed),
+    heading: normalizeRoutePointHeading(point.heading),
     source: point.source ?? null,
   };
 }
@@ -531,6 +536,9 @@ function normalizeRemoteRoutePoint(row: RemoteRoutePoint): RoutePoint {
   const source = row.source === 'foreground' || row.source === 'background' || row.source === 'event'
     ? row.source
     : undefined;
+  const accuracy = normalizeRoutePointAccuracy(row.accuracy);
+  const speed = normalizeRoutePointSpeed(row.speed);
+  const heading = normalizeRoutePointHeading(row.heading);
   return {
     id,
     tripId: strictText(row.trip_id, 'routePoint.trip_id'),
@@ -539,9 +547,9 @@ function normalizeRemoteRoutePoint(row: RemoteRoutePoint): RoutePoint {
     syncStatus: 'synced',
     lat,
     lng,
-    ...(Number.isFinite(Number(row.accuracy)) ? { accuracy: Number(row.accuracy) } : {}),
-    ...(Number.isFinite(Number(row.speed)) ? { speed: Number(row.speed) } : {}),
-    ...(Number.isFinite(Number(row.heading)) ? { heading: Number(row.heading) } : {}),
+    ...(accuracy != null ? { accuracy } : {}),
+    ...(speed != null ? { speed } : {}),
+    ...(heading != null ? { heading } : {}),
     ...(source ? { source } : {}),
     ownerUserId: strictText(row.owner_user_id, 'routePoint.owner_user_id'),
     originDeviceId: strictText(row.device_id, 'routePoint.device_id'),

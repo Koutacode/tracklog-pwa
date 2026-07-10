@@ -1,6 +1,7 @@
 import { Capacitor } from '@capacitor/core';
 import { addRoutePoint, pruneRoutePointsForRetention } from '../db/repositories';
 import type { RouteTrackingMode } from '../db/repositories';
+import { inferSpeedKmh } from '../domain/routePointTelemetry';
 import { BackgroundGeolocation } from './backgroundGeolocationPlugin';
 
 let bgWatcherId: string | null = null;
@@ -190,9 +191,7 @@ async function recordLocation(params: LocationPayload) {
   if (lastPoint) {
     const dt = now - lastPoint.at;
     const dist = distanceMeters(lastPoint, { lat: params.lat, lng: params.lng });
-    if (dt > 0) {
-      inferredSpeedKmh = dist / (dt / 3600000);
-    }
+    inferredSpeedKmh = inferSpeedKmh(dist, dt);
     const speedKmh = fuseSpeedKmh(sensorSpeedKmh, inferredSpeedKmh, accuracy);
     if (
       speedKmh != null &&

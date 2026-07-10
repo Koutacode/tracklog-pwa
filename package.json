@@ -1,6 +1,6 @@
 {
   "name": "tracklog-assist",
-  "version": "0.1.40",
+  "version": "0.1.41",
   "private": true,
   "description": "Truck operation log native app with offline support and day-based segment calculations.",
   "tracklogRelease": {
@@ -15,7 +15,7 @@
     "build:pwa": "vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
-    "test:logic": "tsx src/app/authCallbackRouting.test.ts && tsx src/domain/regulationTimeline.test.ts && tsx src/app/nativeResidentLocationPolicy.test.ts && tsx src/services/driverProfileValidation.test.ts && node src/services/pushRegistration.test.mjs && node supabase/functions/tracklog-privileged/index.static.test.mjs && node --experimental-strip-types --test supabase/functions/tracklog-ic-resolver/resolver.test.mjs",
+    "test:logic": "tsx src/app/authCallbackRouting.test.ts && tsx src/domain/regulationTimeline.test.ts && tsx src/domain/routePointTelemetry.test.ts && tsx src/app/nativeResidentLocationPolicy.test.ts && tsx src/services/driverProfileValidation.test.ts && node src/services/pushRegistration.test.mjs && node supabase/functions/tracklog-privileged/index.static.test.mjs && node --experimental-strip-types --test supabase/functions/tracklog-ic-resolver/resolver.test.mjs",
     "test:sync": "node scripts/test-tracklog-sync-v2.mjs",
     "check:csp": "node scripts/check-csp-endpoints.mjs",
     "cap:sync:android": "npx cap sync android",

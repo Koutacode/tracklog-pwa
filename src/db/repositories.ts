@@ -12,6 +12,11 @@ import type {
 } from '../domain/types';
 import { computeTotals } from '../domain/metrics';
 import { parseJsonInput } from '../domain/jsonInput';
+import {
+  normalizeRoutePointAccuracy,
+  normalizeRoutePointHeading,
+  normalizeRoutePointSpeed,
+} from '../domain/routePointTelemetry';
 import { reverseGeocode } from '../services/geo';
 import { resolveNearestIC } from '../services/icResolver';
 
@@ -842,9 +847,9 @@ export async function addRoutePoint(point: Omit<RoutePoint, 'id'> & { id?: strin
     updatedAt: nowIso(),
     lat: point.lat,
     lng: point.lng,
-    accuracy: point.accuracy,
-    speed: point.speed ?? null,
-    heading: point.heading ?? null,
+    accuracy: normalizeRoutePointAccuracy(point.accuracy) ?? undefined,
+    speed: normalizeRoutePointSpeed(point.speed),
+    heading: normalizeRoutePointHeading(point.heading),
     source: point.source,
   };
   await db.routePoints.put(row);
