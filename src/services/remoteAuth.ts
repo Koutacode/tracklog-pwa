@@ -6,6 +6,7 @@ import { db } from '../db/db';
 import type { AdminSession, DriverApprovalStatus, DriverIdentity } from '../domain/remoteTypes';
 import { getStableDeviceKey } from './deviceIdentity';
 import { adminSupabase, driverSupabase, SUPABASE_CONFIGURED } from './supabase';
+import { restoreNativeResidentLocationSession } from './nativeResidentLocation';
 import {
   claimTracklogDeviceProfileViaFunction,
   migrateTracklogDeviceRecordsViaFunction,
@@ -30,6 +31,8 @@ const META_REMOTE_AUTH_INITIALIZED = 'remote_auth_initialized';
 const META_DRIVER_APPROVAL_STATUS = 'driver_approval_status';
 const NATIVE_ADMIN_REDIRECT = 'com.tracklog.assist://auth?next=%2Fadmin';
 const NATIVE_DRIVER_REDIRECT = 'com.tracklog.assist://auth?next=%2Fsettings';
+const WEB_ADMIN_CALLBACK_PATH = '/auth/admin/callback';
+const WEB_DRIVER_CALLBACK_PATH = '/auth/driver/callback';
 const EMAIL_OTP_PATTERN = /^\d{6,10}$/;
 const EMAIL_OTP_ERROR_MESSAGE = 'メール本文に表示された認証コードをそのまま入力してください';
 
@@ -201,7 +204,7 @@ export async function getDriverIdentity(): Promise<DriverIdentity> {
   return {
     configured: SUPABASE_CONFIGURED,
     deviceId: stableDeviceKey,
-    displayName: normalizeText(displayName) || buildDefaultDisplayName(stableDeviceKey),
+    displayName: normalizeText(displayName),
     vehicleLabel: normalizeText(vehicleLabel),
     phone: finalPhone,
     email,
@@ -219,6 +222,7 @@ export async function getDriverIdentity(): Promise<DriverIdentity> {
 
 async function getProfileIdentity() {
   if (!SUPABASE_CONFIGURED || !driverSupabase) return null;
+  await restoreNativeResidentLocationSession();
   const session = (await driverSupabase.auth.getSession()).data.session;
   if (!session?.user) return null;
   return {
@@ -232,6 +236,7 @@ export async function initializeDriverIdentity(): Promise<DriverIdentity> {
     return getDriverIdentity();
   }
 
+  await restoreNativeResidentLocationSession();
   const session = (await driverSupabase.auth.getSession()).data.session;
   const { stableDeviceKey } = await getStableDeviceKey();
 
@@ -243,7 +248,7 @@ export async function initializeDriverIdentity(): Promise<DriverIdentity> {
       getMeta(META_DRIVER_EMAIL),
       setMeta(META_DEVICE_ID, stableDeviceKey),
     ]);
-    const displayName = normalizeText(savedDisplayName) || buildDefaultDisplayName(stableDeviceKey);
+    const displayName = normalizeText(savedDisplayName);
     const vehicleLabel = normalizeText(savedVehicleLabel);
     const phone = normalizeText(localPhone);
     const email = normalizeEmail(localEmail);
@@ -292,6 +297,36 @@ export async function initializeDriverIdentity(): Promise<DriverIdentity> {
   const mergedDriverPhone =
     normalizeText(savedDriverPhone) || cloudProfile?.driverPhone || normalizeText(user.phone) || '';
   const mergedDriverEmail = normalizeText(savedDriverEmail) || cloudProfile?.driverEmail || normalizeText(user.email) || '';
+
+  const mergedProfileComplete = isDriverProfileComplete({
+    displayName: mergedDisplayName,
+    vehicleLabel: mergedVehicleLabel,
+    email: mergedDriverEmail,
+    phone: mergedDriverPhone,
+    requireContactInfo: true,
+  });
+  if (!mergedProfileComplete) {
+    await Promise.all([
+      setMeta(META_DEVICE_ID, deviceId),
+      setMeta(META_DEVICE_DISPLAY_NAME, mergedDisplayName || null),
+      setMeta(META_DEVICE_VEHICLE_LABEL, mergedVehicleLabel || null),
+      setMeta(META_DRIVER_PHONE, mergedDriverPhone || null),
+      setMeta(META_DRIVER_EMAIL, mergedDriverEmail || null),
+      setMeta(META_REMOTE_AUTH_INITIALIZED, 'true'),
+      setMeta(META_DRIVER_APPROVAL_STATUS, 'unregistered'),
+    ]);
+    return {
+      configured: true,
+      deviceId,
+      displayName: mergedDisplayName,
+      vehicleLabel: mergedVehicleLabel,
+      phone: mergedDriverPhone,
+      email: mergedDriverEmail || null,
+      authInitialized: true,
+      profileComplete: false,
+      approvalStatus: 'unregistered',
+    };
+  }
 
   const claimedProfile = await claimTracklogDeviceProfile({
     deviceId,
@@ -433,13 +468,13 @@ export { claimTracklogDeviceProfile };
 export function getAdminRedirectUrl(override?: string) {
   if (override?.trim()) return override.trim();
   if (Capacitor.isNativePlatform()) return NATIVE_ADMIN_REDIRECT;
-  return `${window.location.origin}/admin`;
+  return `${window.location.origin}${WEB_ADMIN_CALLBACK_PATH}`;
 }
 
 export function getDriverRedirectUrl(override?: string) {
   if (override?.trim()) return override.trim();
   if (Capacitor.isNativePlatform()) return NATIVE_DRIVER_REDIRECT;
-  return `${window.location.origin}/settings`;
+  return `${window.location.origin}${WEB_DRIVER_CALLBACK_PATH}`;
 }
 
 export async function getAdminSession(): Promise<AdminSession> {
@@ -643,6 +678,116 @@ export function onDriverAuthStateChange(callback: (event: AuthChangeEvent) => vo
   };
 }
 
+type ParsedWebAuthCallback = {
+  code: string | null;
+  accessToken: string | null;
+  refreshToken: string | null;
+  errorCode: string | null;
+  errorDescription: string | null;
+};
+
+function normalizeCallbackPath(pathname: string) {
+  const normalized = pathname.replace(/\/+$/, '');
+  return normalized || '/';
+}
+
+function parseWebAuthCallbackUrl(url: string, expectedPath: string): ParsedWebAuthCallback | null {
+  const parsed = new URL(url);
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return null;
+  if (typeof window !== 'undefined' && parsed.origin !== window.location.origin) return null;
+  if (normalizeCallbackPath(parsed.pathname) !== expectedPath) return null;
+
+  const query = parsed.searchParams;
+  const hash = new URLSearchParams(parsed.hash.startsWith('#') ? parsed.hash.slice(1) : parsed.hash);
+  return {
+    code: query.get('code'),
+    accessToken: hash.get('access_token'),
+    refreshToken: hash.get('refresh_token'),
+    errorCode: query.get('error_code') ?? query.get('error') ?? hash.get('error_code') ?? hash.get('error'),
+    errorDescription: query.get('error_description') ?? hash.get('error_description'),
+  };
+}
+
+function throwWebAuthCallbackError(parsed: ParsedWebAuthCallback) {
+  if (parsed.errorCode) {
+    throw new Error(parsed.errorDescription || parsed.errorCode);
+  }
+}
+
+async function establishWebAuthSession(
+  client: NonNullable<typeof driverSupabase>,
+  parsed: ParsedWebAuthCallback,
+) {
+  if (parsed.code) {
+    const { error } = await client.auth.exchangeCodeForSession(parsed.code);
+    if (error) throw error;
+    return;
+  }
+
+  if (parsed.accessToken || parsed.refreshToken) {
+    if (!parsed.accessToken || !parsed.refreshToken) {
+      throw new Error('認証情報が不足しています。最新のログインメールからやり直してください。');
+    }
+    const { error } = await client.auth.setSession({
+      access_token: parsed.accessToken,
+      refresh_token: parsed.refreshToken,
+    });
+    if (error) throw error;
+    return;
+  }
+
+  const { data, error } = await client.auth.getSession();
+  if (error) throw error;
+  if (!data.session) {
+    throw new Error('認証情報が見つかりません。最新のログインメールからやり直してください。');
+  }
+}
+
+async function persistCurrentDriverSessionMetadata() {
+  if (!driverSupabase) return;
+  const { data, error } = await driverSupabase.auth.getSession();
+  if (error) throw error;
+  if (!data.session?.user) {
+    throw new Error('運転者のログイン状態を確認できませんでした。');
+  }
+  const email = normalizeEmail(data.session.user.email);
+  await Promise.all([
+    setMeta(META_REMOTE_AUTH_INITIALIZED, 'true'),
+    email ? setMeta(META_DRIVER_EMAIL, email) : Promise.resolve(),
+  ]);
+}
+
+export async function handleAdminWebAuthCallbackUrl(url: string): Promise<{
+  handled: boolean;
+}> {
+  if (!SUPABASE_CONFIGURED || !adminSupabase) {
+    throw new Error('Supabase が未設定です');
+  }
+  const parsed = parseWebAuthCallbackUrl(url, WEB_ADMIN_CALLBACK_PATH);
+  if (!parsed) return { handled: false };
+  throwWebAuthCallbackError(parsed);
+  await establishWebAuthSession(adminSupabase, parsed);
+  return { handled: true };
+}
+
+export async function handleDriverWebAuthCallbackUrl(url: string): Promise<{
+  handled: boolean;
+  identity?: DriverIdentity;
+}> {
+  if (!SUPABASE_CONFIGURED || !driverSupabase) {
+    throw new Error('Supabase が未設定です');
+  }
+  const parsed = parseWebAuthCallbackUrl(url, WEB_DRIVER_CALLBACK_PATH);
+  if (!parsed) return { handled: false };
+  throwWebAuthCallbackError(parsed);
+  await establishWebAuthSession(driverSupabase, parsed);
+  await persistCurrentDriverSessionMetadata();
+  return {
+    handled: true,
+    identity: await initializeDriverIdentity(),
+  };
+}
+
 function parseAuthCallbackUrl(url: string) {
   const parsed = new URL(url);
   const query = new URLSearchParams(parsed.search);
@@ -725,12 +870,7 @@ export async function handleDriverAuthCallbackUrl(url: string): Promise<{
     refresh_token: parsed.refreshToken,
   });
   if (error) throw error;
-  const session = (await driverSupabase.auth.getSession()).data.session;
-  const email = normalizeEmail(session?.user?.email);
-  await Promise.all([
-    setMeta(META_REMOTE_AUTH_INITIALIZED, 'true'),
-    email ? setMeta(META_DRIVER_EMAIL, email) : Promise.resolve(),
-  ]);
+  await persistCurrentDriverSessionMetadata();
   return {
     handled: true,
     nextPath: parsed.nextPath,

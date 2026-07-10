@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { backfillPendingExpresswayIcs } from '../db/repositories';
+import { retryPendingExpresswayIcResolutions } from '../services/expresswayIcResolution';
 
 /**
  * IcResolverJob periodically checks for expressway events whose IC names have
@@ -14,7 +14,7 @@ export default function IcResolverJob() {
   useEffect(() => {
     const MAX_EVENTS_PER_TICK = 12;
     const runOnce = async () => {
-      await backfillPendingExpresswayIcs(MAX_EVENTS_PER_TICK);
+      await retryPendingExpresswayIcResolutions(MAX_EVENTS_PER_TICK);
     };
 
     const onOnline = () => {

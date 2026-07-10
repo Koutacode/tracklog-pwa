@@ -13,6 +13,7 @@ import type {
 } from './reportTypes';
 import type { AppEvent, DayRun as SourceDayRun } from './types';
 import { parseJsonInput } from './jsonInput';
+import { computeContinuousDriveTimeline } from './regulationTimeline';
 
 // --- Regulation constants (令和6年4月改正) ---
 const CONSTRAINT_WARNING_MIN = 13 * 60;         // 原則拘束 13h
@@ -23,10 +24,6 @@ const SPECIAL_REST_MIN_MIN = 8 * 60;            // 特例最短休息 8h
 const TARGET_REST_MIN = 11 * 60;                // 確保に努める休息 11h
 const TWO_DAY_DRIVE_LIMIT_MIN = 18 * 60;        // 2日平均1日9h -> 48hで18h
 const TWO_WEEK_DRIVE_LIMIT_MIN = 88 * 60;       // 2週平均1週44h -> 14日で88h
-const CONTINUOUS_DRIVE_LIMIT_MIN = 4 * 60;      // 連続運転 4h
-const CONTINUOUS_DRIVE_EMERGENCY_LIMIT_MIN = 4 * 60 + 30; // やむを得ない場合 4h30m
-const MIN_CONTINUOUS_DRIVE_RESET_SEGMENT_MIN = 10;
-const REQUIRED_CONTINUOUS_DRIVE_RESET_MIN = 30;
 const LONG_DISTANCE_THRESHOLD_KM = 450;
 const DAY_TOTAL_MIN = 24 * 60;
 const QUARTER_MIN = 15;
@@ -961,80 +958,6 @@ function subtractSegments(
   return mergeTimeSegments(result);
 }
 
-type AbsoluteInterval = RoundedInterval & {
-  dayIndex: number;
-  dateKey: string;
-  startTs: string;
-  endTs: string;
-};
-
-type ContinuousDriveState = {
-  longestContinuousDriveMinutes: number;
-  continuousDriveExceeded: boolean;
-  continuousDriveEmergencyExceeded: boolean;
-};
-
-function buildAbsoluteIntervals(day: DayRecord, currentTs?: string): AbsoluteInterval[] {
-  return buildRoundedIntervals(day, currentTs).map(interval => ({
-    ...interval,
-    dayIndex: day.dayIndex,
-    dateKey: day.dateKey,
-    startTs: utcFromJstMinute(day.dateKey, interval.startMin),
-    endTs: utcFromJstMinute(day.dateKey, interval.endMin),
-  }));
-}
-
-function summarizeContinuousDrive(days: DayRecord[], currentTs?: string): Map<number, ContinuousDriveState> {
-  const byDay = new Map<number, ContinuousDriveState>();
-  const intervals = days
-    .flatMap(day => buildAbsoluteIntervals(day, currentTs))
-    .sort((a, b) => a.startTs.localeCompare(b.startTs));
-
-  let driveSinceReset = 0;
-  let qualifyingBreakMinutes = 0;
-
-  const ensure = (dayIndex: number) => {
-    const current = byDay.get(dayIndex);
-    if (current) return current;
-    const next: ContinuousDriveState = {
-      longestContinuousDriveMinutes: 0,
-      continuousDriveExceeded: false,
-      continuousDriveEmergencyExceeded: false,
-    };
-    byDay.set(dayIndex, next);
-    return next;
-  };
-
-  for (const interval of intervals) {
-    const duration = Math.max(0, interval.endMin - interval.startMin);
-    if (duration <= 0) continue;
-
-    if (interval.category === 'drive') {
-      driveSinceReset += duration;
-      const state = ensure(interval.dayIndex);
-      state.longestContinuousDriveMinutes = Math.max(state.longestContinuousDriveMinutes, driveSinceReset);
-      if (driveSinceReset > CONTINUOUS_DRIVE_LIMIT_MIN) {
-        state.continuousDriveExceeded = true;
-      }
-      if (driveSinceReset > CONTINUOUS_DRIVE_EMERGENCY_LIMIT_MIN) {
-        state.continuousDriveEmergencyExceeded = true;
-      }
-      continue;
-    }
-
-    if (duration >= MIN_CONTINUOUS_DRIVE_RESET_SEGMENT_MIN) {
-      qualifyingBreakMinutes += duration;
-      if (qualifyingBreakMinutes >= REQUIRED_CONTINUOUS_DRIVE_RESET_MIN) {
-        driveSinceReset = 0;
-        qualifyingBreakMinutes = 0;
-      }
-      continue;
-    }
-  }
-
-  return byDay;
-}
-
 function buildTripFerrySegmentsByDay(days: DayRecord[]): Map<number, TimeSegmentDetail[]> {
   const byDay = new Map<number, TimeSegmentDetail[]>();
   const events = days
@@ -1279,7 +1202,7 @@ export function computeTripDayMetrics(
 ): DayMetrics[] {
   const currentTs = options?.currentTs;
   const base = trip.days.map(day => computeDayMetrics(day, currentTs));
-  const continuous = summarizeContinuousDrive(trip.days, currentTs);
+  const continuous = computeContinuousDriveTimeline(trip.days, currentTs).byDay;
   const ferryByDay = buildTripFerrySegmentsByDay(trip.days);
 
   return base.map((metrics, index) => {

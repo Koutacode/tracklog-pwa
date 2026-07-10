@@ -23,6 +23,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -39,11 +41,20 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Check Supabase Edge Functions
+        run: >-
+          npx --yes deno check --node-modules-dir=auto --no-lock
+          supabase/functions/tracklog-privileged/index.ts
+          supabase/functions/tracklog-sync/index.ts
+          supabase/functions/tracklog-ic-resolver/index.ts
+          supabase/functions/tracklog-location/index.ts
+
       - name: Validate release version
         shell: bash
         run: |
           node <<'NODE'
           const fs = require('node:fs');
+          const { execFileSync } = require('node:child_process');
           const pkg = require('./package.json');
           const expectedTag = `v${pkg.version}`;
           const actualTag = process.env.GITHUB_REF_NAME;
@@ -52,8 +63,24 @@ jobs:
           }
           const gradleProps = fs.readFileSync('android/gradle.properties', 'utf8');
           const versionName = gradleProps.match(/^tracklogVersionName=(.+)$/m)?.[1]?.trim();
+          const versionCode = Number(gradleProps.match(/^tracklogVersionCode=(.+)$/m)?.[1]?.trim());
           if (versionName !== pkg.version) {
             throw new Error(`Android versionName ${versionName} does not match package.json version ${pkg.version}`);
+          }
+          if (!Number.isSafeInteger(versionCode) || versionCode <= 0) {
+            throw new Error(`Android versionCode is invalid: ${versionCode}`);
+          }
+          const tags = execFileSync('git', ['tag', '--sort=-v:refname'], { encoding: 'utf8' })
+            .split(/\r?\n/)
+            .map(value => value.trim())
+            .filter(Boolean);
+          const previousTag = tags.find(value => value !== actualTag);
+          if (previousTag) {
+            const previousProps = execFileSync('git', ['show', `${previousTag}:android/gradle.properties`], { encoding: 'utf8' });
+            const previousCode = Number(previousProps.match(/^tracklogVersionCode=(.+)$/m)?.[1]?.trim());
+            if (Number.isSafeInteger(previousCode) && versionCode <= previousCode) {
+              throw new Error(`Android versionCode ${versionCode} must be greater than ${previousTag} (${previousCode})`);
+            }
           }
           console.log(`Release version OK: ${actualTag}`);
           NODE
@@ -81,6 +108,12 @@ jobs:
 
       - name: Typecheck
         run: npm run typecheck
+
+      - name: Logic tests
+        run: npm run test:logic
+
+      - name: Sync protocol integration tests
+        run: npm run test:sync
 
       - name: Check Content Security Policy
         run: npm run check:csp
@@ -125,15 +158,27 @@ jobs:
           cp "$HOME/.android/debug.keystore" "$TRACKLOG_ANDROID_KEYSTORE_PATH"
           cd android
           chmod +x gradlew
-          ./gradlew assembleDebug
+          ./gradlew testDebugUnitTest assembleDebug
 
       - name: Prepare release APK
-        run: cp android/app/build/outputs/apk/debug/app-debug.apk tracklog-assist-debug.apk
+        shell: bash
+        run: |
+          cp android/app/build/outputs/apk/debug/app-debug.apk tracklog-assist-debug.apk
+          AAPT="$(find "$ANDROID_HOME/build-tools" -type f -name aapt | sort -V | tail -n 1)"
+          BADGING="$($AAPT dump badging tracklog-assist-debug.apk | head -n 1)"
+          EXPECTED_CODE="$(sed -n 's/^tracklogVersionCode=//p' android/gradle.properties | tr -d '\r')"
+          echo "$BADGING"
+          echo "$BADGING" | grep "name='com.tracklog.assist'"
+          echo "$BADGING" | grep "versionCode='$EXPECTED_CODE'"
+          echo "$BADGING" | grep "versionName='${GITHUB_REF_NAME#v}'"
+          sha256sum tracklog-assist-debug.apk | tee tracklog-assist-debug.apk.sha256
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: tracklog-assist-debug.apk
+          files: |
+            tracklog-assist-debug.apk
+            tracklog-assist-debug.apk.sha256
           name: Release ${{ github.ref_name }}
           tag_name: ${{ github.ref_name }}
           draft: false

@@ -65,6 +65,16 @@ export type Trip = {
   days: DayRecord[];
   jobs: JobInfo[];
   rawJson: string;
+  syncStatus?: 'pending' | 'synced' | 'error';
+  localUpdatedAt?: string;
+  localRevision?: number;
+  syncMutationId?: string;
+  __remoteSyncApply?: boolean;
+  ownerUserId?: string;
+  originDeviceId?: string;
+  remoteRevision?: number;
+  remoteChangeSeq?: number;
+  restoreFromChangeSeq?: number;
 };
 
 export type DayMetrics = {

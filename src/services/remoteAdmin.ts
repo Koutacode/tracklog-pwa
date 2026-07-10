@@ -79,26 +79,8 @@ export async function sendAdminMessage(input: {
 
 export async function deleteAdminDevice(deviceId: string): Promise<DeleteAdminDeviceResult> {
   assertAdminConfigured();
-  const deletedCount = await deleteTracklogDeviceViaFunction(deviceId);
-  if (deletedCount <= 0) {
-    const client = assertAdminConfigured();
-    const { error: hideError } = await client
-      .from('device_profiles')
-      .update({
-        platform: ADMIN_HIDDEN_PLATFORM,
-        latest_status: ADMIN_HIDDEN_STATUS,
-        latest_trip_id: null,
-        latest_lat: null,
-        latest_lng: null,
-        latest_accuracy: null,
-        latest_location_at: null,
-        last_seen_at: new Date().toISOString(),
-      })
-      .eq('device_id', deviceId);
-    if (hideError) throw hideError;
-    return { mode: 'hidden' };
-  }
-  return { mode: 'deleted' };
+  const result = await deleteTracklogDeviceViaFunction(deviceId);
+  return { mode: result.hidden || result.deletedCount <= 0 ? 'hidden' : 'deleted' };
 }
 
 export async function deleteAdminTrip(tripId: string): Promise<boolean> {

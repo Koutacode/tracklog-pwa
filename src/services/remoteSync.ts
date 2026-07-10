@@ -33,6 +33,7 @@ import {
   setRemoteLastSyncAt,
 } from './remoteAuth';
 import { driverSupabase, SUPABASE_CONFIGURED } from './supabase';
+import { performRemoteSyncV2 } from './remoteSyncV2';
 
 type Listener = (state: RemoteSyncState) => void;
 
@@ -865,120 +866,8 @@ export async function runRemoteSync(reason = 'manual'): Promise<RemoteSyncState>
         approvalStatus: identity.approvalStatus,
       });
 
-      const cloudDetailRetentionCutoff = await maybeRunCloudMaintenance();
-      const deletedTripIds = await fetchUserDeletedTripIds();
-      const routePointSyncStartedAt = nowIso();
-      const routePointsUploadedThrough = await getRemoteRoutePointsUploadedThrough();
-      const deviceId = identity.deviceId as string;
-      const localDeletedEventIds = await uploadDeletedEventTombstones(deviceId);
-      const remoteDeletedEventIds = await fetchUserDeletedEventIds();
-      const deletedEventIds = new Set([...localDeletedEventIds, ...remoteDeletedEventIds]);
-      const [events, routePoints, reportTrips, tripHeaders] = await Promise.all([
-        getAllEvents(),
-        listRoutePointsChangedSince(routePointsUploadedThrough),
-        listReportTrips(),
-        listTrips(),
-      ]);
-      await removeLocalDeletedTrips(deletedTripIds);
-      await removeLocalDeletedEvents(deletedEventIds);
-      const visibleEvents = events.filter(item => !deletedTripIds.has(item.tripId) && !deletedEventIds.has(item.id));
-      const deletedEventAnchorIds = new Set([...deletedEventIds].map(id => `${EVENT_ROUTE_POINT_ANCHOR_PREFIX}${id}`));
-      const visibleRoutePoints = routePoints.filter(item => !deletedTripIds.has(item.tripId));
-      const uploadableVisibleRoutePoints = visibleRoutePoints.filter(item => !deletedEventAnchorIds.has(item.id));
-      const visibleReportTrips = reportTrips.filter(item => !deletedTripIds.has(item.id));
-      const visibleTripHeaders = tripHeaders.filter(item => !deletedTripIds.has(item.tripId));
-      const cloudPrunedTripIds = getCloudDetailPrunedTripIds(
-        visibleTripHeaders.map(item => ({
-          trip_id: item.tripId,
-          end_ts: item.endTs ?? null,
-          status: item.status === 'closed' ? 'closed' : 'active',
-        })),
-        cloudDetailRetentionCutoff,
-      );
-      const uploadableEvents = visibleEvents.filter(item => !cloudPrunedTripIds.has(item.tripId));
-      const uploadableRoutePoints = uploadableVisibleRoutePoints.filter(item => !cloudPrunedTripIds.has(item.tripId));
-      const uploadableTripIds = new Set(visibleTripHeaders.map(item => item.tripId));
-      const uploadableReports = visibleReportTrips.filter(item => uploadableTripIds.has(item.id) && !cloudPrunedTripIds.has(item.id));
-
       await claimDeviceProfile(identity);
-      const normalizedTrips: RemoteTripHeader[] = uniqueByKey(visibleTripHeaders, item => item.tripId).map(item => ({
-        trip_id: item.tripId,
-        device_id: deviceId,
-        start_ts: item.startTs,
-        end_ts: item.endTs ?? null,
-        odo_start: item.odoStart,
-        odo_end: item.odoEnd ?? null,
-        total_km: item.totalKm ?? null,
-        last_leg_km: item.lastLegKm ?? null,
-        status: item.status,
-        updated_at: nowIso(),
-      }));
-      const uniqueUploadableEvents = uniqueByKey(uploadableEvents, item => item.id);
-      const uploadedEventSnapshots = uniqueUploadableEvents.map(buildEventUploadSnapshot);
-      const normalizedEvents = uniqueUploadableEvents.map(item => normalizeTripEvent(deviceId, item));
-      const normalizedRoutePoints = uniqueByKey(uploadableRoutePoints, item => item.id).map(item => normalizeRoutePoint(deviceId, item));
-      const normalizedReports: RemoteReportSnapshot[] = uniqueByKey(uploadableReports, item => item.id).map(item => ({
-        trip_id: item.id,
-        device_id: deviceId,
-        created_at: item.createdAt,
-        label: item.label,
-        payload_json: JSON.parse(JSON.stringify(item)),
-        updated_at: nowIso(),
-      }));
-
-      if (normalizedTrips.length > 0) {
-        const { error } = await driverSupabase.from('trip_headers').upsert(normalizedTrips, {
-          onConflict: 'trip_id',
-        });
-        if (error) throw error;
-      }
-
-      if (normalizedEvents.length > 0) {
-        const { error } = await driverSupabase.from('trip_events').upsert(normalizedEvents, {
-          onConflict: 'id',
-        });
-        if (error) throw error;
-      }
-
-      if (normalizedRoutePoints.length > 0) {
-        const { error } = await driverSupabase.from('trip_route_points').upsert(normalizedRoutePoints, {
-          onConflict: 'id',
-        });
-        if (error) throw error;
-      }
-
-      if (normalizedReports.length > 0) {
-        const { error } = await driverSupabase.from('report_snapshots').upsert(normalizedReports, {
-          onConflict: 'trip_id',
-        });
-        if (error) throw error;
-      }
-
-      const [remoteHeaders, remoteEvents, remoteRoutePoints] = await Promise.all([
-        fetchUserCloudTripHeaders(),
-        fetchTableByDeviceIds<RemoteTripEvent>('trip_events'),
-        fetchTableByDeviceIds<RemoteRoutePoint>('trip_route_points'),
-      ]);
-
-      await applyRemoteDownload({
-        headers: remoteHeaders,
-        events: remoteEvents,
-        routePoints: remoteRoutePoints,
-        cloudCutoff: cloudDetailRetentionCutoff,
-        deletedTripIds,
-        deletedEventIds,
-      });
-
-      await withRemoteSyncSignalsSuppressed(async () => {
-        await markUploadedEventsSynced(uploadedEventSnapshots);
-        if (!routePointsUploadedThrough || routePoints.length > 0) {
-          const uploadedThrough = routePoints.reduce((latest, point) => {
-            const updatedAt = point.updatedAt ?? point.ts;
-            return updatedAt > latest ? updatedAt : latest;
-          }, routePointSyncStartedAt);
-          await setRemoteRoutePointsUploadedThrough(uploadedThrough);
-        }
-      });
+      await performRemoteSyncV2(identity);
       const syncedAt = nowIso();
       await setRemoteLastSyncAt(syncedAt);
       emit({

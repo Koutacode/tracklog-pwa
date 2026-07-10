@@ -2,7 +2,8 @@ param(
   [switch]$Build,
   [switch]$SyncAndroid,
   [switch]$AssembleDebug,
-  [string]$AppBuildDir = "build-release"
+  [string]$AppBuildDir = "build-release",
+  [string]$GradleBuildRoot = (Join-Path $env:LOCALAPPDATA "TrackLog\android-gradle-release")
 )
 
 Set-StrictMode -Version Latest
@@ -45,7 +46,7 @@ $releaseAssetName = if ($releaseConfig -and $releaseConfig.apkAssetName) { [stri
 $localApkPath = if ($releaseConfig -and $releaseConfig.localApkPath) { [string]$releaseConfig.localApkPath } else { $defaultLocalApkPath }
 
 $androidDir = Join-Path $projectRoot "android"
-$debugApk = Join-Path $androidDir "app\$AppBuildDir\outputs\apk\debug\app-debug.apk"
+$debugApk = Join-Path $GradleBuildRoot "app\outputs\apk\debug\app-debug.apk"
 $outputApk = Join-Path $projectRoot $localApkPath
 $outputDir = Split-Path -Parent $outputApk
 
@@ -77,7 +78,7 @@ if ($AssembleDebug) {
   Write-Host "== gradlew assembleDebug =="
   Push-Location $androidDir
   try {
-    Invoke-CheckedCommand { .\gradlew.bat "-PtracklogAppBuildDir=$AppBuildDir" --no-daemon assembleDebug } "gradlew assembleDebug"
+    Invoke-CheckedCommand { .\gradlew.bat "-PtracklogExternalBuildRoot=$GradleBuildRoot" --no-daemon testDebugUnitTest assembleDebug } "gradlew testDebugUnitTest assembleDebug"
   } finally {
     Pop-Location
   }

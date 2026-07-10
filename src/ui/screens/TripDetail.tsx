@@ -4,7 +4,6 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import {
   deleteEvent,
   getEventsByTripId,
-  refreshExpresswayIcFromGeo,
   refreshEventAddressFromGeo,
   updateEventAddressManual,
   updateExpresswayIcNameManual,
@@ -25,6 +24,7 @@ import { DAY_MS, getJstDateInfo } from '../../domain/jst';
 import { buildAiShareText, splitAiShareText, type AiShareChunk } from '../../services/aiShareText';
 import { copyNativeText } from '../../services/nativeShare';
 import { deleteTripEverywhere } from '../../services/tripDeletion';
+import { resolveExpresswayIcManually } from '../../services/expresswayIcResolution';
 
 function fmtLocal(ts?: string) {
   if (!ts) return '-';
@@ -771,7 +771,7 @@ export default function TripDetail() {
   async function handleRefreshIc(eventId: string) {
     setWorkingId(eventId);
     try {
-      await refreshExpresswayIcFromGeo(eventId);
+      await resolveExpresswayIcManually(eventId);
       await load();
     } catch (e: any) {
       setErr(e?.message ?? 'IC名の再取得に失敗しました');

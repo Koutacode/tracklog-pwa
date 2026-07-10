@@ -2,6 +2,10 @@ const REMOTE_SYNC_REQUEST_EVENT = 'tracklog:remote-sync-request';
 
 let suppressedDepth = 0;
 
+export function areRemoteSyncSignalsSuppressed(): boolean {
+  return suppressedDepth > 0;
+}
+
 export function requestRemoteSync(reason = 'mutation') {
   if (suppressedDepth > 0 || typeof window === 'undefined') return;
   window.dispatchEvent(

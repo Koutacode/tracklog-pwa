@@ -17,6 +17,16 @@ buildscript {
 
 apply from: "variables.gradle"
 
+def tracklogExternalBuildRoot = findProperty('tracklogExternalBuildRoot')
+if (tracklogExternalBuildRoot) {
+    allprojects { targetProject ->
+        def safeName = targetProject.path == ':'
+                ? 'root'
+                : targetProject.path.substring(1).replace(':', '-')
+        targetProject.layout.buildDirectory.set(new File(tracklogExternalBuildRoot, safeName))
+    }
+}
+
 allprojects {
     repositories {
         google()

@@ -1,5 +1,6 @@
 import { useEffect } from 'react';
 import { hydrateRemoteSyncState, installImmediateRemoteSyncListener, runRemoteSync } from '../services/remoteSync';
+import { restoreNativeResidentLocationSession } from '../services/nativeResidentLocation';
 
 export default function RemoteSyncBootstrap() {
   useEffect(() => {
@@ -11,8 +12,15 @@ export default function RemoteSyncBootstrap() {
       await runRemoteSync('bootstrap');
     };
 
-    void hydrateRemoteSyncState();
-    void syncOnce();
+    void (async () => {
+      try {
+        await restoreNativeResidentLocationSession();
+      } catch (error) {
+        console.warn('[resident-location] native session restore skipped', error);
+      }
+      await hydrateRemoteSyncState();
+      await syncOnce();
+    })();
 
     const onVisible = () => {
       if (document.visibilityState === 'visible') {

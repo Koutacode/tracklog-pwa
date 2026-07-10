@@ -11,7 +11,7 @@ function buildClient(storageKey: string) {
     auth: {
       autoRefreshToken: true,
       persistSession: true,
-      detectSessionInUrl: true,
+      detectSessionInUrl: false,
       storageKey,
     },
   });

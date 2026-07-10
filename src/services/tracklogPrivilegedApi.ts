@@ -8,9 +8,19 @@ type FunctionResponse<T> = {
   error?: string;
 };
 
+export type TracklogWebPushSubscription = {
+  endpoint: string;
+  expirationTime: number | null;
+  keys: {
+    auth: string;
+    p256dh: string;
+  };
+};
+
 type PrivilegedAction =
   | 'getAdminAccessState'
   | 'getRuntimeConfig'
+  | 'getWebPushConfig'
   | 'updateRuntimeConfig'
   | 'registerPushToken'
   | 'unregisterPushToken'
@@ -96,6 +106,15 @@ export async function updateTracklogRuntimeConfigViaFunction(input: {
   return invokeTracklogPrivileged<TracklogRuntimeConfig>(client, 'updateRuntimeConfig', input);
 }
 
+export async function getTracklogWebPushConfigViaFunction(input: {
+  deviceId: string;
+}): Promise<{
+  publicVapidKey: string;
+}> {
+  const client = requireClient(driverSupabase);
+  return invokeTracklogPrivileged<{ publicVapidKey: string }>(client, 'getWebPushConfig', input);
+}
+
 export async function sendTracklogAdminMessageViaFunction(input: {
   targetDeviceId?: string | null;
   body: string;
@@ -108,11 +127,18 @@ export async function sendTracklogAdminMessageViaFunction(input: {
 export async function registerTracklogPushTokenViaFunction(input: {
   deviceId: string;
   platform: 'android' | 'web';
+  provider?: 'fcm';
   token: string;
+} | {
+  deviceId: string;
+  platform: 'web';
+  provider: 'webpush';
+  subscription: TracklogWebPushSubscription;
 }): Promise<{
   id: string;
   device_id: string;
   platform: 'android' | 'web';
+  provider: 'fcm' | 'webpush';
   enabled: boolean;
   pushConfigured: boolean;
   updated_at?: string | null;
@@ -123,6 +149,7 @@ export async function registerTracklogPushTokenViaFunction(input: {
     id: string;
     device_id: string;
     platform: 'android' | 'web';
+    provider: 'fcm' | 'webpush';
     enabled: boolean;
     pushConfigured: boolean;
     updated_at?: string | null;
@@ -186,10 +213,12 @@ export async function setTracklogDeviceApprovalViaFunction(input: {
   return invokeTracklogPrivileged<RemoteDeviceProfile>(client, 'setDeviceApproval', input);
 }
 
-export async function deleteTracklogDeviceViaFunction(deviceId: string): Promise<number> {
+export async function deleteTracklogDeviceViaFunction(deviceId: string): Promise<{
+  deletedCount: number;
+  hidden: boolean;
+}> {
   const client = requireClient(adminSupabase);
-  const result = await invokeTracklogPrivileged<{ deletedCount: number }>(client, 'deleteDevice', { deviceId });
-  return result.deletedCount;
+  return invokeTracklogPrivileged<{ deletedCount: number; hidden: boolean }>(client, 'deleteDevice', { deviceId });
 }
 
 export async function deleteTracklogTripViaFunction(tripId: string): Promise<number> {

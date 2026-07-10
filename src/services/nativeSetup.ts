@@ -1,8 +1,6 @@
 import { Capacitor, registerPlugin } from '@capacitor/core';
-import type { BackgroundGeolocationPlugin } from '@capacitor-community/background-geolocation';
 import { LocalNotifications } from '@capacitor/local-notifications';
-
-const BackgroundGeolocation = registerPlugin<BackgroundGeolocationPlugin>('BackgroundGeolocation');
+import { BackgroundGeolocation } from './backgroundGeolocationPlugin';
 
 type NativeSetupPlugin = {
   checkBatteryOptimization(): Promise<{ supported: boolean; granted: boolean }>;

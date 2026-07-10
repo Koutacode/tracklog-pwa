@@ -1,4 +1,6 @@
 import { createClient } from 'npm:@supabase/supabase-js@2.58.0';
+// @ts-types="npm:@types/web-push@3.6.4"
+import webPush from 'npm:web-push@3.6.7';
 
 type JsonRecord = Record<string, unknown>;
 
@@ -40,7 +42,12 @@ const FIREBASE_PROJECT_ID_SECRET_KEY = 'firebase_project_id';
 const FIREBASE_CLIENT_EMAIL_SECRET_KEY = 'firebase_client_email';
 const FIREBASE_PRIVATE_KEY_SECRET_KEY = 'firebase_private_key';
 const FIREBASE_CREDENTIALS_CACHE_MS = 5 * 60 * 1000;
+const WEB_PUSH_VAPID_PUBLIC_KEY_SECRET_KEY = 'web_push_vapid_public_key';
+const WEB_PUSH_VAPID_PRIVATE_KEY_SECRET_KEY = 'web_push_vapid_private_key';
+const WEB_PUSH_VAPID_SUBJECT = 'https://tracklog-assist.pages.dev';
+const WEB_PUSH_CREDENTIALS_CACHE_MS = 5 * 60 * 1000;
 const PUSH_PROVIDER_FCM = 'fcm';
+const PUSH_PROVIDER_WEBPUSH = 'webpush';
 const MAX_PUSH_FAILURES = 3;
 const FULLWIDTH_DIGIT_OFFSET = '０'.charCodeAt(0) - '0'.charCodeAt(0);
 const VEHICLE_LABEL_PATTERN = /^[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}A-Za-z]{1,8}[0-9]{2,3}[ぁ-んA-Za-z][0-9]{1,4}$/u;
@@ -52,9 +59,24 @@ type FirebaseCredentials = {
   privateKey: string;
 };
 
+type WebPushCredentials = {
+  publicKey: string;
+  privateKey: string;
+};
+
+type StandardWebPushSubscription = {
+  endpoint: string;
+  expirationTime: number | null;
+  keys: {
+    auth: string;
+    p256dh: string;
+  };
+};
+
 let firebaseCredentialsCache: { credentials: FirebaseCredentials | null; loadedAt: number } | null = null;
 let firebaseAccessToken: { token: string; expiresAt: number; cacheKey: string } | null = null;
 let firebasePrivateKey: { key: CryptoKey; cacheKey: string } | null = null;
+let webPushCredentialsCache: { credentials: WebPushCredentials | null; loadedAt: number } | null = null;
 
 if (!supabaseUrl || !supabaseAnonKey || !supabaseServiceRoleKey) {
   console.error('TrackLog Edge Function is missing Supabase environment variables.');
@@ -238,12 +260,235 @@ async function isFcmConfigured() {
   return isCompleteFirebaseCredentials(await getFirebaseCredentials());
 }
 
+function isCompleteWebPushCredentials(
+  credentials: WebPushCredentials | null | undefined,
+): credentials is WebPushCredentials {
+  return !!(credentials?.publicKey && credentials.privateKey);
+}
+
+async function getWebPushCredentials(): Promise<WebPushCredentials | null> {
+  if (
+    webPushCredentialsCache &&
+    Date.now() - webPushCredentialsCache.loadedAt < WEB_PUSH_CREDENTIALS_CACHE_MS
+  ) {
+    return webPushCredentialsCache.credentials;
+  }
+
+  const { data, error } = await adminClient
+    .from('tracklog_server_secrets')
+    .select('key, value')
+    .in('key', [
+      WEB_PUSH_VAPID_PUBLIC_KEY_SECRET_KEY,
+      WEB_PUSH_VAPID_PRIVATE_KEY_SECRET_KEY,
+    ]);
+  if (error) {
+    console.warn('[tracklog-privileged] Web Push server secret lookup failed', error.message);
+    webPushCredentialsCache = { credentials: null, loadedAt: Date.now() };
+    return null;
+  }
+
+  const values = new Map(
+    ((data ?? []) as JsonRecord[]).map(row => [textValue(row.key), textValue(row.value)]),
+  );
+  const credentials = {
+    publicKey: values.get(WEB_PUSH_VAPID_PUBLIC_KEY_SECRET_KEY) ?? '',
+    privateKey: values.get(WEB_PUSH_VAPID_PRIVATE_KEY_SECRET_KEY) ?? '',
+  };
+  webPushCredentialsCache = {
+    credentials: isCompleteWebPushCredentials(credentials) ? credentials : null,
+    loadedAt: Date.now(),
+  };
+  return webPushCredentialsCache.credentials;
+}
+
+async function isWebPushConfigured() {
+  return isCompleteWebPushCredentials(await getWebPushCredentials());
+}
+
+function normalizePushProvider(value: unknown) {
+  const provider = textValue(value).toLowerCase() || PUSH_PROVIDER_FCM;
+  if (provider !== PUSH_PROVIDER_FCM && provider !== PUSH_PROVIDER_WEBPUSH) {
+    throw new HttpError(400, 'provider must be fcm or webpush');
+  }
+  return provider;
+}
+
 function normalizePushPlatform(value: unknown) {
   const platform = textValue(value).toLowerCase();
   if (platform !== 'android' && platform !== 'web') {
     throw new HttpError(400, 'platform must be android or web');
   }
   return platform;
+}
+
+function parseCanonicalIpv4Literal(hostname: string): number[] | null {
+  const parts = hostname.split('.');
+  if (parts.length !== 4 || parts.some(part => !/^\d{1,3}$/.test(part))) return null;
+  const octets = parts.map(part => Number(part));
+  return octets.every(octet => Number.isInteger(octet) && octet >= 0 && octet <= 255)
+    ? octets
+    : null;
+}
+
+function isBlockedIpv4Literal(octets: number[]) {
+  const [first, second] = octets;
+  return first === 0 ||
+    first === 10 ||
+    first === 127 ||
+    (first === 169 && second === 254) ||
+    (first === 172 && second >= 16 && second <= 31) ||
+    (first === 192 && second === 168);
+}
+
+function parseIpv6Literal(hostname: string): number[] | null {
+  const literal = hostname.startsWith('[') && hostname.endsWith(']')
+    ? hostname.slice(1, -1)
+    : hostname;
+  if (!literal.includes(':') || literal.includes('%')) return null;
+
+  const compressionIndex = literal.indexOf('::');
+  if (compressionIndex !== -1 && compressionIndex !== literal.lastIndexOf('::')) return null;
+  const leftText = compressionIndex === -1 ? literal : literal.slice(0, compressionIndex);
+  const rightText = compressionIndex === -1 ? '' : literal.slice(compressionIndex + 2);
+  const parseSide = (value: string) => {
+    if (!value) return [] as number[];
+    const parts = value.split(':');
+    if (parts.some(part => !/^[0-9a-f]{1,4}$/i.test(part))) return null;
+    return parts.map(part => Number.parseInt(part, 16));
+  };
+  const left = parseSide(leftText);
+  const right = parseSide(rightText);
+  if (!left || !right) return null;
+
+  if (compressionIndex === -1) return left.length === 8 ? left : null;
+  const omittedCount = 8 - left.length - right.length;
+  if (omittedCount < 1) return null;
+  return [...left, ...Array<number>(omittedCount).fill(0), ...right];
+}
+
+function isBlockedIpv6Literal(segments: number[]) {
+  const isUnspecified = segments.every(segment => segment === 0);
+  const isLoopback = segments.slice(0, 7).every(segment => segment === 0) && segments[7] === 1;
+  const isLinkLocal = (segments[0] & 0xffc0) === 0xfe80;
+  const isUniqueLocal = (segments[0] & 0xfe00) === 0xfc00;
+  if (isUnspecified || isLoopback || isLinkLocal || isUniqueLocal) return true;
+
+  const hasMappedIpv4 = segments.slice(0, 5).every(segment => segment === 0) &&
+    segments[5] === 0xffff;
+  const hasCompatibleIpv4 = segments.slice(0, 6).every(segment => segment === 0);
+  if (!hasMappedIpv4 && !hasCompatibleIpv4) return false;
+  return isBlockedIpv4Literal([
+    segments[6] >> 8,
+    segments[6] & 0xff,
+    segments[7] >> 8,
+    segments[7] & 0xff,
+  ]);
+}
+
+function validateWebPushEndpoint(endpoint: string) {
+  let endpointUrl: URL;
+  try {
+    endpointUrl = new URL(endpoint);
+  } catch {
+    throw new HttpError(400, 'subscription endpoint must be a valid HTTPS URL');
+  }
+  if (endpointUrl.protocol !== 'https:') {
+    throw new HttpError(400, 'subscription endpoint must use HTTPS');
+  }
+  const authority = endpoint.match(/^https:\/\/([^/?#]*)/i)?.[1] ?? '';
+  if (endpointUrl.username || endpointUrl.password || authority.includes('@')) {
+    throw new HttpError(400, 'subscription endpoint must not include user information');
+  }
+  if (endpointUrl.port) {
+    throw new HttpError(400, 'subscription endpoint must use the standard HTTPS port');
+  }
+
+  const hostname = endpointUrl.hostname
+    .toLowerCase()
+    .replace(/^\[|\]$/g, '')
+    .replace(/\.+$/, '');
+  if (!hostname) throw new HttpError(400, 'subscription endpoint host is invalid');
+
+  const ipv4 = parseCanonicalIpv4Literal(hostname);
+  if (ipv4) {
+    if (isBlockedIpv4Literal(ipv4)) {
+      throw new HttpError(400, 'subscription endpoint must not target a private network');
+    }
+    return;
+  }
+
+  if (hostname.includes(':')) {
+    const ipv6 = parseIpv6Literal(hostname);
+    if (!ipv6) throw new HttpError(400, 'subscription endpoint host is invalid');
+    if (isBlockedIpv6Literal(ipv6)) {
+      throw new HttpError(400, 'subscription endpoint must not target a private network');
+    }
+    return;
+  }
+
+  if (
+    hostname === 'localhost' ||
+    hostname.endsWith('.localhost') ||
+    !hostname.includes('.') ||
+    hostname.endsWith('.local')
+  ) {
+    throw new HttpError(400, 'subscription endpoint must use a public host');
+  }
+}
+
+function normalizeWebPushSubscription(value: unknown): StandardWebPushSubscription {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new HttpError(400, 'subscription must be an object');
+  }
+  const raw = value as JsonRecord;
+  const endpoint = textValue(raw.endpoint);
+  if (!endpoint || endpoint.length > 4096) {
+    throw new HttpError(400, 'subscription endpoint is invalid');
+  }
+  validateWebPushEndpoint(endpoint);
+
+  const rawKeys = raw.keys;
+  if (!rawKeys || typeof rawKeys !== 'object' || Array.isArray(rawKeys)) {
+    throw new HttpError(400, 'subscription keys are required');
+  }
+  const keys = rawKeys as JsonRecord;
+  const auth = textValue(keys.auth);
+  const p256dh = textValue(keys.p256dh);
+  const base64UrlPattern = /^[A-Za-z0-9_-]+={0,2}$/;
+  if (!auth || auth.length > 512 || !base64UrlPattern.test(auth)) {
+    throw new HttpError(400, 'subscription auth key is invalid');
+  }
+  if (!p256dh || p256dh.length > 1024 || !base64UrlPattern.test(p256dh)) {
+    throw new HttpError(400, 'subscription p256dh key is invalid');
+  }
+
+  const rawExpirationTime = raw.expirationTime;
+  const expirationTime = rawExpirationTime == null
+    ? null
+    : typeof rawExpirationTime === 'number' && Number.isFinite(rawExpirationTime) && rawExpirationTime >= 0
+      ? rawExpirationTime
+      : null;
+  if (rawExpirationTime != null && expirationTime == null) {
+    throw new HttpError(400, 'subscription expirationTime is invalid');
+  }
+
+  return {
+    endpoint,
+    expirationTime,
+    keys: { auth, p256dh },
+  };
+}
+
+function webPushSubscriptionToken(subscription: StandardWebPushSubscription) {
+  return JSON.stringify(subscription);
+}
+
+function parseStoredWebPushSubscription(value: unknown) {
+  try {
+    return normalizeWebPushSubscription(JSON.parse(textValue(value)));
+  } catch {
+    throw Object.assign(new Error('Stored Web Push subscription is invalid'), { permanent: true });
+  }
 }
 
 function base64UrlEncode(input: string | ArrayBuffer) {
@@ -402,16 +647,14 @@ async function requireUser(req: Request): Promise<TracklogUser> {
 }
 
 async function isTracklogAdmin(user: TracklogUser) {
-  const email = textValue(user.email).toLowerCase();
+  const email = normalizeEmail(user.email);
   if (!email) return false;
   const { data, error } = await adminClient
     .from('admin_users')
     .select('email')
-    .eq('enabled', true)
-    .ilike('email', email)
-    .limit(1);
+    .eq('enabled', true);
   if (error) throw new HttpError(500, `Admin check failed: ${error.message}`);
-  return (data ?? []).length > 0;
+  return (data ?? []).some(row => sameEmailAddress((row as JsonRecord).email, email));
 }
 
 function getAdminAccessState(user: TracklogUser, admin: boolean) {
@@ -531,69 +774,20 @@ async function updateDeviceLocation(payload: JsonRecord, user: TracklogUser, adm
   return data;
 }
 
-function resolveMigrationApprovalStatus(oldProfile: JsonRecord, newProfile: JsonRecord | null) {
-  const oldStatus = textValue(oldProfile.approval_status);
-  const newStatus = textValue(newProfile?.approval_status);
-  if (oldStatus === 'approved' || newStatus === 'approved') return 'approved';
-  if (newStatus === 'rejected') return 'rejected';
-  return oldStatus || newStatus || 'pending';
-}
-
-async function migrateDeviceRecords(payload: JsonRecord, user: TracklogUser, admin: boolean) {
+async function migrateDeviceRecords(payload: JsonRecord, user: TracklogUser, _admin: boolean) {
   const oldDeviceId = textValue(payload.oldDeviceId);
   const newDeviceId = textValue(payload.newDeviceId);
   if (!oldDeviceId || !newDeviceId || oldDeviceId === newDeviceId) return { migrated: false };
 
-  const oldProfile = await getDeviceProfile(oldDeviceId);
-  if (!oldProfile) return { migrated: false };
-  ensureDeviceOwner(oldProfile, user, admin, 'Old device profile');
-
-  const newProfile = await getDeviceProfile(newDeviceId);
-  ensureDeviceOwner(newProfile, user, admin, 'New device profile');
-
-  const nextProfile = {
-    device_id: newDeviceId,
-    auth_user_id: user.id,
-    display_name: nullableText(newProfile?.display_name) ?? nullableText(oldProfile.display_name),
-    vehicle_label: nullableText(newProfile?.vehicle_label) ?? nullableText(oldProfile.vehicle_label),
-    driver_phone: nullableText(newProfile?.driver_phone) ?? nullableText(oldProfile.driver_phone),
-    driver_email: nullableText(newProfile?.driver_email) ?? nullableText(oldProfile.driver_email),
-    platform: nullableText(newProfile?.platform) ?? nullableText(oldProfile.platform) ?? 'unknown',
-    app_version: nullableText(newProfile?.app_version) ?? nullableText(oldProfile.app_version),
-    latest_status: nullableText(newProfile?.latest_status) ?? nullableText(oldProfile.latest_status),
-    latest_trip_id: nullableText(newProfile?.latest_trip_id) ?? nullableText(oldProfile.latest_trip_id),
-    latest_lat: nullableNumber(newProfile?.latest_lat) ?? nullableNumber(oldProfile.latest_lat),
-    latest_lng: nullableNumber(newProfile?.latest_lng) ?? nullableNumber(oldProfile.latest_lng),
-    latest_accuracy: nullableNumber(newProfile?.latest_accuracy) ?? nullableNumber(oldProfile.latest_accuracy),
-    latest_location_at:
-      nullableText(newProfile?.latest_location_at) ??
-      nullableText(oldProfile.latest_location_at),
-    last_seen_at: nullableText(newProfile?.last_seen_at) ?? nullableText(oldProfile.last_seen_at) ?? nowIso(),
-    approval_status: resolveMigrationApprovalStatus(oldProfile, newProfile),
-    approval_requested_at:
-      nullableText(newProfile?.approval_requested_at) ?? nullableText(oldProfile.approval_requested_at) ?? nowIso(),
-    approval_decided_at: nullableText(newProfile?.approval_decided_at) ?? nullableText(oldProfile.approval_decided_at),
-    approval_decided_by: nullableText(newProfile?.approval_decided_by) ?? nullableText(oldProfile.approval_decided_by),
-  };
-
-  const { error: upsertError } = await adminClient
-    .from('device_profiles')
-    .upsert(nextProfile, { onConflict: 'device_id' });
-  if (upsertError) throw new HttpError(500, `Device profile migration failed: ${upsertError.message}`);
-
-  for (const table of ['trip_headers', 'trip_events', 'trip_route_points', 'report_snapshots']) {
-    const { error } = await adminClient
-      .from(table)
-      .update({ device_id: newDeviceId })
-      .eq('device_id', oldDeviceId);
-    if (error) throw new HttpError(500, `${table} migration failed: ${error.message}`);
+  const { error } = await adminClient.rpc('tracklog_migrate_device_v2', {
+    _actor_user_id: user.id,
+    _old_device_id: oldDeviceId,
+    _new_device_id: newDeviceId,
+  });
+  if (error) {
+    const status = error.code === '42501' ? 403 : 500;
+    throw new HttpError(status, `Device migration failed: ${error.message}`);
   }
-
-  const { error: deleteError } = await adminClient
-    .from('device_profiles')
-    .delete()
-    .eq('device_id', oldDeviceId);
-  if (deleteError) throw new HttpError(500, `Old device cleanup failed: ${deleteError.message}`);
   return { migrated: true };
 }
 
@@ -631,10 +825,12 @@ async function updateRuntimeConfig(payload: JsonRecord, user: TracklogUser, admi
   return getRuntimeConfig();
 }
 
-async function registerPushToken(payload: JsonRecord, user: TracklogUser, admin: boolean) {
+async function requireApprovedPushDevice(
+  payload: JsonRecord,
+  user: TracklogUser,
+  admin: boolean,
+) {
   const deviceId = requiredText(payload, 'deviceId');
-  const token = requiredText(payload, 'token');
-  const platform = normalizePushPlatform(payload.platform);
   const profile = await getDeviceProfile(deviceId);
   if (!profile) throw new HttpError(404, 'Device profile not found');
   ensureDeviceOwner(profile, user, admin, 'Device profile');
@@ -644,6 +840,28 @@ async function registerPushToken(payload: JsonRecord, user: TracklogUser, admin:
   if (textValue(profile.approval_status) !== 'approved') {
     throw new HttpError(403, 'Device profile is not approved');
   }
+  return deviceId;
+}
+
+async function getWebPushConfig(payload: JsonRecord, user: TracklogUser, admin: boolean) {
+  await requireApprovedPushDevice(payload, user, admin);
+  const credentials = await getWebPushCredentials();
+  if (!isCompleteWebPushCredentials(credentials)) {
+    throw new HttpError(503, 'Standard Web Push is not configured');
+  }
+  return { publicVapidKey: credentials.publicKey };
+}
+
+async function registerPushToken(payload: JsonRecord, user: TracklogUser, admin: boolean) {
+  const deviceId = await requireApprovedPushDevice(payload, user, admin);
+  const provider = normalizePushProvider(payload.provider);
+  const platform = normalizePushPlatform(payload.platform);
+  if (provider === PUSH_PROVIDER_WEBPUSH && platform !== 'web') {
+    throw new HttpError(400, 'webpush registrations must use the web platform');
+  }
+  const token = provider === PUSH_PROVIDER_WEBPUSH
+    ? webPushSubscriptionToken(normalizeWebPushSubscription(payload.subscription))
+    : requiredText(payload, 'token');
 
   const now = nowIso();
   const tokenHash = await sha256Hex(token);
@@ -652,7 +870,7 @@ async function registerPushToken(payload: JsonRecord, user: TracklogUser, admin:
     .upsert({
       device_id: deviceId,
       auth_user_id: user.id,
-      provider: PUSH_PROVIDER_FCM,
+      provider,
       platform,
       token,
       token_hash: tokenHash,
@@ -662,12 +880,14 @@ async function registerPushToken(payload: JsonRecord, user: TracklogUser, admin:
       updated_at: now,
       last_seen_at: now,
     }, { onConflict: 'provider,token_hash' })
-    .select('id, device_id, platform, enabled, updated_at, last_seen_at')
+    .select('id, device_id, platform, provider, enabled, updated_at, last_seen_at')
     .single();
   if (error) throw new HttpError(500, `Push token registration failed: ${error.message}`);
   return {
     ...data,
-    pushConfigured: await isFcmConfigured(),
+    pushConfigured: provider === PUSH_PROVIDER_WEBPUSH
+      ? await isWebPushConfigured()
+      : await isFcmConfigured(),
   };
 }
 
@@ -787,6 +1007,53 @@ async function sendFcmMessage(registration: JsonRecord, message: JsonRecord, cre
   return textValue(json.name) || 'sent';
 }
 
+async function sendWebPushMessage(
+  registration: JsonRecord,
+  message: JsonRecord,
+  credentials: WebPushCredentials,
+) {
+  const subscription = parseStoredWebPushSubscription(registration.token);
+  const data = getAdminPushData(message);
+  const payload = JSON.stringify({
+    notification: {
+      title: 'TrackLog',
+      body: textValue(message.body),
+      data,
+    },
+  });
+
+  try {
+    const response = await webPush.sendNotification(
+      {
+        endpoint: subscription.endpoint,
+        keys: subscription.keys,
+      },
+      payload,
+      {
+        TTL: 3600,
+        urgency: 'high',
+        vapidDetails: {
+          subject: WEB_PUSH_VAPID_SUBJECT,
+          publicKey: credentials.publicKey,
+          privateKey: credentials.privateKey,
+        },
+      },
+    );
+    return response.statusCode;
+  } catch (error) {
+    const statusCode = typeof (error as { statusCode?: unknown })?.statusCode === 'number'
+      ? (error as { statusCode: number }).statusCode
+      : null;
+    throw Object.assign(
+      new Error(statusCode == null ? 'Web Push delivery failed' : `Web Push HTTP ${statusCode}`),
+      {
+        permanent: statusCode === 404 || statusCode === 410,
+        responseStatus: statusCode,
+      },
+    );
+  }
+}
+
 async function markPushDelivered(registrationId: string) {
   const { error } = await adminClient
     .from('tracklog_push_registrations')
@@ -832,38 +1099,56 @@ async function getPushTargetDeviceIds(targetDeviceId: string | null) {
 }
 
 async function sendPushForAdminMessage(message: JsonRecord) {
-  const credentials = await getFirebaseCredentials();
-  if (!isCompleteFirebaseCredentials(credentials)) {
-    console.warn('[tracklog-privileged] Firebase FCM secrets are not configured; admin message will be delivered by polling only.');
+  const [firebaseCredentials, webPushCredentials] = await Promise.all([
+    getFirebaseCredentials(),
+    getWebPushCredentials(),
+  ]);
+  const fcmConfigured = isCompleteFirebaseCredentials(firebaseCredentials);
+  const webPushConfigured = isCompleteWebPushCredentials(webPushCredentials);
+  const configured = fcmConfigured || webPushConfigured;
+  if (!configured) {
+    console.warn('[tracklog-privileged] Push server secrets are not configured; admin message will be delivered by polling only.');
     return { configured: false, attempted: 0, sent: 0, failed: 0 };
   }
 
   const targetDeviceIds = await getPushTargetDeviceIds(nullableText(message.target_device_id));
-  if (targetDeviceIds.length === 0) return { configured: true, attempted: 0, sent: 0, failed: 0 };
+  if (targetDeviceIds.length === 0) return { configured, attempted: 0, sent: 0, failed: 0 };
 
   const { data, error } = await adminClient
     .from('tracklog_push_registrations')
-    .select('id, device_id, platform, token, failure_count')
-    .eq('provider', PUSH_PROVIDER_FCM)
+    .select('id, device_id, provider, platform, token, failure_count')
+    .in('provider', [PUSH_PROVIDER_FCM, PUSH_PROVIDER_WEBPUSH])
     .eq('enabled', true)
     .in('device_id', targetDeviceIds)
     .limit(1000);
   if (error) throw new Error(`Push token lookup failed: ${error.message}`);
 
+  let attempted = 0;
   let sent = 0;
   let failed = 0;
   for (const registration of (data ?? []) as JsonRecord[]) {
+    const provider = textValue(registration.provider);
+    if (provider === PUSH_PROVIDER_FCM && !fcmConfigured) continue;
+    if (provider === PUSH_PROVIDER_WEBPUSH && !webPushConfigured) continue;
     try {
-      await sendFcmMessage(registration, message, credentials);
+      attempted += 1;
+      if (provider === PUSH_PROVIDER_FCM && firebaseCredentials) {
+        await sendFcmMessage(registration, message, firebaseCredentials);
+      } else if (provider === PUSH_PROVIDER_WEBPUSH && webPushCredentials) {
+        await sendWebPushMessage(registration, message, webPushCredentials);
+      } else {
+        continue;
+      }
       sent += 1;
       await markPushDelivered(textValue(registration.id));
     } catch (pushError) {
       failed += 1;
-      console.error('[tracklog-privileged] FCM delivery failed', pushError);
+      const errorMessage = pushError instanceof Error ? pushError.message : 'Push delivery failed';
+      console.error(`[tracklog-privileged] ${provider || 'unknown'} delivery failed`, errorMessage);
       await markPushFailed(registration, pushError);
     }
   }
-  return { configured: true, attempted: (data ?? []).length, sent, failed };
+  return { configured, attempted, sent, failed };
 }
 
 async function sendAdminMessage(payload: JsonRecord, user: TracklogUser, admin: boolean) {
@@ -887,8 +1172,19 @@ async function sendAdminMessage(payload: JsonRecord, user: TracklogUser, admin: 
   if (error) throw new HttpError(500, `Admin message send failed: ${error.message}`);
   const pushDelivery = await sendPushForAdminMessage(data as JsonRecord).catch(async pushError => {
     console.error('[tracklog-privileged] Admin message push delivery failed', pushError);
-    const credentials = await getFirebaseCredentials().catch(() => null);
-    return { configured: isCompleteFirebaseCredentials(credentials), attempted: 0, sent: 0, failed: 1, error: 'push delivery failed' };
+    const [firebaseCredentials, webPushCredentials] = await Promise.all([
+      getFirebaseCredentials().catch(() => null),
+      getWebPushCredentials().catch(() => null),
+    ]);
+    return {
+      configured:
+        isCompleteFirebaseCredentials(firebaseCredentials) ||
+        isCompleteWebPushCredentials(webPushCredentials),
+      attempted: 0,
+      sent: 0,
+      failed: 1,
+      error: 'push delivery failed',
+    };
   });
   return {
     ...(data as JsonRecord),
@@ -1000,8 +1296,34 @@ async function deleteDevice(payload: JsonRecord, user: TracklogUser, admin: bool
     .from('device_profiles')
     .delete({ count: 'exact' })
     .eq('device_id', deviceId);
+  if (error?.code === '23503') {
+    const hiddenAt = nowIso();
+    const { error: hideError } = await adminClient
+      .from('device_profiles')
+      .update({
+        platform: 'admin_hidden',
+        latest_status: '管理画面で非表示',
+        latest_trip_id: null,
+        latest_lat: null,
+        latest_lng: null,
+        latest_accuracy: null,
+        latest_location_at: null,
+        approval_status: 'rejected',
+        approval_decided_at: hiddenAt,
+        approval_decided_by: user.id,
+        last_seen_at: hiddenAt,
+      })
+      .eq('device_id', deviceId);
+    if (hideError) throw new HttpError(500, `Device hide failed: ${hideError.message}`);
+    const { error: pushError } = await adminClient
+      .from('tracklog_push_registrations')
+      .update({ enabled: false, updated_at: hiddenAt })
+      .eq('device_id', deviceId);
+    if (pushError) throw new HttpError(500, `Device push disable failed: ${pushError.message}`);
+    return { deletedCount: 0, hidden: true };
+  }
   if (error) throw new HttpError(500, `Device delete failed: ${error.message}`);
-  return { deletedCount: count ?? 0 };
+  return { deletedCount: count ?? 0, hidden: false };
 }
 
 async function getTripHeader(tripId: string) {
@@ -1029,15 +1351,12 @@ async function upsertTripTombstone(tripId: string, deviceId: string, userId: str
 async function deleteTrip(payload: JsonRecord, user: TracklogUser, admin: boolean) {
   await requireAdmin(user, admin);
   const tripId = requiredText(payload, 'tripId');
-  const header = await getTripHeader(tripId);
-  if (!header) return { deletedCount: 0 };
-  await upsertTripTombstone(tripId, header.device_id, user.id);
-  const { error, count } = await adminClient
-    .from('trip_headers')
-    .delete({ count: 'exact' })
-    .eq('trip_id', tripId);
+  const { data, error } = await adminClient.rpc('tracklog_admin_delete_trip_v2', {
+    _actor_user_id: user.id,
+    _trip_id: tripId,
+  });
   if (error) throw new HttpError(500, `Trip delete failed: ${error.message}`);
-  return { deletedCount: count ?? 0 };
+  return { deletedCount: Number(data ?? 0) };
 }
 
 async function deleteOwnTrip(payload: JsonRecord, user: TracklogUser, admin: boolean) {
@@ -1053,13 +1372,7 @@ async function deleteOwnTrip(payload: JsonRecord, user: TracklogUser, admin: boo
   }
 
   await upsertTripTombstone(tripId, header.device_id, user.id);
-  const { error, count } = await adminClient
-    .from('trip_headers')
-    .delete({ count: 'exact' })
-    .eq('trip_id', tripId)
-    .eq('device_id', header.device_id);
-  if (error) throw new HttpError(500, `Own trip delete failed: ${error.message}`);
-  return { deletedCount: count ?? 0 };
+  return { deletedCount: 1 };
 }
 
 Deno.serve(async (req: Request) => {
@@ -1079,6 +1392,7 @@ Deno.serve(async (req: Request) => {
     let data: unknown;
     if (action === 'getAdminAccessState') data = getAdminAccessState(user, admin);
     else if (action === 'getRuntimeConfig') data = await getRuntimeConfig();
+    else if (action === 'getWebPushConfig') data = await getWebPushConfig(payload, user, admin);
     else if (action === 'updateRuntimeConfig') data = await updateRuntimeConfig(payload, user, admin);
     else if (action === 'registerPushToken') data = await registerPushToken(payload, user, admin);
     else if (action === 'unregisterPushToken') data = await unregisterPushToken(payload, user, admin);

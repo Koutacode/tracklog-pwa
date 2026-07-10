@@ -15,6 +15,7 @@ android/app/build-*/
 .dev.vars
 supabase/.temp/
 .codex-temp/
+.codex-remote-attachments/
 .tmp.driveupload/
 temp-debug/
 temp_report_repro.mjs

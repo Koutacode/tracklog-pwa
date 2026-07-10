@@ -49,10 +49,11 @@ export default function MessageInboxScreen() {
   }, []);
 
   useEffect(() => {
-    if (!selectedId) return;
-    markAdminMessageRead(selectedId);
+    const displayedId = selectedMessage?.id;
+    if (!displayedId) return;
+    markAdminMessageRead(displayedId);
     refreshLocal();
-  }, [selectedId]);
+  }, [selectedMessage?.id]);
 
   const refreshRemote = async () => {
     setRefreshing(true);
@@ -92,7 +93,13 @@ export default function MessageInboxScreen() {
               <span>保存件数</span>
               <strong>{messages.length}件</strong>
             </div>
-            <button className="trip-btn" disabled={refreshing} onClick={refreshRemote} type="button">
+            <button
+              aria-label="管理者メッセージを再取得"
+              className="trip-btn"
+              disabled={refreshing}
+              onClick={refreshRemote}
+              type="button"
+            >
               {refreshing ? '再取得中…' : '再取得'}
             </button>
             <button
@@ -109,7 +116,7 @@ export default function MessageInboxScreen() {
           </div>
 
           {selectedMessage && (
-            <article className="message-inbox__detail card">
+            <article aria-live="polite" className="message-inbox__detail card">
               <div className="message-inbox__detail-head">
                 <strong>TrackLog</strong>
                 <span>{formatDateTime(selectedMessage.sentAt)}</span>
@@ -130,6 +137,8 @@ export default function MessageInboxScreen() {
               messages.map(message => (
                 <button
                   className={`message-inbox__item${message.id === selectedMessage?.id ? ' message-inbox__item--selected' : ''}${message.readAt ? '' : ' message-inbox__item--unread'}`}
+                  aria-label={`${formatDateTime(message.sentAt)}のメッセージ、${message.readAt ? '既読' : '未読'}、${message.body}`}
+                  aria-pressed={message.id === selectedMessage?.id}
                   key={message.id}
                   onClick={() => selectMessage(message)}
                   type="button"

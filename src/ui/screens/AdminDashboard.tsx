@@ -7,12 +7,6 @@ import { shareText } from '../../services/nativeShare';
 import { DEFAULT_APK_DOWNLOAD_URL, PWA_URL } from '../../app/releaseInfo';
 import AdminMap from '../components/AdminMap';
 import AdminAccessDenied from '../components/AdminAccessDenied';
-import {
-  DEFAULT_LOCATION_NOTIFICATION_TEXT,
-  loadTracklogRuntimeConfig,
-  normalizeLocationNotificationText,
-  saveTracklogRuntimeConfig,
-} from '../../services/runtimeConfig';
 
 function fmtDateTime(ts?: string | null) {
   if (!ts) return '-';
@@ -97,9 +91,6 @@ export default function AdminDashboard() {
   const [approvingDeviceId, setApprovingDeviceId] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [lastLoadedAt, setLastLoadedAt] = useState<string | null>(null);
-  const [notificationText, setNotificationText] = useState(DEFAULT_LOCATION_NOTIFICATION_TEXT);
-  const [notificationDraft, setNotificationDraft] = useState(DEFAULT_LOCATION_NOTIFICATION_TEXT);
-  const [savingNotificationText, setSavingNotificationText] = useState(false);
   const [adminMessageDraft, setAdminMessageDraft] = useState('');
   const [adminMessageTargetDeviceId, setAdminMessageTargetDeviceId] = useState('');
   const [adminMessageRequestLocation, setAdminMessageRequestLocation] = useState(true);
@@ -117,14 +108,9 @@ export default function AdminDashboard() {
           setReady(true);
           return;
         }
-        const [nextDevices, runtimeConfig] = await Promise.all([
-          listAdminDevices(),
-          loadTracklogRuntimeConfig({ force: true, admin: true }),
-        ]);
+        const nextDevices = await listAdminDevices();
         if (!active) return;
         setDevices(nextDevices);
-        setNotificationText(runtimeConfig.locationNotificationText);
-        setNotificationDraft(runtimeConfig.locationNotificationText);
         setLastLoadedAt(new Date().toISOString());
       } catch (err: any) {
         if (active) setError(err?.message ?? '管理画面の読み込みに失敗しました');
@@ -248,7 +234,7 @@ export default function AdminDashboard() {
     const displayName = getDisplayName(device);
     const confirmed = window.confirm(
       `${displayName} を管理画面から消去します。\n\n` +
-      'クラウド上の端末プロフィールと同期済みの運行データが削除されます。端末内のローカルデータは削除されません。\n\n' +
+      '運行履歴がない端末は削除し、履歴がある端末は記録保護のため管理画面から非表示にします。端末内とクラウドの運行履歴は削除しません。\n\n' +
       'この操作を実行しますか？',
     );
     if (!confirmed) return;
@@ -291,23 +277,6 @@ export default function AdminDashboard() {
       setError(err?.message ?? '承認状態の更新に失敗しました');
     } finally {
       setApprovingDeviceId(null);
-    }
-  }
-
-  async function handleSaveNotificationText() {
-    const nextText = normalizeLocationNotificationText(notificationDraft);
-    setSavingNotificationText(true);
-    setError(null);
-    setNotice(null);
-    try {
-      const config = await saveTracklogRuntimeConfig({ locationNotificationText: nextText });
-      setNotificationText(config.locationNotificationText);
-      setNotificationDraft(config.locationNotificationText);
-      setNotice('常駐通知文を保存しました');
-    } catch (err: any) {
-      setError(err?.message ?? '常駐通知文の保存に失敗しました');
-    } finally {
-      setSavingNotificationText(false);
     }
   }
 
@@ -410,34 +379,6 @@ export default function AdminDashboard() {
         <div className="settings-note">端末一覧は15秒ごとに自動更新します。最終再取得: {fmtDateTime(lastLoadedAt)}</div>
         {error && <div className="settings-toast">{error}</div>}
         {notice && <div className="settings-toast settings-toast--success">{notice}</div>}
-        <section className="approval-admin-panel">
-          <div className="approval-admin-panel__header">
-            <div>
-              <div className="settings-panel__title">常駐通知文</div>
-              <p>Android端末の位置記録通知に表示する文言です。端末側の次回同期で反映されます。</p>
-            </div>
-            <strong>{notificationText}</strong>
-          </div>
-          <label className="settings-field">
-            <span>通知文</span>
-            <input
-              value={notificationDraft}
-              maxLength={40}
-              onChange={event => setNotificationDraft(event.target.value)}
-              placeholder={DEFAULT_LOCATION_NOTIFICATION_TEXT}
-            />
-          </label>
-          <div className="approval-request__actions">
-            <button
-              type="button"
-              className="pill-link pill-link--approve"
-              disabled={savingNotificationText}
-              onClick={() => void handleSaveNotificationText()}
-            >
-              {savingNotificationText ? '保存中' : '保存'}
-            </button>
-          </div>
-        </section>
         <section className="approval-admin-panel">
           <div className="approval-admin-panel__header">
             <div>

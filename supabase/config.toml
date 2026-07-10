@@ -1,0 +1,13 @@
+project_id = "jwqafxtphulkjhfmvwro"
+
+[functions.tracklog-privileged]
+verify_jwt = true
+
+[functions.tracklog-sync]
+verify_jwt = true
+
+[functions.tracklog-ic-resolver]
+verify_jwt = true
+
+[functions.tracklog-location]
+verify_jwt = true

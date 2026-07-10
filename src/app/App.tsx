@@ -1,6 +1,7 @@
 import { Suspense, lazy, useEffect } from 'react';
 import { BrowserRouter, Routes, Route, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import AdminAuthBridge from './AdminAuthBridge';
+import AuthCallbackScreen from './AuthCallbackScreen';
 import IcResolverJob from './IcResolverJob';
 import LocalRecoveryBootstrap from './LocalRecoveryBootstrap';
 import NativeUpdateNotice from './NativeUpdateNotice';
@@ -40,7 +41,8 @@ function AppShell() {
   const authRoute =
     location.pathname.startsWith('/login') ||
     location.pathname.startsWith('/admin') ||
-    location.pathname.startsWith('/driver-login');
+    location.pathname.startsWith('/driver-login') ||
+    location.pathname.startsWith('/auth/');
 
   useEffect(() => {
     let active = true;
@@ -98,6 +100,8 @@ function AppShell() {
           <Route path="/messages" element={<RequireDriverProfile><MessageInboxScreen /></RequireDriverProfile>} />
           <Route path="/driver-login" element={<DriverLoginScreen />} />
           <Route path="/login" element={<LoginScreen />} />
+          <Route path="/auth/driver/callback" element={<AuthCallbackScreen role="driver" />} />
+          <Route path="/auth/admin/callback" element={<AuthCallbackScreen role="admin" />} />
           <Route path="/admin" element={<AdminDashboard />} />
           <Route path="/admin/devices/:deviceId" element={<AdminDeviceDetail />} />
           <Route path="/admin/trips/:tripId" element={<AdminTripDetail />} />

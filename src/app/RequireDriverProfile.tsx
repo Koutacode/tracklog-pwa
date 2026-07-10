@@ -1,6 +1,6 @@
 import type { FormEvent, ReactElement } from 'react';
-import { useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { useEffect, useRef, useState } from 'react';
+import { Link, useNavigate } from 'react-router-dom';
 import type { DriverIdentity } from '../domain/remoteTypes';
 import {
   getDriverIdentity,
@@ -26,6 +26,7 @@ import {
   runNativeQuickSetup,
 } from '../services/nativeSetup';
 import type { NativeSetupReadiness } from '../services/nativeSetup';
+import { requestRouteTrackingSync } from './routeTrackingSignal';
 
 type Props = {
   children: ReactElement;
@@ -77,6 +78,7 @@ function DriverRegistrationGate(props: {
   const [phone, setPhone] = useState(identity.phone);
   const [email, setEmail] = useState(identity.email ?? '');
   const [otpToken, setOtpToken] = useState('');
+  const [otpRequested, setOtpRequested] = useState(false);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<Partial<Record<DriverProfileField, string>>>({});
@@ -107,6 +109,7 @@ function DriverRegistrationGate(props: {
       await hydrateRemoteSyncState();
       if (identity.configured && !identity.authInitialized) {
         await sendDriverMagicLink(validation.value.email);
+        setOtpRequested(true);
         setMessage('認証メールを送信しました。メール本文の認証コードをこの画面に入力してください。');
       } else {
         await runRemoteSync('profile-registration');
@@ -159,7 +162,9 @@ function DriverRegistrationGate(props: {
     identity.authInitialized &&
     identity.profileComplete &&
     identity.approvalStatus !== 'approved';
-  const showOtpPanel = identity.configured && !identity.authInitialized && email.trim().length > 0;
+  const showOtpPanel = identity.configured
+    && !identity.authInitialized
+    && (otpRequested || !!identity.email?.trim());
 
   return (
     <div className="screen-shell">
@@ -420,10 +425,12 @@ function DeviceSetupGate(props: {
 }
 
 export default function RequireDriverProfile({ children }: Props) {
+  const navigate = useNavigate();
   const [identity, setIdentity] = useState<DriverIdentity | null>(null);
   const [loading, setLoading] = useState(true);
   const [setupReadiness, setSetupReadiness] = useState<NativeSetupReadiness | null>(null);
   const [setupLoading, setSetupLoading] = useState(false);
+  const wasBlockedRef = useRef(false);
 
   const refreshNativeSetup = async () => {
     setSetupLoading(true);
@@ -492,6 +499,32 @@ export default function RequireDriverProfile({ children }: Props) {
       active = false;
     };
   }, [identity?.configured, identity?.authInitialized, identity?.profileComplete, identity?.approvalStatus]);
+
+  useEffect(() => {
+    if (!identity) return;
+    if (!hasApprovedProfile(identity)) {
+      wasBlockedRef.current = true;
+      return;
+    }
+    if (setupReadiness && !setupReadiness.ready) {
+      wasBlockedRef.current = true;
+      return;
+    }
+    if (setupReadiness?.ready && wasBlockedRef.current) {
+      wasBlockedRef.current = false;
+      navigate('/', { replace: true });
+    }
+  }, [identity, navigate, setupReadiness]);
+
+  useEffect(() => {
+    requestRouteTrackingSync();
+  }, [
+    identity?.configured,
+    identity?.authInitialized,
+    identity?.profileComplete,
+    identity?.approvalStatus,
+    setupReadiness?.ready,
+  ]);
 
   if (!identity) {
     return <div style={{ padding: 24, color: '#fff' }}>登録状態を確認中…</div>;

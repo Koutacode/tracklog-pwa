@@ -59,7 +59,7 @@ const META_PENDING_EXPRESSWAY_END_DECISION = 'pendingExpresswayEndDecision';
 const META_REMOTE_ROUTE_POINTS_UPLOADED_THROUGH = 'remoteRoutePointsUploadedThrough';
 const IC_RESOLVE_RETRY_LIMIT = 6;
 // Bump this when resolver behavior changes so previously exhausted failures retry.
-const IC_RESOLVE_ALGORITHM_VERSION = 7;
+const IC_RESOLVE_ALGORITHM_VERSION = 8;
 const IC_RESOLVE_BACKOFF_BASE_MS = 2 * 60 * 1000;
 const IC_RESOLVE_BACKOFF_CAP_MS = 60 * 60 * 1000;
 const EXPRESSWAY_EVENT_TYPES = ['expressway', 'expressway_start', 'expressway_end'] as const;
@@ -507,16 +507,21 @@ const SESSION_KEY_BY_TYPE: Partial<Record<EventType, SessionKey>> = {
   disembark: 'ferrySessionId',
 };
 
-const TOGGLE_GROUPS = [
+const BASIC_TOGGLE_GROUPS = [
   { start: 'rest_start', end: 'rest_end', key: 'restSessionId', label: '休息' },
   { start: 'break_start', end: 'break_end', key: 'breakSessionId', label: '休憩' },
   { start: 'load_start', end: 'load_end', key: 'loadSessionId', label: '積込' },
   { start: 'unload_start', end: 'unload_end', key: 'unloadSessionId', label: '荷卸' },
-  { start: 'expressway_start', end: 'expressway_end', key: 'expresswaySessionId', label: '高速道路' },
   { start: 'boarding', end: 'disembark', key: 'ferrySessionId', label: 'フェリー' },
 ] as const;
 
+const TOGGLE_GROUPS = [
+  ...BASIC_TOGGLE_GROUPS,
+  { start: 'expressway_start', end: 'expressway_end', key: 'expresswaySessionId', label: '高速道路' },
+] as const;
+
 type ToggleGroup = (typeof TOGGLE_GROUPS)[number];
+type BasicToggleGroup = (typeof BASIC_TOGGLE_GROUPS)[number];
 
 function getToggleGroupByType(type: EventType): ToggleGroup | null {
   return TOGGLE_GROUPS.find(g => g.start === type || g.end === type) ?? null;
@@ -825,6 +830,10 @@ export async function addEvent(event: AppEvent) {
 }
 
 export async function addRoutePoint(point: Omit<RoutePoint, 'id'> & { id?: string }): Promise<RoutePoint> {
+  if (point.id) {
+    const existing = await db.routePoints.get(point.id);
+    if (existing) return existing;
+  }
   const id = point.id ?? uuid();
   const row: RoutePoint = {
     id,
@@ -939,24 +948,30 @@ export async function startTrip(params: {
   address?: string;
 }): Promise<{ tripId: string; event: TripStartEvent }> {
   const tripId = uuid();
-  const e: TripStartEvent = {
-    id: uuid(),
-    tripId,
-    type: 'trip_start',
-    ts: nowIso(),
-    geo: params.geo,
-    address: params.address,
-    syncStatus: 'pending',
-    extras: { odoKm: params.odoKm },
-  };
+  let event: TripStartEvent | undefined;
   await db.transaction('rw', db.events, db.meta, db.routePoints, async () => {
-    await putEventWithRoutePointTx(e);
+    const activeTripId = await getActiveTripId();
+    if (activeTripId) {
+      throw new Error('進行中の運行があるため、新しい運行を開始できません');
+    }
+    event = {
+      id: uuid(),
+      tripId,
+      type: 'trip_start',
+      ts: nowIso(),
+      geo: params.geo,
+      address: params.address,
+      syncStatus: 'pending',
+      extras: { odoKm: params.odoKm },
+    };
+    await putEventWithRoutePointTx(event);
     await setMeta(META_ACTIVE_TRIP_ID, tripId);
     await setMeta(META_PENDING_EXPRESSWAY_END_PROMPT, null);
     await setMeta(META_PENDING_EXPRESSWAY_END_DECISION, null);
   });
+  if (!event) throw new Error('運行開始イベントを保存できませんでした');
   notifyRemoteMutation('trip-start');
-  return { tripId, event: e };
+  return { tripId, event };
 }
 
 export async function endTrip(params: {
@@ -965,45 +980,53 @@ export async function endTrip(params: {
   geo?: Geo;
   address?: string;
 }): Promise<{ event: TripEndEvent }> {
-  const events = await getEventsByTripId(params.tripId);
-  const start = events.find(e => e.type === 'trip_start') as TripStartEvent | undefined;
-  if (!start) throw new Error('trip_start が存在しません');
-  const restStarts = events.filter(e => e.type === 'rest_start') as RestStartEvent[];
-  restStarts.sort((a, b) => a.ts.localeCompare(b.ts));
-  const lastRestStartOdo = restStarts.length > 0 ? restStarts[restStarts.length - 1].extras.odoKm : undefined;
-  if (params.odoEndKm < start.extras.odoKm) {
-    throw new Error('運行終了メーターが運行開始より小さいため保存できません');
-  }
-  if (lastRestStartOdo != null && params.odoEndKm < lastRestStartOdo) {
-    throw new Error('運行終了メーターが最後の休息開始メーターより小さいため保存できません');
-  }
-  const totals = computeTotals({
-    odoStart: start.extras.odoKm,
-    odoEnd: params.odoEndKm,
-    lastRestStartOdo,
-  });
-  const e: TripEndEvent = {
-    id: uuid(),
-    tripId: params.tripId,
-    type: 'trip_end',
-    ts: nowIso(),
-    geo: params.geo,
-    address: params.address,
-    syncStatus: 'pending',
-    extras: {
-      odoKm: params.odoEndKm,
-      totalKm: totals.totalKm,
-      lastLegKm: totals.lastLegKm,
-    },
-  };
+  let event: TripEndEvent | undefined;
   await db.transaction('rw', db.events, db.meta, db.routePoints, async () => {
-    await putEventWithRoutePointTx(e);
+    const activeTripId = await getActiveTripId();
+    if (activeTripId !== params.tripId) {
+      throw new Error('対象の運行は進行中ではありません');
+    }
+    const events = await getTripEventsCached(params.tripId);
+    assertTripOpen(events);
+    const start = events.find(e => e.type === 'trip_start') as TripStartEvent;
+    const restStarts = events.filter(e => e.type === 'rest_start') as RestStartEvent[];
+    restStarts.sort((a, b) => a.ts.localeCompare(b.ts));
+    const lastRestStartOdo = restStarts.length > 0
+      ? restStarts[restStarts.length - 1].extras.odoKm
+      : undefined;
+    if (params.odoEndKm < start.extras.odoKm) {
+      throw new Error('運行終了メーターが運行開始より小さいため保存できません');
+    }
+    if (lastRestStartOdo != null && params.odoEndKm < lastRestStartOdo) {
+      throw new Error('運行終了メーターが最後の休息開始メーターより小さいため保存できません');
+    }
+    const totals = computeTotals({
+      odoStart: start.extras.odoKm,
+      odoEnd: params.odoEndKm,
+      lastRestStartOdo,
+    });
+    event = {
+      id: uuid(),
+      tripId: params.tripId,
+      type: 'trip_end',
+      ts: nowIso(),
+      geo: params.geo,
+      address: params.address,
+      syncStatus: 'pending',
+      extras: {
+        odoKm: params.odoEndKm,
+        totalKm: totals.totalKm,
+        lastLegKm: totals.lastLegKm,
+      },
+    };
+    await putEventWithRoutePointTx(event);
     await clearActiveTripId();
     await clearPendingExpresswayEndPrompt(params.tripId);
     await clearPendingExpresswayEndDecision(params.tripId);
   });
+  if (!event) throw new Error('運行終了イベントを保存できませんでした');
   notifyRemoteMutation('trip-end');
-  return { event: e };
+  return { event };
 }
 
 // Rest operations
@@ -1014,25 +1037,35 @@ export async function startRest(params: {
   geo?: Geo;
   address?: string;
 }): Promise<{ restSessionId: string; event: RestStartEvent }> {
-  const events = await getEventsByTripId(params.tripId);
-  // Validate odometer not decreasing
-  const lastOdo = findLatestOdoCheckpoint(events);
-  if (lastOdo != null && params.odoKm < lastOdo) {
-    throw new Error('休息開始メーターが前回メーターより小さいため保存できません');
-  }
   const restSessionId = uuid();
-  const e: RestStartEvent = {
-    id: uuid(),
-    tripId: params.tripId,
-    type: 'rest_start',
-    ts: nowIso(),
-    geo: params.geo,
-    address: params.address,
-    syncStatus: 'pending',
-    extras: { restSessionId, odoKm: params.odoKm, reportMinDurationMinutes: REPORT_MIN_DURATION_MINUTES },
-  };
-  await addEvent(e);
-  return { restSessionId, event: e };
+  let event: RestStartEvent | undefined;
+  await db.transaction('rw', db.events, db.routePoints, async () => {
+    const events = await getTripEventsCached(params.tripId);
+    assertTripOpen(events);
+    assertCanStartBasicToggle(events, BASIC_TOGGLE_GROUPS[0]);
+    const lastOdo = findLatestOdoCheckpoint(events);
+    if (lastOdo != null && params.odoKm < lastOdo) {
+      throw new Error('休息開始メーターが前回メーターより小さいため保存できません');
+    }
+    event = {
+      id: uuid(),
+      tripId: params.tripId,
+      type: 'rest_start',
+      ts: nowIso(),
+      geo: params.geo,
+      address: params.address,
+      syncStatus: 'pending',
+      extras: {
+        restSessionId,
+        odoKm: params.odoKm,
+        reportMinDurationMinutes: REPORT_MIN_DURATION_MINUTES,
+      },
+    };
+    await putEventWithRoutePointTx(event);
+  });
+  if (!event) throw new Error('休息開始イベントを保存できませんでした');
+  notifyRemoteMutation('event-rest_start');
+  return { restSessionId, event };
 }
 
 export async function endRest(params: {
@@ -1042,48 +1075,34 @@ export async function endRest(params: {
   geo?: Geo;
   address?: string;
 }): Promise<{ event: RestEndEvent }> {
-  const events = await getEventsByTripId(params.tripId);
-  const hasStart = events.some(
-    e => e.type === 'rest_start' && (e as any).extras?.restSessionId === params.restSessionId
-  );
-  if (!hasStart) throw new Error('対応する rest_start が存在しません（restSessionId不整合）');
-  let dayIndex: number | undefined = undefined;
-  if (params.dayClose) {
-    dayIndex = getNextDayIndexFromTripEvents(events);
-  }
-  const ts = nowIso();
-  const openFerrySessionId = findOpenToggleSessionId(events, 'boarding', 'disembark', 'ferrySessionId');
-  const e: RestEndEvent = {
-    id: uuid(),
-    tripId: params.tripId,
-    type: 'rest_end',
-    ts,
-    geo: params.geo,
-    address: params.address,
-    syncStatus: 'pending',
-    extras: {
-      restSessionId: params.restSessionId,
-      dayClose: params.dayClose,
-      ...(dayIndex != null ? { dayIndex } : {}),
-    },
-  };
+  let event: RestEndEvent | undefined;
   await db.transaction('rw', db.events, db.routePoints, async () => {
-    if (openFerrySessionId) {
-      await putEventWithRoutePointTx({
-        id: uuid(),
-        tripId: params.tripId,
-        type: 'disembark',
-        ts,
-        geo: params.geo,
-        address: params.address,
-        syncStatus: 'pending',
-        extras: openFerrySessionId === '__legacy__' ? undefined : { ferrySessionId: openFerrySessionId },
-      } as AppEvent);
+    const events = await getTripEventsCached(params.tripId);
+    assertTripOpen(events);
+    const open = requireOpenToggle(events, BASIC_TOGGLE_GROUPS[0]);
+    if (open !== '__legacy__' && open !== params.restSessionId) {
+      throw new Error('対応する休息開始が進行中ではありません');
     }
-    await putEventWithRoutePointTx(e);
+    const dayIndex = params.dayClose ? getNextDayIndexFromTripEvents(events) : undefined;
+    event = {
+      id: uuid(),
+      tripId: params.tripId,
+      type: 'rest_end',
+      ts: nowIso(),
+      geo: params.geo,
+      address: params.address,
+      syncStatus: 'pending',
+      extras: {
+        restSessionId: params.restSessionId,
+        dayClose: params.dayClose,
+        ...(dayIndex != null ? { dayIndex } : {}),
+      },
+    };
+    await putEventWithRoutePointTx(event);
   });
+  if (!event) throw new Error('休息終了イベントを保存できませんでした');
   notifyRemoteMutation('rest-end');
-  return { event: e };
+  return { event };
 }
 
 // Helpers for day index and odometer checkpoints
@@ -1130,7 +1149,9 @@ function baseEvent(params: {
 }
 
 async function getTripEventsCached(tripId: string) {
-  return await getEventsByTripId(tripId);
+  const events = await db.events.where('tripId').equals(tripId).toArray();
+  events.sort((a, b) => a.ts.localeCompare(b.ts));
+  return events;
 }
 
 function findOpenToggleSessionId(
@@ -1155,97 +1176,124 @@ function findOpenToggleSessionId(
   return null;
 }
 
+function assertTripOpen(events: AppEvent[]): void {
+  if (!events.some(event => event.type === 'trip_start')) {
+    throw new Error('運行開始イベントが存在しません');
+  }
+  if (events.some(event => event.type === 'trip_end')) {
+    throw new Error('終了済みの運行には操作を追加できません');
+  }
+}
+
+function assertCanStartBasicToggle(events: AppEvent[], requested: BasicToggleGroup): void {
+  for (const group of BASIC_TOGGLE_GROUPS) {
+    const open = findOpenToggleSessionId(events, group.start, group.end, group.key);
+    if (!open) continue;
+    if (group.start === requested.start) {
+      throw new Error(`${group.label}がすでに開始されています（終了してください）`);
+    }
+    throw new Error(`${group.label}が進行中です。終了してから${requested.label}を開始してください`);
+  }
+}
+
+function requireOpenToggle(events: AppEvent[], group: BasicToggleGroup): string {
+  const open = findOpenToggleSessionId(events, group.start, group.end, group.key);
+  if (!open) throw new Error(`${group.label}が開始されていません`);
+  return open;
+}
+
+async function startBasicToggleOperation(
+  params: { tripId: string; geo?: Geo; address?: string },
+  group: BasicToggleGroup,
+  notifyReason: string,
+): Promise<{ sessionId: string; event: AppEvent }> {
+  const sessionId = uuid();
+  let event: AppEvent | undefined;
+  await db.transaction('rw', db.events, db.routePoints, async () => {
+    const events = await getTripEventsCached(params.tripId);
+    assertTripOpen(events);
+    assertCanStartBasicToggle(events, group);
+    event = baseEvent({
+      tripId: params.tripId,
+      type: group.start,
+      geo: params.geo,
+      address: params.address,
+      extras: {
+        [group.key]: sessionId,
+        reportMinDurationMinutes: REPORT_MIN_DURATION_MINUTES,
+      },
+    });
+    await putEventWithRoutePointTx(event);
+  });
+  if (!event) throw new Error(`${group.label}開始イベントを保存できませんでした`);
+  notifyRemoteMutation(notifyReason);
+  return { sessionId, event };
+}
+
+async function endBasicToggleOperation(
+  params: { tripId: string; geo?: Geo; address?: string },
+  group: BasicToggleGroup,
+  notifyReason: string,
+): Promise<AppEvent> {
+  let event: AppEvent | undefined;
+  await db.transaction('rw', db.events, db.routePoints, async () => {
+    const events = await getTripEventsCached(params.tripId);
+    assertTripOpen(events);
+    const open = requireOpenToggle(events, group);
+    event = baseEvent({
+      tripId: params.tripId,
+      type: group.end,
+      geo: params.geo,
+      address: params.address,
+      extras: open === '__legacy__' ? undefined : { [group.key]: open },
+    });
+    await putEventWithRoutePointTx(event);
+  });
+  if (!event) throw new Error(`${group.label}終了イベントを保存できませんでした`);
+  notifyRemoteMutation(notifyReason);
+  return event;
+}
+
 // Load (積込) operations
 export async function startLoad(params: { tripId: string; geo?: Geo; address?: string }) {
-  const events = await getTripEventsCached(params.tripId);
-  const open = findOpenToggleSessionId(events, 'load_start', 'load_end', 'loadSessionId');
-  if (open) throw new Error('積込がすでに開始されています（終了してください）');
-  const loadSessionId = uuid();
-  const e = baseEvent({
-    tripId: params.tripId,
-    type: 'load_start',
-    geo: params.geo,
-    address: params.address,
-    extras: { loadSessionId, reportMinDurationMinutes: REPORT_MIN_DURATION_MINUTES },
-  });
-  await addEvent(e);
-  return { loadSessionId };
+  const { sessionId } = await startBasicToggleOperation(
+    params,
+    BASIC_TOGGLE_GROUPS[2],
+    'event-load_start',
+  );
+  return { loadSessionId: sessionId };
 }
 
 export async function endLoad(params: { tripId: string; geo?: Geo; address?: string }) {
-  const events = await getTripEventsCached(params.tripId);
-  const open = findOpenToggleSessionId(events, 'load_start', 'load_end', 'loadSessionId');
-  if (!open) throw new Error('積込が開始されていません');
-  const e = baseEvent({
-    tripId: params.tripId,
-    type: 'load_end',
-    geo: params.geo,
-    address: params.address,
-    extras: open === '__legacy__' ? undefined : { loadSessionId: open },
-  });
-  await addEvent(e);
+  await endBasicToggleOperation(params, BASIC_TOGGLE_GROUPS[2], 'event-load_end');
 }
 
 // Unload (荷卸) operations
 export async function startUnload(params: { tripId: string; geo?: Geo; address?: string }) {
-  const events = await getTripEventsCached(params.tripId);
-  const open = findOpenToggleSessionId(events, 'unload_start', 'unload_end', 'unloadSessionId');
-  if (open) throw new Error('荷卸がすでに開始されています（終了してください）');
-  const unloadSessionId = uuid();
-  const e = baseEvent({
-    tripId: params.tripId,
-    type: 'unload_start',
-    geo: params.geo,
-    address: params.address,
-    extras: { unloadSessionId, reportMinDurationMinutes: REPORT_MIN_DURATION_MINUTES },
-  });
-  await addEvent(e);
-  return { unloadSessionId };
+  const { sessionId } = await startBasicToggleOperation(
+    params,
+    BASIC_TOGGLE_GROUPS[3],
+    'event-unload_start',
+  );
+  return { unloadSessionId: sessionId };
 }
 
 export async function endUnload(params: { tripId: string; geo?: Geo; address?: string }) {
-  const events = await getTripEventsCached(params.tripId);
-  const open = findOpenToggleSessionId(events, 'unload_start', 'unload_end', 'unloadSessionId');
-  if (!open) throw new Error('荷卸が開始されていません');
-  const e = baseEvent({
-    tripId: params.tripId,
-    type: 'unload_end',
-    geo: params.geo,
-    address: params.address,
-    extras: open === '__legacy__' ? undefined : { unloadSessionId: open },
-  });
-  await addEvent(e);
+  await endBasicToggleOperation(params, BASIC_TOGGLE_GROUPS[3], 'event-unload_end');
 }
 
 // Break (休憩) operations
 export async function startBreak(params: { tripId: string; geo?: Geo; address?: string }) {
-  const events = await getTripEventsCached(params.tripId);
-  const open = findOpenToggleSessionId(events, 'break_start', 'break_end', 'breakSessionId');
-  if (open) throw new Error('休憩がすでに開始されています（終了してください）');
-  const breakSessionId = uuid();
-  const e = baseEvent({
-    tripId: params.tripId,
-    type: 'break_start',
-    geo: params.geo,
-    address: params.address,
-    extras: { breakSessionId, reportMinDurationMinutes: REPORT_MIN_DURATION_MINUTES },
-  });
-  await addEvent(e);
-  return { breakSessionId };
+  const { sessionId } = await startBasicToggleOperation(
+    params,
+    BASIC_TOGGLE_GROUPS[1],
+    'event-break_start',
+  );
+  return { breakSessionId: sessionId };
 }
 
 export async function endBreak(params: { tripId: string; geo?: Geo; address?: string }) {
-  const events = await getTripEventsCached(params.tripId);
-  const open = findOpenToggleSessionId(events, 'break_start', 'break_end', 'breakSessionId');
-  if (!open) throw new Error('休憩が開始されていません');
-  const e = baseEvent({
-    tripId: params.tripId,
-    type: 'break_end',
-    geo: params.geo,
-    address: params.address,
-    extras: open === '__legacy__' ? undefined : { breakSessionId: open },
-  });
-  await addEvent(e);
+  await endBasicToggleOperation(params, BASIC_TOGGLE_GROUPS[1], 'event-break_end');
 }
 
 // Refuel (給油)
@@ -1272,72 +1320,16 @@ export async function addRefuel(params: {
 export async function addBoarding(
   params: { tripId: string; geo?: Geo; address?: string },
 ): Promise<{ ferrySessionId: string; autoRestStarted: boolean }> {
-  const events = await getTripEventsCached(params.tripId);
-  const openBreak = findOpenToggleSessionId(events, 'break_start', 'break_end', 'breakSessionId');
-  const openLoad = findOpenToggleSessionId(events, 'load_start', 'load_end', 'loadSessionId');
-  const openUnload = findOpenToggleSessionId(events, 'unload_start', 'unload_end', 'unloadSessionId');
-  if (openBreak || openLoad || openUnload) {
-    throw new Error('進行中の休憩・積込・荷卸を終了してからフェリー乗船を記録してください');
-  }
-
-  const openRest = findOpenToggleSessionId(events, 'rest_start', 'rest_end', 'restSessionId');
-  const open = findOpenToggleSessionId(events, 'boarding', 'disembark', 'ferrySessionId');
-  if (open) throw new Error('フェリー乗船が開始済みです（下船を押してください）');
-
-  const autoRestStarted = !openRest;
-  const fallbackOdoKm = findLatestOdoCheckpoint(events);
-  if (autoRestStarted && fallbackOdoKm == null) {
-    throw new Error('休息開始に必要なODO基準がありません。運行開始後に記録してください');
-  }
-
-  const ts = nowIso();
-  const ferrySessionId = uuid();
-  await db.transaction('rw', db.events, db.routePoints, async () => {
-    if (autoRestStarted) {
-      const restStart: RestStartEvent = {
-        id: uuid(),
-        tripId: params.tripId,
-        type: 'rest_start',
-        ts,
-        geo: params.geo,
-        address: params.address,
-        syncStatus: 'pending',
-        extras: {
-          restSessionId: uuid(),
-          odoKm: fallbackOdoKm!,
-          reportMinDurationMinutes: REPORT_MIN_DURATION_MINUTES,
-        },
-      };
-      await putEventWithRoutePointTx(restStart);
-    }
-
-    await putEventWithRoutePointTx({
-      id: uuid(),
-      tripId: params.tripId,
-      type: 'boarding',
-      ts,
-      geo: params.geo,
-      address: params.address,
-      syncStatus: 'pending',
-      extras: { ferrySessionId, reportMinDurationMinutes: REPORT_MIN_DURATION_MINUTES },
-    } as AppEvent);
-  });
-  notifyRemoteMutation('ferry-boarding');
-  return { ferrySessionId, autoRestStarted };
+  const { sessionId } = await startBasicToggleOperation(
+    params,
+    BASIC_TOGGLE_GROUPS[4],
+    'ferry-boarding',
+  );
+  return { ferrySessionId: sessionId, autoRestStarted: false };
 }
 
 export async function addDisembark(params: { tripId: string; geo?: Geo; address?: string }) {
-  const events = await getTripEventsCached(params.tripId);
-  const open = findOpenToggleSessionId(events, 'boarding', 'disembark', 'ferrySessionId');
-  if (!open) throw new Error('フェリー乗船が開始されていません');
-  const e = baseEvent({
-    tripId: params.tripId,
-    type: 'disembark',
-    geo: params.geo,
-    address: params.address,
-    extras: open === '__legacy__' ? undefined : { ferrySessionId: open },
-  });
-  await addEvent(e);
+  await endBasicToggleOperation(params, BASIC_TOGGLE_GROUPS[4], 'event-disembark');
 }
 
 // Point mark (地点マーク)
@@ -1381,6 +1373,7 @@ export async function startExpressway(params: {
   await db.transaction('rw', db.events, db.meta, db.routePoints, async () => {
     const events = await db.events.where('tripId').equals(params.tripId).toArray();
     events.sort((a, b) => a.ts.localeCompare(b.ts));
+    assertTripOpen(events);
     const open = findOpenToggleSessionId(events, 'expressway_start', 'expressway_end', 'expresswaySessionId');
     if (open) throw new Error('高速道路が開始済みです（終了を押してください）');
     await putEventWithRoutePointTx(e);
@@ -1402,6 +1395,7 @@ export async function endExpressway(params: {
   await db.transaction('rw', db.events, db.meta, db.routePoints, async () => {
     const events = await db.events.where('tripId').equals(params.tripId).toArray();
     events.sort((a, b) => a.ts.localeCompare(b.ts));
+    assertTripOpen(events);
     const open = findOpenToggleSessionId(events, 'expressway_start', 'expressway_end', 'expresswaySessionId');
     if (!open) throw new Error('高速道路が開始されていません');
     const e = baseEvent({
@@ -2151,6 +2145,9 @@ export async function deleteEvent(eventId: string): Promise<void> {
       eventType: ev.type,
       eventTs: ev.ts,
       deletedAt,
+      remoteRevision: ev.remoteRevision,
+      remoteChangeSeq: ev.remoteChangeSeq,
+      ownerUserId: ev.ownerUserId,
     });
     await db.events.delete(eventId);
     await db.routePoints.delete(getRoutePointAnchorId(eventId));

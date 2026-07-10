@@ -1,9 +1,7 @@
-import { Capacitor, registerPlugin } from '@capacitor/core';
-import type { BackgroundGeolocationPlugin } from '@capacitor-community/background-geolocation';
+import { Capacitor } from '@capacitor/core';
 import { addRoutePoint, pruneRoutePointsForRetention } from '../db/repositories';
 import type { RouteTrackingMode } from '../db/repositories';
-
-const BackgroundGeolocation = registerPlugin<BackgroundGeolocationPlugin>('BackgroundGeolocation');
+import { BackgroundGeolocation } from './backgroundGeolocationPlugin';
 
 let bgWatcherId: string | null = null;
 let webWatchId: number | null = null;

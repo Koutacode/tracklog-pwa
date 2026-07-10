@@ -16,6 +16,15 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci
+      - name: Check Supabase Edge Functions
+        run: >-
+          npx --yes deno check --node-modules-dir=auto --no-lock
+          supabase/functions/tracklog-privileged/index.ts
+          supabase/functions/tracklog-sync/index.ts
+          supabase/functions/tracklog-ic-resolver/index.ts
+          supabase/functions/tracklog-location/index.ts
       - run: npm run typecheck
+      - run: npm run test:logic
+      - run: npm run test:sync
       - run: npm run check:csp
       - run: npm run build

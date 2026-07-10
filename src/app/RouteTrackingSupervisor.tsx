@@ -1,5 +1,8 @@
 import { useEffect } from 'react';
+import { App as CapacitorApp } from '@capacitor/app';
+import { Capacitor } from '@capacitor/core';
 import {
+  addRoutePoint,
   clearPendingExpresswayEndDecision,
   clearPendingExpresswayEndPrompt,
   endExpressway,
@@ -8,29 +11,51 @@ import {
   getPendingExpresswayEndDecision,
   getPendingExpresswayEndPrompt,
   getRouteTrackingMode,
-  updateExpresswayResolved,
 } from '../db/repositories';
 import type { AppEvent } from '../domain/types';
 import {
-  setLocationNotificationText,
   startResidentLocationUpdates,
   startRouteTracking,
   stopResidentLocationUpdates,
   stopRouteTracking,
 } from '../services/routeTracking';
 import { cancelNativeExpresswayEndPrompt } from '../services/nativeExpresswayPrompt';
-import { resolveNearestIC } from '../services/icResolver';
+import { enqueueNotificationExpresswayEndIcResolution } from '../services/expresswayIcResolution';
 import { ROUTE_TRACKING_SYNC_EVENT } from './routeTrackingSignal';
 import { getDriverIdentity } from '../services/remoteAuth';
+import { onDriverAuthStateChange } from '../services/remoteAuth';
 import { checkNativeSetupReadiness } from '../services/nativeSetup';
 import {
   requestLocationHeartbeatNow,
   startLocationHeartbeat,
   stopLocationHeartbeat,
 } from '../services/locationHeartbeat';
-import { loadTracklogRuntimeConfig } from '../services/runtimeConfig';
 import { pollTracklogAdminMessages } from '../services/adminMessages';
 import { ensureTracklogPushRegistration } from '../services/pushRegistration';
+import {
+  acknowledgeNativeResidentLocationPoints,
+  peekNativeResidentLocationPoints,
+  reconcileNativeResidentLocation,
+  restoreNativeResidentLocationSession,
+  stopNativeResidentLocation,
+} from '../services/nativeResidentLocation';
+import {
+  canUseNativeResidentLocation,
+  drainNativeResidentRoutePointQueue,
+} from './nativeResidentLocationPolicy';
+
+function isAndroidNative() {
+  return Capacitor.isNativePlatform() && Capacitor.getPlatform() === 'android';
+}
+
+async function persistNativeResidentLocationQueue() {
+  return drainNativeResidentRoutePointQueue({
+    enabled: isAndroidNative(),
+    peek: peekNativeResidentLocationPoints,
+    acknowledge: acknowledgeNativeResidentLocationPoints,
+    addRoutePoint,
+  });
+}
 
 function hasOpenRest(events: AppEvent[]) {
   const starts = events.filter(e => e.type === 'rest_start').sort((a, b) => a.ts.localeCompare(b.ts));
@@ -75,12 +100,20 @@ export default function RouteTrackingSupervisor() {
   useEffect(() => {
     let disposed = false;
     let inFlight = false;
+    let syncQueued = false;
+    let lifecycleEpoch = 0;
     let foregroundHeartbeatRequestedAt = 0;
+    const native = isAndroidNative();
 
-    const stopAllLocationWork = async () => {
+    const stopAllLocationWork = async (
+      nativeReason: 'manual' | 'permission-denied' | 'approval-rejected' | 'signed-out' = 'manual',
+    ) => {
       stopLocationHeartbeat();
       await stopResidentLocationUpdates();
       await stopRouteTracking();
+      if (native) {
+        await stopNativeResidentLocation({ reason: nativeReason });
+      }
     };
 
     const maybeRequestForegroundHeartbeat = () => {
@@ -92,9 +125,21 @@ export default function RouteTrackingSupervisor() {
     };
 
     const sync = async () => {
-      if (disposed || inFlight) return;
+      if (disposed) return;
+      if (inFlight) {
+        syncQueued = true;
+        return;
+      }
+      const syncEpoch = lifecycleEpoch;
       inFlight = true;
       try {
+        if (native) {
+          try {
+            await restoreNativeResidentLocationSession();
+          } catch (error) {
+            console.warn('[resident-location] session refresh handoff failed', error);
+          }
+        }
         const identity = await getDriverIdentity();
         const approved =
           identity.configured &&
@@ -102,27 +147,44 @@ export default function RouteTrackingSupervisor() {
           identity.profileComplete &&
           identity.approvalStatus === 'approved';
         if (!approved) {
-          await stopAllLocationWork();
+          const reason = !identity.authInitialized ? 'signed-out' : 'approval-rejected';
+          await stopAllLocationWork(reason);
           return;
         }
 
         const readiness = await checkNativeSetupReadiness();
         if (!readiness.ready) {
-          await stopAllLocationWork();
+          await stopAllLocationWork('permission-denied');
           return;
         }
 
-        const runtimeConfig = await loadTracklogRuntimeConfig();
-        setLocationNotificationText(runtimeConfig.locationNotificationText);
+        if (disposed || syncEpoch !== lifecycleEpoch) return;
+
         startLocationHeartbeat();
-        await startResidentLocationUpdates('battery');
+        if (native) {
+          // The app-owned service is the single native route source. Keeping the
+          // legacy watcher active here would record the same movement twice.
+          await stopResidentLocationUpdates();
+          await stopRouteTracking();
+          await persistNativeResidentLocationQueue();
+        } else {
+          await startResidentLocationUpdates('battery');
+        }
         await ensureTracklogPushRegistration();
         maybeRequestForegroundHeartbeat();
         await pollTracklogAdminMessages();
 
         const tripId = await getActiveTripId();
         if (!tripId) {
-          await stopRouteTracking();
+          if (native) {
+            await reconcileNativeResidentLocation({
+              approved: true,
+              setupComplete: true,
+              activeTripId: null,
+            });
+          } else {
+            await stopRouteTracking();
+          }
           const pendingPrompt = await getPendingExpresswayEndPrompt();
           const pendingDecision = await getPendingExpresswayEndDecision();
           if (pendingPrompt) {
@@ -151,17 +213,7 @@ export default function RouteTrackingSupervisor() {
               (pendingPrompt?.tripId === tripId ? pendingPrompt.geo : undefined);
             if (geo) {
               const { eventId } = await endExpressway({ tripId, geo });
-              if (navigator.onLine) {
-                const result = await resolveNearestIC(geo.lat, geo.lng);
-                if (result) {
-                  await updateExpresswayResolved({
-                    eventId,
-                    status: 'resolved',
-                    icName: result.icName,
-                    icDistanceM: result.distanceM,
-                  });
-                }
-              }
+              enqueueNotificationExpresswayEndIcResolution({ eventId, geo });
             }
             await clearPendingExpresswayEndPrompt(tripId);
             await clearPendingExpresswayEndDecision(tripId);
@@ -175,15 +227,44 @@ export default function RouteTrackingSupervisor() {
           await clearPendingExpresswayEndDecision(pendingDecision.tripId);
         }
         if (hasOpenRest(events) || hasOpenFerry(events)) {
-          await stopRouteTracking();
+          if (native) {
+            await reconcileNativeResidentLocation({
+              approved: true,
+              setupComplete: true,
+              activeTripId: null,
+            });
+          } else {
+            await stopRouteTracking();
+          }
           return;
         }
         const mode = await getRouteTrackingMode();
-        await startRouteTracking(tripId, mode);
+        if (native) {
+          if (!canUseNativeResidentLocation({
+            isAndroidNative: native,
+            identity,
+            setupReady: readiness.ready,
+          })) {
+            await stopAllLocationWork('approval-rejected');
+            return;
+          }
+          if (disposed || syncEpoch !== lifecycleEpoch) return;
+          await reconcileNativeResidentLocation({
+            approved: true,
+            setupComplete: true,
+            activeTripId: tripId,
+          });
+        } else {
+          await startRouteTracking(tripId, mode);
+        }
       } catch {
         // retry on next tick
       } finally {
         inFlight = false;
+        if (syncQueued && !disposed) {
+          syncQueued = false;
+          void sync();
+        }
       }
     };
 
@@ -197,6 +278,20 @@ export default function RouteTrackingSupervisor() {
     const onSyncRequest = () => {
       void sync();
     };
+    const unsubscribeAuth = onDriverAuthStateChange(event => {
+      if (event === 'SIGNED_OUT') {
+        lifecycleEpoch += 1;
+        syncQueued = false;
+        void stopAllLocationWork('signed-out');
+        return;
+      }
+      void sync();
+    });
+    const resumeListener = native
+      ? CapacitorApp.addListener('resume', () => {
+          void sync();
+        })
+      : null;
 
     void sync();
     const timer = window.setInterval(() => {
@@ -207,10 +302,18 @@ export default function RouteTrackingSupervisor() {
     window.addEventListener(ROUTE_TRACKING_SYNC_EVENT, onSyncRequest);
     return () => {
       disposed = true;
+      lifecycleEpoch += 1;
       window.clearInterval(timer);
       window.removeEventListener('online', onVisible);
       document.removeEventListener('visibilitychange', onVisible);
       window.removeEventListener(ROUTE_TRACKING_SYNC_EVENT, onSyncRequest);
+      unsubscribeAuth();
+      if (resumeListener) {
+        void resumeListener.then(listener => listener.remove());
+      }
+      stopLocationHeartbeat();
+      void stopResidentLocationUpdates();
+      void stopRouteTracking();
     };
   }, []);
 

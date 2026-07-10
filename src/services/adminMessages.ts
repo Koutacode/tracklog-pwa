@@ -306,10 +306,13 @@ async function showMessageNotification(message: TracklogAdminMessage) {
 }
 
 async function handleAdminMessage(message: TracklogAdminMessage) {
-  if (localSeenMessageIds.has(message.id)) return null;
-  localSeenMessageIds.add(message.id);
+  // Pending messages are returned again until the server receives the ACK.
+  // Skip duplicate UI work, but keep the id in the ACK batch so a failed ACK
+  // can be retried during the same app session.
+  if (localSeenMessageIds.has(message.id)) return message.id;
   rememberAdminMessage(message);
   await showMessageNotification(message);
+  localSeenMessageIds.add(message.id);
   return message.id;
 }
 

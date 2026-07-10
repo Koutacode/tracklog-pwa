@@ -13,7 +13,11 @@ import {
   isFirebaseWebPushConfigured,
 } from './firebasePushConfig';
 import { getDriverIdentity } from './remoteAuth';
-import { registerTracklogPushTokenViaFunction } from './tracklogPrivilegedApi';
+import {
+  getTracklogWebPushConfigViaFunction,
+  registerTracklogPushTokenViaFunction,
+  type TracklogWebPushSubscription,
+} from './tracklogPrivilegedApi';
 
 const PUSH_REGISTER_MIN_INTERVAL_MS = 5 * 60 * 1000;
 const PUSH_TOKEN_REFRESH_INTERVAL_MS = 12 * 60 * 60 * 1000;
@@ -21,11 +25,13 @@ const PUSH_CHANNEL_ID = 'tracklog_admin_messages';
 
 let nativeListenersReady = false;
 let webListenersReady = false;
+let firebaseForegroundListenerReady = false;
 let nativeRegistrationStarted = false;
 let webRegistrationStarted = false;
 let lastEnsureAt = 0;
-let lastRegisteredToken: string | null = null;
+let lastRegisteredValue: string | null = null;
 let lastRegisteredPlatform: 'android' | 'web' | null = null;
+let lastRegisteredProvider: 'fcm' | 'webpush' | null = null;
 let lastRegisteredAt = 0;
 
 function now() {
@@ -59,28 +65,61 @@ async function getApprovedDeviceId() {
   return identity.deviceId;
 }
 
+function recentlyRegistered(
+  value: string,
+  platform: 'android' | 'web',
+  provider: 'fcm' | 'webpush',
+) {
+  const current = now();
+  return (
+    lastRegisteredValue === value &&
+    lastRegisteredPlatform === platform &&
+    lastRegisteredProvider === provider &&
+    current - lastRegisteredAt < PUSH_TOKEN_REFRESH_INTERVAL_MS
+  );
+}
+
+function rememberRegistration(
+  value: string,
+  platform: 'android' | 'web',
+  provider: 'fcm' | 'webpush',
+) {
+  lastRegisteredValue = value;
+  lastRegisteredPlatform = platform;
+  lastRegisteredProvider = provider;
+  lastRegisteredAt = now();
+}
+
 async function savePushToken(token: string, platform: 'android' | 'web') {
   const trimmed = token.trim();
   if (!trimmed) return false;
-  const current = now();
-  if (
-    lastRegisteredToken === trimmed &&
-    lastRegisteredPlatform === platform &&
-    current - lastRegisteredAt < PUSH_TOKEN_REFRESH_INTERVAL_MS
-  ) {
-    return true;
-  }
+  if (recentlyRegistered(trimmed, platform, 'fcm')) return true;
 
   const deviceId = await getApprovedDeviceId();
   if (!deviceId) return false;
   await registerTracklogPushTokenViaFunction({
     deviceId,
     platform,
+    provider: 'fcm',
     token: trimmed,
   });
-  lastRegisteredToken = trimmed;
-  lastRegisteredPlatform = platform;
-  lastRegisteredAt = current;
+  rememberRegistration(trimmed, platform, 'fcm');
+  return true;
+}
+
+async function saveWebPushSubscription(subscription: TracklogWebPushSubscription) {
+  const serialized = JSON.stringify(subscription);
+  if (recentlyRegistered(serialized, 'web', 'webpush')) return true;
+
+  const deviceId = await getApprovedDeviceId();
+  if (!deviceId) return false;
+  await registerTracklogPushTokenViaFunction({
+    deviceId,
+    platform: 'web',
+    provider: 'webpush',
+    subscription,
+  });
+  rememberRegistration(serialized, 'web', 'webpush');
   return true;
 }
 
@@ -168,6 +207,76 @@ async function getWebServiceWorkerRegistration() {
   return registration;
 }
 
+export function decodeVapidPublicKey(value: string) {
+  const key = value.trim();
+  if (!key || !/^[A-Za-z0-9_-]+={0,2}$/.test(key)) {
+    throw new Error('Standard Web Push public key is invalid');
+  }
+  const base64 = key.replace(/-/g, '+').replace(/_/g, '/');
+  const padded = base64 + '='.repeat((4 - (base64.length % 4)) % 4);
+  let binary = '';
+  try {
+    binary = atob(padded);
+  } catch {
+    throw new Error('Standard Web Push public key is invalid');
+  }
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index++) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  if (bytes.length !== 65 || bytes[0] !== 0x04) {
+    throw new Error('Standard Web Push public key is invalid');
+  }
+  return bytes;
+}
+
+export function normalizeWebPushSubscriptionJson(value: unknown): TracklogWebPushSubscription {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('Standard Web Push subscription is invalid');
+  }
+  const raw = value as Record<string, unknown>;
+  const endpoint = typeof raw.endpoint === 'string' ? raw.endpoint.trim() : '';
+  if (!endpoint) throw new Error('Standard Web Push subscription endpoint is missing');
+  try {
+    if (new URL(endpoint).protocol !== 'https:') throw new Error('invalid protocol');
+  } catch {
+    throw new Error('Standard Web Push subscription endpoint is invalid');
+  }
+
+  const rawKeys = raw.keys;
+  if (!rawKeys || typeof rawKeys !== 'object' || Array.isArray(rawKeys)) {
+    throw new Error('Standard Web Push subscription keys are missing');
+  }
+  const keys = rawKeys as Record<string, unknown>;
+  const auth = typeof keys.auth === 'string' ? keys.auth.trim() : '';
+  const p256dh = typeof keys.p256dh === 'string' ? keys.p256dh.trim() : '';
+  if (!auth || !p256dh) throw new Error('Standard Web Push subscription keys are invalid');
+
+  const rawExpirationTime = raw.expirationTime;
+  const expirationTime = rawExpirationTime == null
+    ? null
+    : typeof rawExpirationTime === 'number' && Number.isFinite(rawExpirationTime) && rawExpirationTime >= 0
+      ? rawExpirationTime
+      : null;
+  if (rawExpirationTime != null && expirationTime == null) {
+    throw new Error('Standard Web Push subscription expiration is invalid');
+  }
+
+  return {
+    endpoint,
+    expirationTime,
+    keys: { auth, p256dh },
+  };
+}
+
+function applicationServerKeyMatches(subscription: PushSubscription, expected: Uint8Array) {
+  const current = subscription.options.applicationServerKey;
+  if (!current) return false;
+  const currentBytes = new Uint8Array(current);
+  if (currentBytes.length !== expected.length) return false;
+  return currentBytes.every((byte, index) => byte === expected[index]);
+}
+
 function handleServiceWorkerMessage(event: MessageEvent) {
   const data = event.data;
   if (!data || typeof data !== 'object') return;
@@ -213,35 +322,9 @@ export function initializeTracklogPushOpenHandlers() {
   webListenersReady = true;
 }
 
-async function ensureWebPushListeners() {
+async function tryFirebaseWebPushRegistration(registration: ServiceWorkerRegistration) {
   initializeTracklogPushOpenHandlers();
-
-  const messagingModule = await import('firebase/messaging');
-  const supported = await messagingModule.isSupported().catch(() => false);
-  if (supported) {
-    const appModule = await import('firebase/app');
-    const app = appModule.getApps().find(item => item.name === 'tracklog-push') ??
-      appModule.initializeApp(FIREBASE_PUSH_CONFIG, 'tracklog-push');
-    const messaging = messagingModule.getMessaging(app);
-    messagingModule.onMessage(messaging, () => {
-      void handlePushReceived().catch(error => {
-        console.warn('[pushRegistration] web foreground push handling failed', error);
-      });
-    });
-  }
-}
-
-async function ensureWebPushRegistration() {
   if (!isFirebaseWebPushConfigured()) return false;
-  if (!('Notification' in window)) return false;
-  const permission = Notification.permission === 'granted'
-    ? 'granted'
-    : await Notification.requestPermission();
-  if (permission !== 'granted') return false;
-  const registration = await getWebServiceWorkerRegistration();
-  if (!registration) return false;
-
-  await ensureWebPushListeners();
   const messagingModule = await import('firebase/messaging');
   const supported = await messagingModule.isSupported().catch(() => false);
   if (!supported) return false;
@@ -249,15 +332,63 @@ async function ensureWebPushRegistration() {
   const app = appModule.getApps().find(item => item.name === 'tracklog-push') ??
     appModule.initializeApp(FIREBASE_PUSH_CONFIG, 'tracklog-push');
   const messaging = messagingModule.getMessaging(app);
+  if (!firebaseForegroundListenerReady) {
+    messagingModule.onMessage(messaging, () => {
+      void handlePushReceived().catch(error => {
+        console.warn('[pushRegistration] web foreground push handling failed', error);
+      });
+    });
+    firebaseForegroundListenerReady = true;
+  }
+
   const tokenOptions: { serviceWorkerRegistration: ServiceWorkerRegistration; vapidKey?: string } = {
     serviceWorkerRegistration: registration,
   };
   if (FIREBASE_WEB_VAPID_KEY) tokenOptions.vapidKey = FIREBASE_WEB_VAPID_KEY;
   const token = await messagingModule.getToken(messaging, tokenOptions);
   if (!token) return false;
-  webRegistrationStarted = true;
-  await savePushToken(token, 'web');
-  return true;
+  return savePushToken(token, 'web');
+}
+
+async function tryStandardWebPushRegistration(
+  registration: ServiceWorkerRegistration,
+  deviceId: string,
+) {
+  if (!('PushManager' in window) || !registration.pushManager) return false;
+  const { publicVapidKey } = await getTracklogWebPushConfigViaFunction({ deviceId });
+  const applicationServerKey = decodeVapidPublicKey(publicVapidKey);
+  let subscription = await registration.pushManager.getSubscription();
+  if (subscription && !applicationServerKeyMatches(subscription, applicationServerKey)) {
+    const unsubscribed = await subscription.unsubscribe();
+    if (!unsubscribed) throw new Error('Existing Web Push subscription could not be replaced');
+    subscription = null;
+  }
+  subscription ??= await registration.pushManager.subscribe({
+    userVisibleOnly: true,
+    applicationServerKey,
+  });
+  return saveWebPushSubscription(normalizeWebPushSubscriptionJson(subscription.toJSON()));
+}
+
+async function ensureWebPushRegistration(deviceId: string) {
+  initializeTracklogPushOpenHandlers();
+  if (!('Notification' in window) || Notification.permission !== 'granted') return false;
+  const registration = await getWebServiceWorkerRegistration();
+  if (!registration) return false;
+
+  try {
+    if (await tryFirebaseWebPushRegistration(registration)) {
+      webRegistrationStarted = true;
+      return true;
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Firebase Web Push failed';
+    console.warn('[pushRegistration] Firebase web push unavailable; trying standard Web Push', message);
+  }
+
+  const registered = await tryStandardWebPushRegistration(registration, deviceId);
+  if (registered) webRegistrationStarted = true;
+  return registered;
 }
 
 export async function ensureTracklogPushRegistration(options?: { force?: boolean }) {
@@ -278,7 +409,7 @@ export async function ensureTracklogPushRegistration(options?: { force?: boolean
   }
 
   if (webRegistrationStarted && !options?.force) return;
-  await ensureWebPushRegistration().catch(error => {
+  await ensureWebPushRegistration(deviceId).catch(error => {
     console.warn('[pushRegistration] web push setup failed', error);
   });
 }

@@ -19,14 +19,39 @@ import {
   startExpressway as dbStartExpressway,
   endExpressway as dbEndExpressway,
   backfillMissingAddresses,
-  backfillPendingExpresswayIcs,
-  updateExpresswayResolved,
   clearPendingExpresswayEndDecision,
 } from '../db/repositories';
 import { getGeoWithAddress } from '../services/geo';
-import { resolveNearestIC } from '../services/icResolver';
+import {
+  enqueueExpresswayIcResolution,
+  retryPendingExpresswayIcResolutions,
+} from '../services/expresswayIcResolution';
 import { cancelNativeExpresswayEndPrompt } from '../services/nativeExpresswayPrompt';
-import type { AppEvent, Geo } from '../domain/types';
+import type { AppEvent } from '../domain/types';
+import { requestRouteTrackingSync } from '../app/routeTrackingSignal';
+
+export type TripOperation =
+  | 'trip-start'
+  | 'trip-end'
+  | 'rest-start'
+  | 'rest-end'
+  | 'load-start'
+  | 'load-end'
+  | 'unload-start'
+  | 'unload-end'
+  | 'break-start'
+  | 'break-end'
+  | 'expressway-start'
+  | 'expressway-end'
+  | 'refuel'
+  | 'ferry-boarding'
+  | 'ferry-disembark'
+  | 'point-mark';
+
+function getOperationErrorMessage(error: unknown): string {
+  if (error instanceof Error && error.message.trim()) return error.message;
+  return '操作に失敗しました';
+}
 
 export function useTripManager() {
   const [tripId, setTripId] = useState<string | null>(null);
@@ -34,6 +59,30 @@ export function useTripManager() {
   const [loading, setLoading] = useState(false);
   const [geoStatus, setGeoStatus] = useState<{ lat: number; lng: number; accuracy?: number; at: string; address?: string } | null>(null);
   const [geoError, setGeoError] = useState<string | null>(null);
+  const [activeOperation, setActiveOperation] = useState<TripOperation | null>(null);
+  const [operationError, setOperationError] = useState<string | null>(null);
+  const operationLockRef = useRef(false);
+
+  const runOperation = useCallback(async <T,>(
+    operation: TripOperation,
+    task: () => Promise<T>,
+  ): Promise<T | undefined> => {
+    if (operationLockRef.current) return undefined;
+    operationLockRef.current = true;
+    setActiveOperation(operation);
+    setOperationError(null);
+    try {
+      return await task();
+    } catch (error) {
+      setOperationError(getOperationErrorMessage(error));
+      return undefined;
+    } finally {
+      operationLockRef.current = false;
+      setActiveOperation(null);
+    }
+  }, []);
+
+  const clearOperationError = useCallback(() => setOperationError(null), []);
   
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -73,112 +122,115 @@ export function useTripManager() {
     }
   }, []);
 
-  const resolveExpresswayIcNow = useCallback(async (eventId: string, geo?: Geo) => {
-    if (!navigator.onLine || !geo) return;
-    let result;
-    try {
-      result = await resolveNearestIC(geo.lat, geo.lng);
-    } catch {
-      return;
-    }
-    if (result) {
-      await updateExpresswayResolved({
-        eventId,
-        status: 'resolved',
-        icName: result.icName,
-        icDistanceM: result.distanceM,
-      });
-    }
-  }, []);
-
   // Event handlers
-  const handleStartTrip = async (odoKm: number) => {
-    setLoading(true);
-    try {
+  const handleStartTrip = useCallback(async (odoKm: number) => {
+    return runOperation('trip-start', async () => {
       const { geo, address } = await captureGeoOnce();
       const { tripId: newTripId } = await dbStartTrip({ odoKm, geo, address });
       setTripId(newTripId);
+      requestRouteTrackingSync();
       await refresh();
-    } finally {
-      setLoading(false);
-    }
-  };
+      return newTripId;
+    });
+  }, [captureGeoOnce, refresh, runOperation]);
 
-  const handleEndTrip = async (odoEndKm: number) => {
+  const handleEndTrip = useCallback(async (odoEndKm: number) => {
     if (!tripId) return;
-    setLoading(true);
-    try {
+    return runOperation('trip-end', async () => {
       const { geo, address } = await captureGeoOnce();
       const { event } = await dbEndTrip({ tripId, odoEndKm, geo, address });
+      requestRouteTrackingSync();
       await refresh();
       return event;
-    } finally {
-      setLoading(false);
-    }
-  };
+    });
+  }, [captureGeoOnce, refresh, runOperation, tripId]);
 
-  const handleStartRest = async (odoKm: number) => {
+  const handleStartRest = useCallback(async (odoKm: number) => {
     if (!tripId) return;
-    const { geo, address } = await captureGeoOnce();
-    await dbStartRest({ tripId, odoKm, geo, address });
-    await refresh();
-  };
+    return runOperation('rest-start', async () => {
+      const { geo, address } = await captureGeoOnce();
+      const result = await dbStartRest({ tripId, odoKm, geo, address });
+      requestRouteTrackingSync();
+      await refresh();
+      return result;
+    });
+  }, [captureGeoOnce, refresh, runOperation, tripId]);
 
-  const handleEndRest = async (restSessionId: string) => {
+  const handleEndRest = useCallback(async (restSessionId: string) => {
     if (!tripId) return;
-    const { geo, address } = await captureGeoOnce();
-    await dbEndRest({ tripId, restSessionId, dayClose: false, geo, address });
-    await refresh();
-  };
+    return runOperation('rest-end', async () => {
+      const { geo, address } = await captureGeoOnce();
+      const result = await dbEndRest({ tripId, restSessionId, dayClose: false, geo, address });
+      requestRouteTrackingSync();
+      await refresh();
+      return result;
+    });
+  }, [captureGeoOnce, refresh, runOperation, tripId]);
 
-  const handleToggleEvent = async (type: 'load' | 'unload' | 'break' | 'expressway', action: 'start' | 'end') => {
+  const handleToggleEvent = useCallback(async (
+    type: 'load' | 'unload' | 'break' | 'expressway',
+    action: 'start' | 'end',
+  ) => {
     if (!tripId) return;
-    const { geo, address } = await captureGeoOnce();
-    
-    if (type === 'load') {
-      action === 'start' ? await dbStartLoad({ tripId, geo, address }) : await dbEndLoad({ tripId, geo, address });
-    } else if (type === 'unload') {
-      action === 'start' ? await dbStartUnload({ tripId, geo, address }) : await dbEndUnload({ tripId, geo, address });
-    } else if (type === 'break') {
-      action === 'start' ? await dbStartBreak({ tripId, geo, address }) : await dbEndBreak({ tripId, geo, address });
-    } else if (type === 'expressway') {
-      if (action === 'start') {
-        const { eventId } = await dbStartExpressway({ tripId, geo, address });
-        await resolveExpresswayIcNow(eventId, geo);
-      } else {
-        const { eventId } = await dbEndExpressway({ tripId, geo, address });
-        await resolveExpresswayIcNow(eventId, geo);
+    return runOperation(`${type}-${action}` as TripOperation, async () => {
+      const { geo, address } = await captureGeoOnce();
+
+      if (type === 'load') {
+        action === 'start' ? await dbStartLoad({ tripId, geo, address }) : await dbEndLoad({ tripId, geo, address });
+      } else if (type === 'unload') {
+        action === 'start' ? await dbStartUnload({ tripId, geo, address }) : await dbEndUnload({ tripId, geo, address });
+      } else if (type === 'break') {
+        action === 'start' ? await dbStartBreak({ tripId, geo, address }) : await dbEndBreak({ tripId, geo, address });
+      } else if (type === 'expressway') {
+        if (action === 'start') {
+          const { eventId } = await dbStartExpressway({ tripId, geo, address });
+          enqueueExpresswayIcResolution({ eventId, geo });
+        } else {
+          const { eventId } = await dbEndExpressway({ tripId, geo, address });
+          enqueueExpresswayIcResolution({ eventId, geo });
+        }
+        await cancelNativeExpresswayEndPrompt(tripId);
+        await clearPendingExpresswayEndDecision(tripId);
       }
-      await cancelNativeExpresswayEndPrompt(tripId);
-      await clearPendingExpresswayEndDecision(tripId);
-    }
-    await refresh();
-  };
+      await refresh();
+      return true;
+    });
+  }, [captureGeoOnce, refresh, runOperation, tripId]);
 
-  const handleAddRefuel = async (liters: number) => {
+  const handleAddRefuel = useCallback(async (liters: number) => {
     if (!tripId) return;
-    const { geo, address } = await captureGeoOnce();
-    await dbAddRefuel({ tripId, liters, geo, address });
-    await refresh();
-  };
+    return runOperation('refuel', async () => {
+      const { geo, address } = await captureGeoOnce();
+      await dbAddRefuel({ tripId, liters, geo, address });
+      await refresh();
+      return true;
+    });
+  }, [captureGeoOnce, refresh, runOperation, tripId]);
 
-  const handleAddFerry = async (action: 'boarding' | 'disembark') => {
+  const handleAddFerry = useCallback(async (action: 'boarding' | 'disembark') => {
     if (!tripId) return;
-    const { geo, address } = await captureGeoOnce();
-    if (action === 'boarding') {
-      await dbAddBoarding({ tripId, geo, address });
-    } else {
-      await dbAddDisembark({ tripId, geo, address });
-    }
-    await refresh();
-  };
+    return runOperation(`ferry-${action}`, async () => {
+      const { geo, address } = await captureGeoOnce();
+      if (action === 'boarding') {
+        await dbAddBoarding({ tripId, geo, address });
+      } else {
+        await dbAddDisembark({ tripId, geo, address });
+      }
+      requestRouteTrackingSync();
+      await refresh();
+      return true;
+    });
+  }, [captureGeoOnce, refresh, runOperation, tripId]);
 
-  const handleAddPointMark = async (label: string) => {
+  const handleAddPointMark = useCallback(async (label: string) => {
     if (!tripId) return;
-    const { geo, address } = await captureGeoOnce();
-    await dbAddPointMark({ tripId, geo, address, label });
-    await refresh();
-  };
+    return runOperation('point-mark', async () => {
+      const { geo, address } = await captureGeoOnce();
+      await dbAddPointMark({ tripId, geo, address, label });
+      await refresh();
+      return true;
+    });
+  }, [captureGeoOnce, refresh, runOperation, tripId]);
 
   // Lifecycle
   useEffect(() => {
@@ -192,7 +244,7 @@ export function useTripManager() {
     const runBackfill = () => {
       Promise.all([
         backfillMissingAddresses(12, 1),
-        backfillPendingExpresswayIcs(4),
+        retryPendingExpresswayIcResolutions(4),
       ]).then(results => {
         if (results.some(Boolean)) refresh();
       }).catch(() => {
@@ -210,6 +262,10 @@ export function useTripManager() {
     loading,
     geoStatus,
     geoError,
+    activeOperation,
+    operationInProgress: activeOperation != null,
+    operationError,
+    clearOperationError,
     refresh,
     captureGeoOnce,
     handleStartTrip,

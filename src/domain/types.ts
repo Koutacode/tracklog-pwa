@@ -31,6 +31,14 @@ export type BaseEvent = {
   geo?: Geo;
   address?: string;
   syncStatus: 'pending' | 'synced' | 'error';
+  localUpdatedAt?: string;
+  localRevision?: number;
+  syncMutationId?: string;
+  __remoteSyncApply?: boolean;
+  ownerUserId?: string;
+  originDeviceId?: string;
+  remoteRevision?: number;
+  remoteChangeSeq?: number;
   extras?: Record<string, unknown>;
 };
 
@@ -39,6 +47,14 @@ export type RoutePoint = {
   tripId: string;
   ts: string; // ISO timestamp
   updatedAt?: string; // local-only sync watermark timestamp
+  syncStatus?: 'pending' | 'synced' | 'error';
+  localRevision?: number;
+  syncMutationId?: string;
+  __remoteSyncApply?: boolean;
+  ownerUserId?: string;
+  originDeviceId?: string;
+  remoteRevision?: number;
+  remoteChangeSeq?: number;
   lat: number;
   lng: number;
   accuracy?: number;

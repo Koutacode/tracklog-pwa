@@ -325,6 +325,7 @@ export default function RouteMapScreen() {
   const mapInstanceRef = useRef<L.Map | null>(null);
   const layerGroupRef = useRef<L.LayerGroup | null>(null);
   const fitBoundsRef = useRef<(() => void) | null>(null);
+  const initialFitPendingRef = useRef(true);
 
   const trackedPoints = useMemo(() => points.filter(point => point.source !== 'event'), [points]);
   const recordedSegments = useMemo(() => buildSegments(trackedPoints), [trackedPoints]);
@@ -475,6 +476,7 @@ export default function RouteMapScreen() {
           getEventsByTripId(tripId),
         ]);
         if (cancelled) return;
+        initialFitPendingRef.current = true;
         setPoints(routePointRows);
         setEvents(eventRows);
       } catch (e: any) {
@@ -619,8 +621,11 @@ export default function RouteMapScreen() {
       }
 
       if (bounds.isValid()) {
-        map.fitBounds(bounds, { padding: [40, 40] });
         fitBoundsRef.current = () => map.fitBounds(bounds, { padding: [40, 40] });
+        if (initialFitPendingRef.current) {
+          initialFitPendingRef.current = false;
+          fitBoundsRef.current();
+        }
       } else {
         fitBoundsRef.current = null;
       }
@@ -687,12 +692,14 @@ export default function RouteMapScreen() {
           <button
             className="trip-detail__button trip-detail__button--small"
             onClick={() => setHiddenDates(new Set())}
+            type="button"
           >
             全て表示
           </button>
           <button
             className="trip-detail__button trip-detail__button--small"
             onClick={() => setHiddenDates(new Set(segments.map(seg => seg.dateKey)))}
+            type="button"
           >
             全て非表示
           </button>
@@ -700,12 +707,15 @@ export default function RouteMapScreen() {
             className="trip-detail__button trip-detail__button--small"
             onClick={() => fitBoundsRef.current?.()}
             disabled={segments.length === 0}
+            type="button"
           >
             全体表示
           </button>
           <button
             className="trip-detail__button trip-detail__button--small"
             onClick={() => setUseMapMatching(v => !v)}
+            aria-pressed={useMapMatching}
+            type="button"
           >
             {useMapMatching ? '補正結果を非表示' : '補正結果を表示'}
           </button>
@@ -721,6 +731,7 @@ export default function RouteMapScreen() {
               correctableVisibleSegments.length === 0 ||
               correctableVisibleSegments.every(seg => matchedBySegment[seg.segmentKey])
             }
+            type="button"
           >
             表示中の補助ルートを補正
           </button>
@@ -739,6 +750,8 @@ export default function RouteMapScreen() {
                 key={day.dateKey}
                 type="button"
                 className="trip-detail__button trip-detail__button--small"
+                aria-label={`${day.dateLabel}のルートを${hiddenDates.has(day.dateKey) ? '表示' : '非表示'}にする`}
+                aria-pressed={!hiddenDates.has(day.dateKey)}
                 onClick={() =>
                   setHiddenDates(prev => {
                     const next = new Set(prev);
@@ -796,7 +809,9 @@ export default function RouteMapScreen() {
       </div>
 
       <div
+        aria-label="運行ルート地図"
         ref={mapRef}
+        role="region"
         style={{
           width: '100%',
           height: '65vh',

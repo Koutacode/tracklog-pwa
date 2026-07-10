@@ -4,6 +4,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
+import android.content.pm.Signature;
 import android.net.Uri;
 import android.os.Build;
 import android.provider.Settings;
@@ -21,6 +22,9 @@ import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.security.MessageDigest;
+import java.util.HashSet;
+import java.util.Set;
 
 @CapacitorPlugin(name = "AppUpdate")
 public class AppUpdatePlugin extends Plugin {
@@ -76,25 +80,66 @@ public class AppUpdatePlugin extends Plugin {
     @SuppressWarnings("deprecation")
     private PackageInfo getArchivePackageInfo(File apkFile) {
         PackageManager packageManager = getContext().getPackageManager();
+        long flags = Build.VERSION.SDK_INT >= Build.VERSION_CODES.P
+                ? PackageManager.GET_SIGNING_CERTIFICATES
+                : PackageManager.GET_SIGNATURES;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             return packageManager.getPackageArchiveInfo(
                 apkFile.getAbsolutePath(),
-                PackageManager.PackageInfoFlags.of(0)
+                PackageManager.PackageInfoFlags.of(flags)
             );
         }
-        return packageManager.getPackageArchiveInfo(apkFile.getAbsolutePath(), 0);
+        return packageManager.getPackageArchiveInfo(apkFile.getAbsolutePath(), (int) flags);
     }
 
     @SuppressWarnings("deprecation")
     private PackageInfo getInstalledPackageInfo(String packageName) throws PackageManager.NameNotFoundException {
         PackageManager packageManager = getContext().getPackageManager();
+        long flags = Build.VERSION.SDK_INT >= Build.VERSION_CODES.P
+                ? PackageManager.GET_SIGNING_CERTIFICATES
+                : PackageManager.GET_SIGNATURES;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             return packageManager.getPackageInfo(
                 packageName,
-                PackageManager.PackageInfoFlags.of(0)
+                PackageManager.PackageInfoFlags.of(flags)
             );
         }
-        return packageManager.getPackageInfo(packageName, 0);
+        return packageManager.getPackageInfo(packageName, (int) flags);
+    }
+
+    @SuppressWarnings("deprecation")
+    private Signature[] getPackageSignatures(PackageInfo packageInfo) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && packageInfo.signingInfo != null) {
+            return packageInfo.signingInfo.hasMultipleSigners()
+                    ? packageInfo.signingInfo.getApkContentsSigners()
+                    : packageInfo.signingInfo.getSigningCertificateHistory();
+        }
+        return packageInfo.signatures == null ? new Signature[0] : packageInfo.signatures;
+    }
+
+    private String sha256(Signature signature) throws Exception {
+        byte[] digest = MessageDigest.getInstance("SHA-256").digest(signature.toByteArray());
+        StringBuilder result = new StringBuilder(digest.length * 2);
+        for (byte value : digest) result.append(String.format("%02X", value));
+        return result.toString();
+    }
+
+    private Set<String> signingCertificateDigests(PackageInfo packageInfo) throws Exception {
+        Set<String> result = new HashSet<>();
+        for (Signature signature : getPackageSignatures(packageInfo)) result.add(sha256(signature));
+        return result;
+    }
+
+    private void verifySigningCertificate(PackageInfo installed, PackageInfo downloaded) throws Exception {
+        Set<String> installedDigests = signingCertificateDigests(installed);
+        Set<String> downloadedDigests = signingCertificateDigests(downloaded);
+        if (installedDigests.isEmpty() || downloadedDigests.isEmpty()) {
+            throw new IllegalStateException("APKの署名証明書を確認できませんでした。");
+        }
+        installedDigests.retainAll(downloadedDigests);
+        if (installedDigests.isEmpty()) {
+            throw new IllegalStateException("現在のアプリと署名が異なるAPKです。管理者へ連絡してください。");
+        }
     }
 
     @SuppressWarnings("deprecation")
@@ -117,6 +162,7 @@ public class AppUpdatePlugin extends Plugin {
         }
 
         PackageInfo installed = getInstalledPackageInfo(currentPackageName);
+        verifySigningCertificate(installed, downloaded);
         ApkValidationResult result = new ApkValidationResult();
         result.packageName = downloaded.packageName;
         result.versionName = downloaded.versionName;

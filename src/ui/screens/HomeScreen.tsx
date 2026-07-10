@@ -97,6 +97,36 @@ function getOpenToggleStartTs(events: any[], startType: string, endType: string,
   return null;
 }
 
+function OperationErrorNotice(props: { message: string; onDismiss: () => void }) {
+  return (
+    <div
+      role="alert"
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        gap: 12,
+        padding: '10px 12px',
+        border: '1px solid rgba(248,113,113,0.55)',
+        background: 'rgba(127,29,29,0.3)',
+        color: '#fecaca',
+        fontSize: 13,
+      }}
+    >
+      <span>{props.message}</span>
+      <button
+        type="button"
+        aria-label="エラーを閉じる"
+        title="閉じる"
+        onClick={props.onDismiss}
+        style={{ border: 0, background: 'transparent', color: 'inherit', fontSize: 22, lineHeight: 1 }}
+      >
+        ×
+      </button>
+    </div>
+  );
+}
+
 export default function HomeScreen() {
   const {
     tripId,
@@ -104,6 +134,10 @@ export default function HomeScreen() {
     loading,
     geoStatus,
     geoError,
+    activeOperation,
+    operationInProgress,
+    operationError,
+    clearOperationError,
     refresh,
     captureGeoOnce,
     handleStartTrip,
@@ -140,7 +174,6 @@ export default function HomeScreen() {
   const [voiceResult, setVoiceResult] = useState<string | null>(null);
   const [voiceError, setVoiceError] = useState<string | null>(null);
   const [focusDriving, setFocusDriving] = useState(false);
-  const [expresswayPending, setExpresswayPending] = useState<'start' | 'end' | null>(null);
 
   const apkUrlCopyTimer = useRef<number | null>(null);
   const isNative = Capacitor.isNativePlatform();
@@ -164,12 +197,23 @@ export default function HomeScreen() {
   const restActive = !!openRestSessionId;
   const expresswayActive = !!getOpenToggle(events, 'expressway_start', 'expressway_end', 'expresswaySessionId');
   const ferryActive = !!getOpenToggle(events, 'boarding', 'disembark', 'ferrySessionId');
+  const operationsDisabled = loading || operationInProgress;
+  const expresswayPending = activeOperation === 'expressway-start'
+    ? 'start'
+    : activeOperation === 'expressway-end'
+      ? 'end'
+      : null;
 
   const activeStatuses = useMemo(() => {
     const list: { name: string; startTs: string; type: 'base' | 'expressway' | 'ferry' }[] = [];
 
-    // 1. 基本カテゴリ (運転、休憩、休息、積込、荷卸、待機、業務)
-    if (liveDrive && liveDrive.currentCategory && liveDrive.currentCategory !== 'idle' && liveDrive.currentCategoryStartedAt) {
+    // フェリーは基本状態なので、ほかの基本カテゴリと同時には表示しない。
+    if (ferryActive) {
+      const ts = getOpenToggleStartTs(events, 'boarding', 'disembark', 'ferrySessionId');
+      if (ts) {
+        list.push({ name: 'フェリー乗船', startTs: ts, type: 'base' });
+      }
+    } else if (liveDrive.currentCategory !== 'idle' && liveDrive.currentCategoryStartedAt) {
       list.push({
         name: liveDrive.currentCategoryLabel,
         startTs: liveDrive.currentCategoryStartedAt,
@@ -189,36 +233,19 @@ export default function HomeScreen() {
       }
     }
 
-    // 3. フェリー
-    if (ferryActive) {
-      const ts = getOpenToggleStartTs(events, 'boarding', 'disembark', 'ferrySessionId');
-      if (ts) {
-        list.push({
-          name: 'フェリー乗船',
-          startTs: ts,
-          type: 'ferry',
-        });
-      }
-    }
-
     return list;
   }, [liveDrive, expresswayActive, ferryActive, events]);
 
-  const canStartRest = !ferryActive && !loadActive && !breakActive && !restActive && !unloadActive;
-  const canStartLoad = !ferryActive && !restActive && !breakActive && !loadActive && !unloadActive;
-  const canStartUnload = !ferryActive && !restActive && !breakActive && !unloadActive && !loadActive;
-  const canStartBreak = !ferryActive && !restActive && !loadActive && !breakActive && !unloadActive;
+  const canStartBasicOperation = !ferryActive && !loadActive && !breakActive && !restActive && !unloadActive;
+  const canStartRest = canStartBasicOperation;
+  const canStartLoad = canStartBasicOperation;
+  const canStartUnload = canStartBasicOperation;
+  const canStartBreak = canStartBasicOperation;
+  const canStartFerry = canStartBasicOperation;
 
   const runExpresswayToggle = async (action: 'start' | 'end') => {
-    if (expresswayPending) return;
-    setExpresswayPending(action);
-    try {
-      await handleToggleEvent('expressway', action);
-    } catch (error: any) {
-      alert(error?.message ?? '高速道路操作に失敗しました');
-    } finally {
-      setExpresswayPending(null);
-    }
+    if (operationInProgress) return;
+    return handleToggleEvent('expressway', action);
   };
 
   // Auto-switch focus when driving starts
@@ -237,76 +264,78 @@ export default function HomeScreen() {
     }
     setVoiceListening(true);
     setVoiceError(null);
+    setVoiceResult(null);
     try {
       const matches = await listenVoiceCommandJa();
       if (matches.length === 0) throw new Error('音声を認識できませんでした。');
       setVoiceLastText(matches[0]);
       const parsed = findVoiceCommand(matches);
       if (!parsed) throw new Error(`コマンドを判別できませんでした: ${matches[0]}`);
-      
+
+      let operationSucceeded = true;
       // Execute command using handlers from useTripManager
       switch (parsed.kind) {
         case 'trip_start':
           if (!tripId) {
-            if (parsed.odoKm) await handleStartTrip(parsed.odoKm);
+            if (parsed.odoKm) operationSucceeded = (await handleStartTrip(parsed.odoKm)) != null;
             else setOdoDialog({ kind: 'trip_start' });
           }
           break;
         case 'trip_end':
           if (tripId) {
-            if (parsed.odoKm) await handleEndTrip(parsed.odoKm);
+            if (parsed.odoKm) operationSucceeded = (await handleEndTrip(parsed.odoKm)) != null;
             else setOdoDialog({ kind: 'trip_end' });
           }
           break;
         case 'rest_start':
           if (tripId && canStartRest) {
-            if (parsed.odoKm) await handleStartRest(parsed.odoKm);
+            if (parsed.odoKm) operationSucceeded = (await handleStartRest(parsed.odoKm)) != null;
             else setOdoDialog({ kind: 'rest_start' });
           }
           break;
         case 'rest_end':
           if (tripId && restActive && openRestSessionId) {
-            await handleEndRest(openRestSessionId);
+            operationSucceeded = (await handleEndRest(openRestSessionId)) != null;
           }
           break;
         case 'break_start':
-          if (tripId && canStartBreak) await handleToggleEvent('break', 'start');
+          if (tripId && canStartBreak) operationSucceeded = (await handleToggleEvent('break', 'start')) === true;
           break;
         case 'break_end':
-          if (tripId && breakActive) await handleToggleEvent('break', 'end');
+          if (tripId && breakActive) operationSucceeded = (await handleToggleEvent('break', 'end')) === true;
           break;
         case 'load_start':
-          if (tripId && canStartLoad) await handleToggleEvent('load', 'start');
+          if (tripId && canStartLoad) operationSucceeded = (await handleToggleEvent('load', 'start')) === true;
           break;
         case 'load_end':
-          if (tripId && loadActive) await handleToggleEvent('load', 'end');
+          if (tripId && loadActive) operationSucceeded = (await handleToggleEvent('load', 'end')) === true;
           break;
         case 'unload_start':
-          if (tripId && canStartUnload) await handleToggleEvent('unload', 'start');
+          if (tripId && canStartUnload) operationSucceeded = (await handleToggleEvent('unload', 'start')) === true;
           break;
         case 'unload_end':
-          if (tripId && unloadActive) await handleToggleEvent('unload', 'end');
+          if (tripId && unloadActive) operationSucceeded = (await handleToggleEvent('unload', 'end')) === true;
           break;
         case 'expressway_start':
-          if (tripId && !expresswayActive) await runExpresswayToggle('start');
+          if (tripId && !expresswayActive) operationSucceeded = (await runExpresswayToggle('start')) === true;
           break;
         case 'expressway_end':
-          if (tripId && expresswayActive) await runExpresswayToggle('end');
+          if (tripId && expresswayActive) operationSucceeded = (await runExpresswayToggle('end')) === true;
           break;
         case 'boarding':
-          if (tripId && !ferryActive) await handleAddFerry('boarding');
+          if (tripId && !ferryActive) operationSucceeded = (await handleAddFerry('boarding')) === true;
           break;
         case 'disembark':
-          if (tripId && ferryActive) await handleAddFerry('disembark');
+          if (tripId && ferryActive) operationSucceeded = (await handleAddFerry('disembark')) === true;
           break;
         case 'geo_refresh':
           await captureGeoOnce();
           break;
         case 'point_mark':
-          if (tripId) await handleAddPointMark(parsed.raw);
+          if (tripId) operationSucceeded = (await handleAddPointMark(parsed.raw)) === true;
           break;
       }
-      setVoiceResult(`実行しました: ${parsed.raw}`);
+      if (operationSucceeded) setVoiceResult(`実行しました: ${parsed.raw}`);
     } catch (e: any) {
       setVoiceError(e?.message ?? '音声操作に失敗しました。');
     } finally {
@@ -360,18 +389,21 @@ export default function HomeScreen() {
               <div className="start-hero__eyebrow">出発前チェック</div>
               <div className="start-hero__title">今日の運行を開始</div>
               <div className="start-hero__subtitle">開始ODOを入力して、記録を開始します。</div>
+              {operationError && (
+                <OperationErrorNotice message={operationError} onDismiss={clearOperationError} />
+              )}
               <div className="start-hero__actions">
                 <BigButton
-                  label={loading ? '読み込み中…' : '運行開始'}
+                  label={operationInProgress ? '処理中…' : loading ? '読み込み中…' : '運行開始'}
                   hint="開始ODOを入力して記録開始"
-                  disabled={loading}
+                  disabled={operationsDisabled}
                   onClick={() => setOdoDialog({ kind: 'trip_start' })}
                 />
               </div>
             </div>
           </div>
           <OdoDialog
-            open={odoDialog?.kind === 'trip_start'}
+            open={odoDialog?.kind === 'trip_start' && !operationInProgress}
             title="運行開始"
             description="開始時のオドメーター（km）を入力してください"
             confirmText="運行開始"
@@ -426,6 +458,10 @@ export default function HomeScreen() {
           </div>
         </div>
 
+        {operationError && (
+          <OperationErrorNotice message={operationError} onDismiss={clearOperationError} />
+        )}
+
         {!focusDriving && (
           <div className="home-expressway-quick">
             <BigButton
@@ -433,21 +469,27 @@ export default function HomeScreen() {
               hint={expresswayPending ? '位置情報とIC名を記録しています' : undefined}
               variant="neutral"
               className={expresswayButtonClass}
-              disabled={!!expresswayPending}
+              disabled={operationsDisabled}
               onClick={() => runExpresswayToggle(expresswayAction)}
             />
           </div>
         )}
 
         {focusDriving ? (
-          <DrivingView
-            liveDrive={liveDrive}
-            onVoiceCommand={runVoiceCommand}
-            voiceListening={voiceListening}
-            expresswayActive={expresswayActive}
-            expresswayPending={expresswayPending}
-            onExpresswayToggle={runExpresswayToggle}
-          />
+          <fieldset
+            disabled={operationsDisabled}
+            aria-busy={operationInProgress}
+            style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}
+          >
+            <DrivingView
+              liveDrive={liveDrive}
+              onVoiceCommand={runVoiceCommand}
+              voiceListening={voiceListening}
+              expresswayActive={expresswayActive}
+              expresswayPending={expresswayPending}
+              onExpresswayToggle={runExpresswayToggle}
+            />
+          </fieldset>
         ) : (
           <div className="home-grid">
             <div className="home-primary">
@@ -551,12 +593,13 @@ export default function HomeScreen() {
                 ) : (
                   <div className="home-info-card__meta">位置情報を取得しています...</div>
                 )}
-                <button className="trip-btn" onClick={captureGeoOnce}>更新</button>
+                <button className="trip-btn" disabled={operationsDisabled} onClick={captureGeoOnce}>更新</button>
               </div>
             </div>
 
             <div className="home-action-stack">
               <StoppedView
+                disabled={operationsDisabled}
                 loadActive={loadActive}
                 unloadActive={unloadActive}
                 breakActive={breakActive}
@@ -566,6 +609,7 @@ export default function HomeScreen() {
                 canStartUnload={canStartUnload}
                 canStartBreak={canStartBreak}
                 canStartRest={canStartRest}
+                canStartFerry={canStartFerry}
                 onOdoDialog={kind => setOdoDialog({ kind })}
                 onToggle={handleToggleEvent}
                 onRestEnd={() => openRestSessionId && handleEndRest(openRestSessionId)}
@@ -595,7 +639,7 @@ export default function HomeScreen() {
       </div>
 
       <OdoDialog
-        open={odoDialog?.kind === 'rest_start'}
+        open={odoDialog?.kind === 'rest_start' && !operationInProgress}
         title="休息開始"
         description="休息開始ODO（km）を入力してください"
         confirmText="休息開始"
@@ -606,7 +650,7 @@ export default function HomeScreen() {
         }}
       />
       <OdoDialog
-        open={odoDialog?.kind === 'trip_end'}
+        open={odoDialog?.kind === 'trip_end' && !operationInProgress}
         title="運行終了"
         description="終了ODO（km）を入力してください"
         confirmText="運行終了"
@@ -620,7 +664,7 @@ export default function HomeScreen() {
         }}
       />
       <FuelDialog
-        open={fuelOpen}
+        open={fuelOpen && !operationInProgress}
         onCancel={() => setFuelOpen(false)}
         onConfirm={liters => {
           setFuelOpen(false);

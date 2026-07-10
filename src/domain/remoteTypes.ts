@@ -99,6 +99,9 @@ export type RemoteTripHeader = {
   last_leg_km: number | null;
   status: 'active' | 'closed';
   updated_at: string;
+  owner_user_id?: string;
+  revision?: number;
+  change_seq?: number;
 };
 
 export type RemoteTripEvent = {
@@ -112,6 +115,9 @@ export type RemoteTripEvent = {
   extras: Record<string, unknown> | null;
   sync_status: 'pending' | 'synced' | 'error';
   updated_at: string;
+  owner_user_id?: string;
+  revision?: number;
+  change_seq?: number;
 };
 
 export type RemoteRoutePoint = {
@@ -126,6 +132,9 @@ export type RemoteRoutePoint = {
   heading: number | null;
   source: string | null;
   updated_at: string;
+  owner_user_id?: string;
+  revision?: number;
+  change_seq?: number;
 };
 
 export type RemoteReportSnapshot = {
@@ -135,6 +144,9 @@ export type RemoteReportSnapshot = {
   label: string;
   payload_json: unknown;
   updated_at: string;
+  owner_user_id?: string;
+  revision?: number;
+  change_seq?: number;
 };
 
 export type RemoteDeletedTripTombstone = {
@@ -142,6 +154,10 @@ export type RemoteDeletedTripTombstone = {
   device_id: string;
   deleted_by: string;
   deleted_at: string;
+  updated_at?: string;
+  owner_user_id?: string;
+  revision?: number;
+  change_seq?: number;
 };
 
 export type RemoteDeletedEventTombstone = {
@@ -152,4 +168,19 @@ export type RemoteDeletedEventTombstone = {
   event_ts: string | null;
   deleted_by: string;
   deleted_at: string;
+  updated_at?: string;
+  owner_user_id?: string;
+  revision?: number;
+  change_seq?: number;
+};
+
+export type RemoteDeletedReportTombstone = {
+  trip_id: string;
+  device_id: string;
+  reason?: string;
+  deleted_at: string;
+  updated_at?: string;
+  owner_user_id?: string;
+  revision?: number;
+  change_seq?: number;
 };

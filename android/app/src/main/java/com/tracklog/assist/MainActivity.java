@@ -10,6 +10,7 @@ public class MainActivity extends BridgeActivity {
         registerPlugin(AppUpdatePlugin.class);
         registerPlugin(DeviceIdentityPlugin.class);
         registerPlugin(NativeSetupPlugin.class);
+        registerPlugin(ResidentLocationPlugin.class);
         // Avoid restoring a stale WebView session after APK updates. Restoring
         // prior state can keep an old JS bundle alive and leave the app on a
         // blank screen even when newer assets are bundled in the APK.

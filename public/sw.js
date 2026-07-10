@@ -98,10 +98,9 @@ self.addEventListener('notificationclick', event => {
   if (data.type !== 'TRACKLOG_ADMIN_PUSH_CLICK' || !data.messageId) return;
   const targetUrl = new URL('/messages', self.location.origin);
   targetUrl.searchParams.set('messageId', data.messageId);
+  // This internal marker lets the app fetch the message by id. Keep message
+  // content out of browser history, shared URLs, and referrer data.
   targetUrl.searchParams.set('tracklogPushMessageId', data.messageId);
-  targetUrl.searchParams.set('tracklogRequestLocation', data.requestLocation ? '1' : '0');
-  if (data.body) targetUrl.searchParams.set('tracklogPushBody', data.body);
-  if (data.sentAt) targetUrl.searchParams.set('tracklogPushSentAt', data.sentAt);
 
   event.waitUntil((async () => {
     const clientsList = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
