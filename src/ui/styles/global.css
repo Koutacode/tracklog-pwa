@@ -1218,6 +1218,115 @@ a:hover {
   border: 1px solid rgba(248, 113, 113, 0.35);
 }
 
+.ai-copy-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  display: grid;
+  place-items: center;
+  padding: calc(18px + env(safe-area-inset-top)) 16px calc(18px + env(safe-area-inset-bottom));
+  background: rgba(2, 6, 23, 0.76);
+  backdrop-filter: blur(10px);
+}
+
+.ai-copy-card {
+  width: min(94vw, 480px);
+  max-height: min(86vh, 680px);
+  overflow-y: auto;
+  padding: 20px;
+  border: 1px solid rgba(56, 189, 248, 0.3);
+  border-radius: 20px;
+  background: linear-gradient(180deg, rgba(15, 23, 42, 0.99), rgba(2, 6, 23, 0.99));
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.48);
+  color: #f8fafc;
+}
+
+.ai-copy-card__title {
+  font-size: 22px;
+  font-weight: 900;
+  line-height: 1.25;
+}
+
+.ai-copy-card__status {
+  margin-top: 12px;
+  padding: 11px 12px;
+  border: 1px solid rgba(34, 197, 94, 0.3);
+  border-radius: 12px;
+  background: rgba(22, 101, 52, 0.22);
+  color: #dcfce7;
+  font-size: 14px;
+  font-weight: 800;
+  overflow-wrap: anywhere;
+}
+
+.ai-copy-card__meta {
+  margin-top: 10px;
+  color: rgba(203, 213, 225, 0.9);
+  font-size: 13px;
+}
+
+.ai-copy-card__primary,
+.ai-copy-card__close {
+  width: 100%;
+  justify-content: center;
+  min-height: 52px;
+  margin-top: 14px;
+}
+
+.ai-copy-card__chunk {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid rgba(148, 163, 184, 0.2);
+}
+
+.ai-copy-card__chunk-label {
+  color: rgba(203, 213, 225, 0.88);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.ai-copy-card__chunk-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 8px;
+  font-size: 14px;
+}
+
+.ai-copy-card__chunk-meta span {
+  color: rgba(148, 163, 184, 0.92);
+  white-space: nowrap;
+}
+
+.ai-copy-card__chunk-actions {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr) 48px;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.ai-copy-card__chunk-actions .trip-detail__button {
+  min-width: 0;
+  min-height: 48px;
+  justify-content: center;
+}
+
+.ai-copy-card__chunk-copy {
+  padding-inline: 10px;
+  text-align: center;
+}
+
+@media (max-width: 420px) {
+  .ai-copy-card {
+    padding: 18px 14px;
+  }
+
+  .ai-copy-card__chunk-copy {
+    font-size: 13px;
+  }
+}
+
 .trip-detail__warning {
   background: #7c2d12;
   color: #fff;

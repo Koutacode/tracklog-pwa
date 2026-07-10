@@ -22,7 +22,8 @@ import {
 } from '../../domain/reportLogic';
 import { buildTripViewModel, TripViewModel } from '../../state/selectors';
 import { DAY_MS, getJstDateInfo } from '../../domain/jst';
-import { shareText } from '../../services/nativeShare';
+import { buildAiShareText, splitAiShareText, type AiShareChunk } from '../../services/aiShareText';
+import { copyNativeText } from '../../services/nativeShare';
 import { deleteTripEverywhere } from '../../services/tripDeletion';
 
 function fmtLocal(ts?: string) {
@@ -124,6 +125,13 @@ type NumericEditDef = {
 type IcEditState = {
   id: string;
   value: string;
+};
+
+type AiCopySession = {
+  text: string;
+  chunks: AiShareChunk[];
+  selectedChunkIndex: number;
+  status: string;
 };
 
 const EDITABLE_EVENT_TYPES: EventType[] = [
@@ -453,13 +461,6 @@ function buildAiPayload(tripId: string, vm: TripViewModel, events: AppEvent[]): 
   };
 }
 
-function buildAiShareText(payload: AiSharePayload) {
-  return [
-    '運行履歴データ:',
-    JSON.stringify(payload),
-  ].join('\n');
-}
-
 type TripReviewCheck = {
   key: string;
   label: string;
@@ -537,18 +538,31 @@ function buildTripReviewChecks(vm: TripViewModel, events: AppEvent[]): TripRevie
   checks.push({
     key: 'ai-share',
     label: 'AI確認用データ',
-    detail: 'AI共有は運行データのみを渡します。日報集計ロジックと固定プロンプトは変更していません。',
+    detail: 'AI用データは全文コピーに対応し、長文は分割コピーも利用できます。',
     level: 'ok',
   });
 
   return checks;
 }
 
-async function copyText(text: string) {
+async function copyText(text: string): Promise<number> {
+  if (Capacitor.isNativePlatform()) {
+    try {
+      const copiedLength = await copyNativeText({ label: 'TrackLog AI要約用データ', text });
+      if (copiedLength === text.length) return copiedLength;
+    } catch {
+      // Older native builds may not expose native clipboard support yet.
+    }
+  }
   if (navigator.clipboard?.writeText) {
     try {
-      await navigator.clipboard.writeText(text);
-      return;
+      await Promise.race([
+        navigator.clipboard.writeText(text),
+        new Promise<never>((_, reject) => {
+          window.setTimeout(() => reject(new Error('クリップボード応答待ちがタイムアウトしました')), 1_500);
+        }),
+      ]);
+      return text.length;
     } catch {
       // Android WebView can deny clipboard writes even when the API exists.
       // Fall back to a hidden textarea copy before surfacing an error.
@@ -566,6 +580,7 @@ async function copyText(text: string) {
   if (!ok) {
     throw new Error('コピーに失敗しました');
   }
+  return text.length;
 }
 
 export default function TripDetail() {
@@ -582,6 +597,7 @@ export default function TripDetail() {
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [sharing, setSharing] = useState(false);
+  const [aiCopySession, setAiCopySession] = useState<AiCopySession | null>(null);
   const [reportOpening, setReportOpening] = useState(false);
   const [workingId, setWorkingId] = useState<string | null>(null);
   const [openEditorId, setOpenEditorId] = useState<string | null>(null);
@@ -779,33 +795,41 @@ export default function TripDetail() {
     }
   }
 
-  async function handleShareAi() {
+  async function handleCopyAi() {
     if (!tripId || !vm) return;
     setSharing(true);
     setErr(null);
     try {
       const payload = buildAiPayload(tripId, vm, events);
       const text = buildAiShareText(payload);
-        if (navigator.share) {
-          try {
-            await navigator.share({ title: '運行記録', text });
-            return;
-          } catch (e: any) {
-            if (e?.name === 'AbortError') return;
-          }
-        }
-      if (Capacitor.isNativePlatform()) {
-        try {
-          const opened = await shareText({ title: '運行記録', subject: '運行記録', text });
-          if (opened) return;
-        } catch {
-          // Fall back to clipboard copy below.
-        }
+      const copiedLength = await copyText(text);
+      if (copiedLength !== text.length) {
+        throw new Error('コピー文字数が一致しません');
       }
-      await copyText(text);
-      alert('AI要約用テキストをコピーしました。ChatGPT/Geminiに貼り付けてください。');
-    } catch (e: any) {
-      setErr('AI要約テキストを共有またはコピーできませんでした。共有先アプリを選ぶか、再度お試しください。');
+      setAiCopySession({
+        text,
+        chunks: splitAiShareText(text),
+        selectedChunkIndex: 0,
+        status: `全文 ${text.length.toLocaleString('ja-JP')}文字をコピーしました`,
+      });
+    } catch {
+      setErr('AI要約用データの全文コピーに失敗しました。もう一度お試しください。');
+    } finally {
+      setSharing(false);
+    }
+  }
+
+  async function handleCopyAiText(text: string, status: string) {
+    setSharing(true);
+    setErr(null);
+    try {
+      const copiedLength = await copyText(text);
+      if (copiedLength !== text.length) {
+        throw new Error('コピー文字数が一致しません');
+      }
+      setAiCopySession(current => current ? { ...current, status } : current);
+    } catch {
+      setErr('AI要約用データのコピーに失敗しました。もう一度お試しください。');
     } finally {
       setSharing(false);
     }
@@ -845,6 +869,7 @@ export default function TripDetail() {
   const editingEvents = [...events].sort((a, b) => b.ts.localeCompare(a.ts));
   const reviewChecks = vm ? buildTripReviewChecks(vm, events) : [];
   const distanceDayGroups = vm ? buildDistanceDayGroups(vm) : [];
+  const selectedAiChunk = aiCopySession?.chunks[aiCopySession.selectedChunkIndex] ?? null;
   return (
     <div className="page-shell trip-detail">
       <div className="trip-detail__header">
@@ -857,11 +882,11 @@ export default function TripDetail() {
           <Link to="/history" className="trip-detail__button">運行履歴</Link>
           <Link to={`/trip/${tripId}/route`} className="trip-detail__button">ルート表示</Link>
           <button
-            onClick={handleShareAi}
+            onClick={handleCopyAi}
             disabled={sharing || !vm}
             className="trip-detail__button trip-detail__button--accent"
           >
-            {sharing ? '作成中…' : 'AI要約'}
+            {sharing ? 'コピー中…' : 'AI要約'}
           </button>
           <button
             onClick={handleOpenReport}
@@ -1343,6 +1368,92 @@ export default function TripDetail() {
             </div>
           </div>
         </>
+      )}
+      {aiCopySession && selectedAiChunk && (
+        <div className="ai-copy-modal" onClick={() => setAiCopySession(null)}>
+          <div
+            className="ai-copy-card"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="ai-copy-title"
+            onClick={event => event.stopPropagation()}
+          >
+            <div id="ai-copy-title" className="ai-copy-card__title">AI要約用データ</div>
+            <div className="ai-copy-card__status" aria-live="polite">{aiCopySession.status}</div>
+            <div className="ai-copy-card__meta">
+              全文 {aiCopySession.text.length.toLocaleString('ja-JP')}文字
+            </div>
+            <button
+              type="button"
+              className="trip-detail__button trip-detail__button--accent ai-copy-card__primary"
+              disabled={sharing}
+              onClick={() => handleCopyAiText(
+                aiCopySession.text,
+                `全文 ${aiCopySession.text.length.toLocaleString('ja-JP')}文字をコピーしました`,
+              )}
+            >
+              全文をコピー
+            </button>
+
+            {aiCopySession.chunks.length > 1 && (
+              <div className="ai-copy-card__chunk">
+                <div className="ai-copy-card__chunk-label">貼り付け先で全文が切れる場合</div>
+                <div className="ai-copy-card__chunk-meta">
+                  <strong>分割 {selectedAiChunk.index}/{selectedAiChunk.total}</strong>
+                  <span>{selectedAiChunk.text.length.toLocaleString('ja-JP')}文字</span>
+                </div>
+                <div className="ai-copy-card__chunk-actions">
+                  <button
+                    type="button"
+                    className="trip-detail__button trip-detail__button--small"
+                    title="前の分割へ"
+                    aria-label="前の分割へ"
+                    disabled={sharing || aiCopySession.selectedChunkIndex === 0}
+                    onClick={() => setAiCopySession(current => current ? {
+                      ...current,
+                      selectedChunkIndex: Math.max(0, current.selectedChunkIndex - 1),
+                    } : current)}
+                  >
+                    ←
+                  </button>
+                  <button
+                    type="button"
+                    className="trip-detail__button trip-detail__button--accent ai-copy-card__chunk-copy"
+                    disabled={sharing}
+                    onClick={() => handleCopyAiText(
+                      selectedAiChunk.text,
+                      `分割 ${selectedAiChunk.index}/${selectedAiChunk.total} をコピーしました`,
+                    )}
+                  >
+                    分割 {selectedAiChunk.index}/{selectedAiChunk.total} をコピー
+                  </button>
+                  <button
+                    type="button"
+                    className="trip-detail__button trip-detail__button--small"
+                    title="次の分割へ"
+                    aria-label="次の分割へ"
+                    disabled={sharing || aiCopySession.selectedChunkIndex >= aiCopySession.chunks.length - 1}
+                    onClick={() => setAiCopySession(current => current ? {
+                      ...current,
+                      selectedChunkIndex: Math.min(current.chunks.length - 1, current.selectedChunkIndex + 1),
+                    } : current)}
+                  >
+                    →
+                  </button>
+                </div>
+              </div>
+            )}
+
+            <button
+              type="button"
+              className="trip-detail__button ai-copy-card__close"
+              disabled={sharing}
+              onClick={() => setAiCopySession(null)}
+            >
+              閉じる
+            </button>
+          </div>
+        </div>
       )}
     </div>
   );

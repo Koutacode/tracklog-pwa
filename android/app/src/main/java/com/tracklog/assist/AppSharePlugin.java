@@ -1,5 +1,8 @@
 package com.tracklog.assist;
 
+import android.content.ClipData;
+import android.content.ClipboardManager;
+import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.net.Uri;
@@ -71,6 +74,30 @@ public class AppSharePlugin extends Plugin {
         } catch (Exception ex) {
             call.reject("共有シートを開けませんでした。", ex);
         }
+    }
+
+    @PluginMethod
+    public void copyText(PluginCall call) {
+        String label = call.getString("label");
+        String text = call.getString("text");
+
+        if (text == null || text.trim().isEmpty()) {
+            call.reject("コピーテキストが空です。");
+            return;
+        }
+
+        ClipboardManager clipboard = (ClipboardManager) getContext().getSystemService(Context.CLIPBOARD_SERVICE);
+        if (clipboard == null) {
+            call.reject("クリップボードを利用できません。");
+            return;
+        }
+
+        String clipLabel = label != null && !label.trim().isEmpty() ? label : "TrackLog";
+        clipboard.setPrimaryClip(ClipData.newPlainText(clipLabel, text));
+
+        JSObject result = new JSObject();
+        result.put("copiedLength", text.length());
+        call.resolve(result);
     }
 
     @PluginMethod
