@@ -17,6 +17,11 @@ import {
   normalizeRoutePointHeading,
   normalizeRoutePointSpeed,
 } from '../domain/routePointTelemetry';
+import {
+  isMissingParentReportConflict,
+  shouldConfirmMissingParentReport,
+  type MissingParentCandidate,
+} from '../domain/reportSyncConflict';
 import { withRemoteSyncSignalsSuppressed } from '../app/remoteSyncSignal';
 import { driverSupabase } from './supabase';
 
@@ -118,6 +123,14 @@ function tripHeaderAppliedKey(userId: string, tripId: string) {
 
 function conflictBackupKey(userId: string, entityType: SyncEntity, entityId: string) {
   return `${metaKey('remoteSyncV2ConflictBackup', userId)}:${entityType}:${entityId}`;
+}
+
+function orphanReportBackupKey(userId: string, reportId: string, mutationId: string) {
+  return `${metaKey('remoteSyncV2OrphanReportBackup', userId)}:${reportId}:${mutationId}`;
+}
+
+function missingParentCandidateKey(userId: string, reportId: string) {
+  return `${metaKey('remoteSyncV2MissingParentReport', userId)}:${reportId}`;
 }
 
 function snapshotKey(entityType: SyncEntity, entityId: string) {
@@ -243,6 +256,17 @@ async function getMeta(key: string): Promise<string | null> {
 
 function sanitizeReportPayload(report: Trip): unknown {
   return JSON.parse(JSON.stringify(report, (key, value) => SYNC_METADATA_KEYS.has(key) ? undefined : value));
+}
+
+function parseMissingParentCandidate(value: string | null): MissingParentCandidate | null {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value) as Partial<MissingParentCandidate>;
+    if (typeof parsed.mutationId !== 'string' || typeof parsed.firstSeenAt !== 'string') return null;
+    return { mutationId: parsed.mutationId, firstSeenAt: parsed.firstSeenAt };
+  } catch {
+    return null;
+  }
 }
 
 function eventPayload(event: AppEvent): Record<string, unknown> {
@@ -432,7 +456,6 @@ async function prepareMutations(userId: string): Promise<PreparedBatch> {
   }
   for (const report of pendingReports) {
     if (includedHeaderTrips.has(report.id)) continue;
-    if (!(await knownHeader(report.id))) continue;
     const mutationId = localMutationId(report, 'report', report.id);
     if (!push({
       mutationId,
@@ -704,6 +727,7 @@ async function applySuccessfulAcks(acks: MutationAck[], prepared: PreparedBatch,
           });
           await db.deletedReportTombstones.delete(ack.entityId);
         }
+        await db.meta.delete(missingParentCandidateKey(userId, ack.entityId));
       } else if (ack.entityType === 'eventDelete') {
         const current = await db.deletedEventTombstones.get(ack.entityId);
         if (current && snapshotMatches(current, snapshot)) await db.deletedEventTombstones.update(ack.entityId, { ...remoteMetadata, syncedAt: nowIso() });
@@ -739,6 +763,8 @@ async function applyChanges(
     .map(row => normalizeRemoteDeletedReport(row, userId));
   const deletedReportByTrip = new Map(remoteDeletedReports.map(row => [row.tripId, row]));
   const revisionConflicts = response.acks.filter(isRevisionConflict);
+  const missingParentReportConflicts = response.acks.filter(isMissingParentReportConflict);
+  let deferredMissingParent = false;
 
   await withRemoteSyncSignalsSuppressed(async () => {
     await db.transaction('rw', [
@@ -766,6 +792,46 @@ async function applyChanges(
           });
         }
       };
+
+      for (const ack of missingParentReportConflicts) {
+        const snapshot = prepared.snapshots.get(snapshotKey(ack.entityType, ack.entityId));
+        const local = await db.reportTrips.get(ack.entityId);
+        if (!local || !snapshotMatches(local, snapshot)) continue;
+        const candidateKey = missingParentCandidateKey(userId, local.id);
+        const mutationId = local.syncMutationId ?? ack.mutationId;
+        const candidate = parseMissingParentCandidate((await db.meta.get(candidateKey))?.value ?? null);
+        const nowMs = Date.now();
+        const savedAt = new Date(nowMs).toISOString();
+        if (!shouldConfirmMissingParentReport(candidate, mutationId, nowMs)) {
+          const firstSeenAt = candidate?.mutationId === mutationId
+            && Number.isFinite(Date.parse(candidate.firstSeenAt))
+            ? candidate.firstSeenAt
+            : savedAt;
+          await db.meta.put({
+            key: candidateKey,
+            value: JSON.stringify({ mutationId, firstSeenAt }),
+            updatedAt: savedAt,
+          });
+          deferredMissingParent = true;
+          continue;
+        }
+        await db.meta.put({
+          key: orphanReportBackupKey(userId, local.id, mutationId),
+          value: JSON.stringify({
+            savedAt,
+            reason: 'server_confirmed_missing_trip_header',
+            message: ack.message,
+            snapshot,
+            report: local,
+          }),
+          updatedAt: savedAt,
+        });
+        await db.reportTrips.update(local.id, {
+          __remoteSyncApply: true,
+          syncStatus: 'error',
+        });
+        await db.meta.delete(candidateKey);
+      }
 
       for (const ack of revisionConflicts) {
         const row = ack.currentRow;
@@ -913,6 +979,7 @@ async function applyChanges(
           continue;
         }
         if (ack.entityType === 'report') {
+          await db.meta.delete(missingParentCandidateKey(userId, ack.entityId));
           const local = await db.reportTrips.get(ack.entityId);
           const isTombstone = ack.code === 'report_tombstone_conflict'
             || (!!row && !('payload_json' in row) && 'deleted_at' in row);
@@ -1052,6 +1119,7 @@ async function applyChanges(
         }
         await db.reportTrips.put(remote);
         await db.deletedReportTombstones.delete(remote.id);
+        await db.meta.delete(missingParentCandidateKey(userId, remote.id));
       }
 
       for (const row of response.changes.deletedEvents) {
@@ -1118,6 +1186,7 @@ async function applyChanges(
       await db.meta.put({ key: cursorKey, value: `${response.cursor}`, updatedAt: nowIso() });
     });
   });
+  return { deferredMissingParent };
 }
 
 async function getFunctionErrorMessage(error: unknown) {
@@ -1150,6 +1219,7 @@ export async function performRemoteSyncV2(identity: DriverIdentity): Promise<voi
   const protocolKey = metaKey('remoteSyncProtocolVersion', userId);
   let cursor = finiteInteger(await getMeta(cursorKey));
   let bootstrapping = (await getMeta(protocolKey)) !== '2';
+  let deferredMissingParentInRun = false;
 
   for (let round = 0; round < MAX_SYNC_ROUNDS; round += 1) {
     const prepared = await prepareMutations(userId);
@@ -1158,31 +1228,34 @@ export async function performRemoteSyncV2(identity: DriverIdentity): Promise<voi
         protocolVersion: 2,
         deviceId: identity.deviceId,
         cursor,
-        mutations: bootstrapping ? [] : prepared.mutations,
+        mutations: bootstrapping || deferredMissingParentInRun ? [] : prepared.mutations,
       },
     });
     if (error) throw new Error(await getFunctionErrorMessage(error));
     const response = parseResponse(data);
     await applySuccessfulAcks(response.acks, prepared, userId);
-    await applyChanges(response, prepared, userId, cursorKey);
+    const changeResult = await applyChanges(response, prepared, userId, cursorKey);
+    deferredMissingParentInRun ||= changeResult.deferredMissingParent;
     cursor = Math.max(cursor, response.cursor);
 
     const rejected = response.acks.find(item => item.status === 'rejected');
     if (rejected) throw new Error(rejected.message || 'クラウド同期で変更を保存できませんでした');
-    const hardConflict = response.acks.find(item => item.status === 'conflict' && !isRevisionConflict(item));
+    const hardConflict = response.acks.find(item => item.status === 'conflict'
+      && !isRevisionConflict(item)
+      && !isMissingParentReportConflict(item));
     if (hardConflict) {
       if (hardConflict.code === 'active_trip_conflict' || hardConflict.message === 'Another active trip already exists') {
         throw new Error('同じアカウントの別端末で進行中の運行があります。運行を終了してから再同期してください。');
       }
       throw new Error(hardConflict.message || '別端末の変更と競合したため同期を停止しました');
     }
-
     if (bootstrapping && !response.hasMore) {
       await db.meta.put({ key: protocolKey, value: '2', updatedAt: nowIso() });
       bootstrapping = false;
       continue;
     }
     if (response.hasMore) continue;
+    if (deferredMissingParentInRun) return;
     if (prepared.mutations.length === 0) {
       if (prepared.hasPending) throw new Error('同期前提となる運行情報を確認できません。もう一度同期してください');
       return;

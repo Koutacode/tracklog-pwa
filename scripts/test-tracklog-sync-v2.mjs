@@ -515,6 +515,22 @@ try {
     );
   });
 
+  await check("reports missing_parent for an orphan report without storing it", async () => {
+    const tripId = "orphan-report-trip";
+    const mutationId = nextMutationId();
+    const data = await sync([reportMutation(mutationId, tripId)]);
+    assert.equal(data.acks[0].status, "conflict");
+    assert.equal(data.acks[0].code, "missing_parent");
+    assert.equal(await receiptCount(mutationId), 0);
+    assert.equal(
+      await countRows(
+        "select count(*)::integer as count from public.report_snapshots where trip_id = $1",
+        [tripId],
+      ),
+      0,
+    );
+  });
+
   let firstReportTombstoneSeq;
   let coreEventRevision;
   await check("upserts trip, event, and report and restores from a report tombstone", async () => {
