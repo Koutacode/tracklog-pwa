@@ -241,7 +241,7 @@ export default function HomeScreen() {
   const canStartLoad = canStartBasicOperation;
   const canStartUnload = canStartBasicOperation;
   const canStartBreak = canStartBasicOperation;
-  const canStartFerry = canStartBasicOperation;
+  const canStartFerry = !ferryActive && !loadActive && !breakActive && !unloadActive;
 
   const runExpresswayToggle = async (action: 'start' | 'end') => {
     if (operationInProgress) return;
@@ -323,7 +323,7 @@ export default function HomeScreen() {
           if (tripId && expresswayActive) operationSucceeded = (await runExpresswayToggle('end')) === true;
           break;
         case 'boarding':
-          if (tripId && !ferryActive) operationSucceeded = (await handleAddFerry('boarding')) === true;
+          if (tripId && canStartFerry) operationSucceeded = (await handleAddFerry('boarding')) === true;
           break;
         case 'disembark':
           if (tripId && ferryActive) operationSucceeded = (await handleAddFerry('disembark')) === true;

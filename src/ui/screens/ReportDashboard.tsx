@@ -7,7 +7,10 @@ import {
   computeMonthSummary,
   formatMinutes,
   formatMinutesShort,
+  formatReportMinute,
   formatRoundedJstTime,
+  projectReportTimeline,
+  projectTripReportTimelines,
 } from '../../domain/reportLogic';
 import {
   saveReportTrip,
@@ -389,7 +392,7 @@ function ReportTab({ trip, trips, requestedTripId, onSelectTrip, onRefreshLiveTr
       </div>
 
       {subTab === 'daily' && <DailyView day={day} metrics={metrics} />}
-      {subTab === 'timeline' && <TimelineView day={day} />}
+      {subTab === 'timeline' && <TimelineView day={day} days={trip.days} />}
     </div>
   );
 }
@@ -807,10 +810,10 @@ function NextDayCard({ day }: { day: DayRecord }) {
 // =============================================
 // Sub-view: Timeline
 // =============================================
-function TimelineView({ day }: { day: DayRecord }) {
+function TimelineView({ day, days }: { day: DayRecord; days: DayRecord[] }) {
   const sorted = useMemo(
-    () => [...day.events].sort((a, b) => a.ts.localeCompare(b.ts)),
-    [day.events]
+    () => projectTripReportTimelines(days).get(day.dayIndex)?.events ?? projectReportTimeline(day),
+    [day, days]
   );
 
   const typeLabels: Record<string, string> = {
@@ -871,7 +874,7 @@ function TimelineView({ day }: { day: DayRecord }) {
 
   return (
     <div className="report-timeline">
-      {sorted.map((ev, i) => {
+      {sorted.map(({ event: ev, effectiveMinute }, i) => {
         const color = typeColors[ev.type] ?? '#94a3b8';
         const expresswayDetail = getExpresswayTimelineDetail(ev);
         return (
@@ -881,7 +884,7 @@ function TimelineView({ day }: { day: DayRecord }) {
               {i < sorted.length - 1 && <div className="report-timeline__connector" />}
             </div>
             <div className="report-timeline__content">
-              <div className="report-timeline__time mono">{formatRoundedJstTime(ev.ts)}</div>
+              <div className="report-timeline__time mono">{formatReportMinute(effectiveMinute)}</div>
               <div className="report-timeline__label" style={{ color }}>
                 {typeLabels[ev.type] ?? ev.type}
               </div>

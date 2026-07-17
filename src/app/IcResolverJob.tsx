@@ -1,5 +1,6 @@
 import { useEffect } from 'react';
 import { retryPendingExpresswayIcResolutions } from '../services/expresswayIcResolution';
+import { onDriverAuthStateChange } from '../services/remoteAuth';
 
 /**
  * IcResolverJob periodically checks for expressway events whose IC names have
@@ -13,18 +14,48 @@ import { retryPendingExpresswayIcResolutions } from '../services/expresswayIcRes
 export default function IcResolverJob() {
   useEffect(() => {
     const MAX_EVENTS_PER_TICK = 12;
-    const runOnce = async () => {
-      await retryPendingExpresswayIcResolutions(MAX_EVENTS_PER_TICK);
+    let disposed = false;
+    let running = false;
+    let rerunRequested = false;
+    let forceNextRun = false;
+    const runOnce = async (ignorePendingBackoff = false) => {
+      if (running) {
+        rerunRequested = true;
+        forceNextRun = forceNextRun || ignorePendingBackoff;
+        return;
+      }
+      running = true;
+      let forceCurrentRun = ignorePendingBackoff;
+      try {
+        do {
+          rerunRequested = false;
+          const force = forceCurrentRun || forceNextRun;
+          forceCurrentRun = false;
+          forceNextRun = false;
+          await retryPendingExpresswayIcResolutions(MAX_EVENTS_PER_TICK, {
+            ignorePendingBackoff: force,
+          });
+        } while (rerunRequested && !disposed);
+      } finally {
+        running = false;
+      }
     };
 
     const onOnline = () => {
-      runOnce();
+      void runOnce(true);
     };
     window.addEventListener('online', onOnline);
-    runOnce();
-    const interval = setInterval(runOnce, 60 * 1000);
+    const unsubscribeAuth = onDriverAuthStateChange(event => {
+      if (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED') {
+        void runOnce(true);
+      }
+    });
+    void runOnce();
+    const interval = setInterval(() => void runOnce(), 60 * 1000);
     return () => {
+      disposed = true;
       window.removeEventListener('online', onOnline);
+      unsubscribeAuth();
       clearInterval(interval);
     };
   }, []);

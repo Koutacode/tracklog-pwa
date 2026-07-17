@@ -1,5 +1,5 @@
 import { Capacitor } from '@capacitor/core';
-import type { AuthChangeEvent } from '@supabase/supabase-js';
+import type { AuthChangeEvent, Session } from '@supabase/supabase-js';
 import { APP_VERSION } from '../app/version';
 import { requestImmediateRemoteSync } from '../app/remoteSyncSignal';
 import { db } from '../db/db';
@@ -132,6 +132,78 @@ export function isDriverProfileComplete(input: {
   return validateDriverProfile({ displayName, vehicleLabel, email, phone }).valid;
 }
 
+export function isPermanentDriverAuthFailure(error: unknown): boolean {
+  const record = error && typeof error === 'object' ? error as Record<string, unknown> : null;
+  const code = (
+    typeof record?.code === 'string'
+      ? record.code
+      : typeof record?.error_code === 'string'
+        ? record.error_code
+        : ''
+  ).trim().toLowerCase();
+  if (
+    code === 'refresh_token_already_used'
+    || code === 'refresh_token_not_found'
+    || code === 'session_not_found'
+    || code === 'user_not_found'
+  ) {
+    return true;
+  }
+  const text = error instanceof Error ? error.message.trim().toLowerCase() : '';
+  if (!text) return false;
+  return text.includes('refresh_token_not_found')
+    || text.includes('refresh token not found')
+    || text.includes('refresh_token_already_used')
+    || text.includes('refresh token already used')
+    || text.includes('invalid refresh token: already used')
+    || text.includes('invalid refresh token')
+    || text.includes('session not found')
+    || text.includes('user not found');
+}
+
+export function deriveDriverIdentityFromPersistence(input: {
+  configured: boolean;
+  deviceId: string;
+  displayName?: string | null;
+  vehicleLabel?: string | null;
+  driverPhone?: string | null;
+  driverEmail?: string | null;
+  remoteAuthInitialized?: string | null;
+  approvalStatus?: string | null;
+  sessionEmail?: string | null;
+  sessionPhone?: string | null;
+  allowPersistedAuth?: boolean;
+}): DriverIdentity {
+  const displayName = normalizeText(input.displayName);
+  const vehicleLabel = normalizeText(input.vehicleLabel);
+  const phone = normalizeText(input.driverPhone) || normalizeText(input.sessionPhone);
+  const sessionEmail = normalizeText(input.sessionEmail);
+  const savedEmail = normalizeText(input.driverEmail);
+  const email = sessionEmail || savedEmail || null;
+  const authInitialized = !!sessionEmail
+    || (input.allowPersistedAuth === true && input.remoteAuthInitialized === 'true');
+
+  return {
+    configured: input.configured,
+    deviceId: input.deviceId,
+    displayName,
+    vehicleLabel,
+    phone,
+    email,
+    authInitialized,
+    approvalStatus: authInitialized
+      ? normalizeApprovalStatus(input.approvalStatus)
+      : 'unregistered',
+    profileComplete: isDriverProfileComplete({
+      displayName,
+      vehicleLabel,
+      email,
+      phone,
+      requireContactInfo: input.configured,
+    }),
+  };
+}
+
 function isLegacyAnonymousDeviceId(deviceId?: string | null) {
   return !!deviceId?.match(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
 }
@@ -187,43 +259,63 @@ async function getCurrentCloudProfile(userId: string): Promise<DriverProfileSeed
   };
 }
 
-export async function getDriverIdentity(): Promise<DriverIdentity> {
-  const { stableDeviceKey } = await getStableDeviceKey();
-  const [displayName, vehicleLabel, driverPhone, localEmail, localApprovalStatus] = await Promise.all([
+async function getPersistedDriverIdentity(
+  stableDeviceKey: string,
+  sessionProfile?: { email?: string | null; phone?: string | null } | null,
+  options?: { allowPersistedAuth?: boolean },
+): Promise<DriverIdentity> {
+  const [
+    displayName,
+    vehicleLabel,
+    driverPhone,
+    localEmail,
+    remoteAuthInitialized,
+    localApprovalStatus,
+  ] = await Promise.all([
     getMeta(META_DEVICE_DISPLAY_NAME),
     getMeta(META_DEVICE_VEHICLE_LABEL),
     getMeta(META_DRIVER_PHONE),
     getMeta(META_DRIVER_EMAIL),
+    getMeta(META_REMOTE_AUTH_INITIALIZED),
     getMeta(META_DRIVER_APPROVAL_STATUS),
   ]);
 
-  const profile = await getProfileIdentity();
-  const finalPhone = normalizeText(driverPhone) || normalizeText(profile?.phone);
-  const email = normalizeText(profile?.email) || normalizeText(localEmail) || null;
-
-  return {
+  return deriveDriverIdentityFromPersistence({
     configured: SUPABASE_CONFIGURED,
     deviceId: stableDeviceKey,
-    displayName: normalizeText(displayName),
-    vehicleLabel: normalizeText(vehicleLabel),
-    phone: finalPhone,
-    email,
-    authInitialized: !!profile?.email,
-    approvalStatus: profile?.email ? normalizeApprovalStatus(localApprovalStatus) : 'unregistered',
-    profileComplete: isDriverProfileComplete({
-      displayName,
-      vehicleLabel,
-      email,
-      phone: finalPhone,
-      requireContactInfo: SUPABASE_CONFIGURED,
-    }),
-  };
+    displayName,
+    vehicleLabel,
+    driverPhone,
+    driverEmail: localEmail,
+    remoteAuthInitialized,
+    approvalStatus: localApprovalStatus,
+    sessionEmail: sessionProfile?.email,
+    sessionPhone: sessionProfile?.phone,
+    allowPersistedAuth: options?.allowPersistedAuth,
+  });
+}
+
+export async function getDriverIdentity(): Promise<DriverIdentity> {
+  const { stableDeviceKey } = await getStableDeviceKey();
+  try {
+    const profile = await getProfileIdentity();
+    return getPersistedDriverIdentity(stableDeviceKey, profile, {
+      allowPersistedAuth: false,
+    });
+  } catch (error) {
+    // Persisted registration and approval remain available while Auth is temporarily unreachable.
+    return getPersistedDriverIdentity(stableDeviceKey, null, {
+      allowPersistedAuth: !isPermanentDriverAuthFailure(error),
+    });
+  }
 }
 
 async function getProfileIdentity() {
   if (!SUPABASE_CONFIGURED || !driverSupabase) return null;
   await restoreNativeResidentLocationSession();
-  const session = (await driverSupabase.auth.getSession()).data.session;
+  const { data, error } = await driverSupabase.auth.getSession();
+  if (error) throw error;
+  const session = data.session;
   if (!session?.user) return null;
   return {
     email: normalizeText(session.user.email),
@@ -236,39 +328,30 @@ export async function initializeDriverIdentity(): Promise<DriverIdentity> {
     return getDriverIdentity();
   }
 
-  await restoreNativeResidentLocationSession();
-  const session = (await driverSupabase.auth.getSession()).data.session;
   const { stableDeviceKey } = await getStableDeviceKey();
+  const persistedIdentity = await getPersistedDriverIdentity(stableDeviceKey, null, {
+    allowPersistedAuth: true,
+  });
+  let session: Session | null;
+  try {
+    await restoreNativeResidentLocationSession();
+    const { data, error } = await driverSupabase.auth.getSession();
+    if (error) throw error;
+    session = data.session;
+  } catch (error) {
+    if (isPermanentDriverAuthFailure(error)) {
+      return getPersistedDriverIdentity(stableDeviceKey, null, {
+        allowPersistedAuth: false,
+      });
+    }
+    return persistedIdentity;
+  }
 
   if (!session) {
-    const [savedDisplayName, savedVehicleLabel, localPhone, localEmail] = await Promise.all([
-      getMeta(META_DEVICE_DISPLAY_NAME),
-      getMeta(META_DEVICE_VEHICLE_LABEL),
-      getMeta(META_DRIVER_PHONE),
-      getMeta(META_DRIVER_EMAIL),
-      setMeta(META_DEVICE_ID, stableDeviceKey),
-    ]);
-    const displayName = normalizeText(savedDisplayName);
-    const vehicleLabel = normalizeText(savedVehicleLabel);
-    const phone = normalizeText(localPhone);
-    const email = normalizeEmail(localEmail);
-    return {
-      configured: true,
-      deviceId: stableDeviceKey,
-      displayName,
-      vehicleLabel,
-      phone,
-      email,
-      authInitialized: false,
-      profileComplete: isDriverProfileComplete({
-        displayName,
-        vehicleLabel,
-        email,
-        phone,
-        requireContactInfo: true,
-      }),
-      approvalStatus: 'unregistered',
-    };
+    await setMeta(META_DEVICE_ID, stableDeviceKey);
+    return getPersistedDriverIdentity(stableDeviceKey, null, {
+      allowPersistedAuth: false,
+    });
   }
 
   const user = session.user;
@@ -654,7 +737,7 @@ export async function getAdminGoogleSignInUrl(redirectTo?: string): Promise<stri
 
 export async function signOutAdmin(): Promise<void> {
   if (!adminSupabase) return;
-  const { error } = await adminSupabase.auth.signOut();
+  const { error } = await adminSupabase.auth.signOut({ scope: 'local' });
   if (error) throw error;
 }
 

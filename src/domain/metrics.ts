@@ -1,8 +1,103 @@
-import type { RestStartEvent, Segment, DayRun } from './types';
+import type { AppEvent, RestStartEvent, Segment, DayRun } from './types';
 import { DAY_MS, getJstDateInfo } from './jst';
+
+export const BREAK_TO_REST_THRESHOLD_MS = 3 * 60 * 60 * 1000;
+export const AUTO_REST_REASON_BREAK_THRESHOLD = 'break_3h_threshold';
+
+export type RestStartOdoCheckpoint = RestStartEvent & {
+  extras: RestStartEvent['extras'] & { odoKm: number };
+};
+
+export type BreakToRestTransition = {
+  thresholdTs: string;
+  breakEnd: AppEvent;
+  restStart: RestStartEvent;
+};
 
 function sortByTs<T extends { ts: string }>(arr: T[]): T[] {
   return [...arr].sort((a, b) => a.ts.localeCompare(b.ts));
+}
+
+export function isRestStartOdoCheckpoint(event: RestStartEvent): event is RestStartOdoCheckpoint {
+  return Number.isFinite(event.extras.odoKm);
+}
+
+function isBreakClosed(start: AppEvent, ends: AppEvent[]): boolean {
+  const breakSessionId = (start.extras as Record<string, unknown> | undefined)?.breakSessionId;
+  if (typeof breakSessionId === 'string' && breakSessionId) {
+    return ends.some(end => end.extras?.breakSessionId === breakSessionId);
+  }
+  return ends.some(end => end.ts >= start.ts);
+}
+
+function findOpenBreakStart(events: readonly AppEvent[]): AppEvent | null {
+  const breakEnds = events.filter(event => event.type === 'break_end');
+  const breakStarts = events
+    .filter(event => event.type === 'break_start')
+    .sort((a, b) => a.ts.localeCompare(b.ts) || a.id.localeCompare(b.id));
+  return [...breakStarts].reverse().find(start => !isBreakClosed(start, breakEnds)) ?? null;
+}
+
+export function getOpenBreakToRestThresholdTs(events: readonly AppEvent[]): string | null {
+  if (events.some(event => event.type === 'trip_end')) return null;
+  const breakStart = findOpenBreakStart(events);
+  if (!breakStart) return null;
+  const breakStartMs = Date.parse(breakStart.ts);
+  if (!Number.isFinite(breakStartMs)) return null;
+  return new Date(breakStartMs + BREAK_TO_REST_THRESHOLD_MS).toISOString();
+}
+
+/**
+ * Build the deterministic event pair that turns an open three-hour break into rest.
+ * Persistence is intentionally left to the repository so both events can be committed atomically.
+ */
+export function buildBreakToRestTransition(
+  events: readonly AppEvent[],
+  evaluatedAt: string,
+): BreakToRestTransition | null {
+  const evaluatedAtMs = Date.parse(evaluatedAt);
+  if (!Number.isFinite(evaluatedAtMs) || events.some(event => event.type === 'trip_end')) {
+    return null;
+  }
+
+  const breakStart = findOpenBreakStart(events);
+  if (!breakStart) return null;
+
+  const thresholdTs = getOpenBreakToRestThresholdTs(events);
+  if (!thresholdTs) return null;
+  const thresholdMs = Date.parse(thresholdTs);
+  if (evaluatedAtMs < thresholdMs) return null;
+
+  const idBase = `auto-break-rest-${breakStart.id}`;
+  const breakSessionId = breakStart.extras?.breakSessionId;
+  const generatedExtras = {
+    autoReason: AUTO_REST_REASON_BREAK_THRESHOLD,
+    generatedFrom: breakStart.id,
+  };
+  const breakEnd: AppEvent = {
+    id: `${idBase}-0-break-end`,
+    tripId: breakStart.tripId,
+    type: 'break_end',
+    ts: thresholdTs,
+    syncStatus: 'pending',
+    extras: {
+      ...(typeof breakSessionId === 'string' && breakSessionId ? { breakSessionId } : {}),
+      ...generatedExtras,
+    },
+  };
+  const restStart: RestStartEvent = {
+    id: `${idBase}-1-rest-start`,
+    tripId: breakStart.tripId,
+    type: 'rest_start',
+    ts: thresholdTs,
+    syncStatus: 'pending',
+    extras: {
+      restSessionId: `${idBase}-rest-session`,
+      ...generatedExtras,
+    },
+  };
+
+  return { thresholdTs, breakEnd, restStart };
 }
 
 /**
@@ -15,7 +110,7 @@ export function computeSegments(params: {
   restStarts: RestStartEvent[];
   tripEnd?: { odoEnd: number; tripEndTs: string };
 }): Segment[] {
-  const rs = sortByTs(params.restStarts);
+  const rs = sortByTs(params.restStarts.filter(isRestStartOdoCheckpoint));
   const points: Array<{
     label: string;
     odo: number;

@@ -8,7 +8,12 @@ import type {
   DayRun,
   TimelineItem,
 } from '../domain/types';
-import { computeSegments, computeDayRuns, computeTotals } from '../domain/metrics';
+import {
+  computeSegments,
+  computeDayRuns,
+  computeTotals,
+  isRestStartOdoCheckpoint,
+} from '../domain/metrics';
 import { DAY_MS, getJstDateInfo } from '../domain/jst';
 
 export type TripViewModel = {
@@ -46,6 +51,7 @@ export function buildTripViewModel(tripId: string, events: AppEvent[]): TripView
   }
   const tripEnd = [...sorted].reverse().find(e => e.type === 'trip_end') as TripEndEvent | undefined;
   const restStarts = sorted.filter(e => e.type === 'rest_start') as RestStartEvent[];
+  const odoRestStarts = restStarts.filter(isRestStartOdoCheckpoint);
   const restEnds = sorted.filter(e => e.type === 'rest_end') as RestEndEvent[];
   const odoStart = tripStart.extras.odoKm;
   const odoEnd = tripEnd?.extras.odoKm;
@@ -61,7 +67,7 @@ export function buildTripViewModel(tripId: string, events: AppEvent[]): TripView
   const segments = computeSegments({
     odoStart,
     tripStartTs: tripStart.ts,
-    restStarts,
+    restStarts: odoRestStarts,
     tripEnd: odoEnd != null ? { odoEnd, tripEndTs: tripEnd!.ts } : undefined,
   });
   segments.forEach(seg => {
@@ -73,14 +79,15 @@ export function buildTripViewModel(tripId: string, events: AppEvent[]): TripView
   const dayRuns = computeDayRuns({
     odoStart,
     tripStartTs: tripStart.ts,
-    restStarts,
+    restStarts: odoRestStarts,
     tripEnd: odoEnd != null ? { odoEnd, tripEndTs: tripEnd!.ts } : undefined,
   });
   // Totals and last leg
   let totalKm: number | undefined;
   let lastLegKm: number | undefined;
   if (odoEnd != null) {
-    const lastRestStartOdo = restStarts.length > 0 ? restStarts.sort((a, b) => a.ts.localeCompare(b.ts))[restStarts.length - 1].extras.odoKm : undefined;
+    const sortedOdoRestStarts = [...odoRestStarts].sort((a, b) => a.ts.localeCompare(b.ts));
+    const lastRestStartOdo = sortedOdoRestStarts[sortedOdoRestStarts.length - 1]?.extras.odoKm;
     const totals = computeTotals({ odoStart, odoEnd, lastRestStartOdo });
     totalKm = totals.totalKm;
     lastLegKm = totals.lastLegKm;

@@ -1,3 +1,4 @@
+import type { Session } from '@supabase/supabase-js';
 import { getStableDeviceKey } from './deviceIdentity';
 import { driverSupabase, SUPABASE_CONFIGURED } from './supabase';
 
@@ -26,6 +27,24 @@ const EDGE_FUNCTION_NAME = 'tracklog-ic-resolver';
 const DEFAULT_RADIUS_M = 8000;
 const MIN_RADIUS_M = 250;
 const MAX_RADIUS_M = 12000;
+const SESSION_REFRESH_MARGIN_MS = 60_000;
+let sessionRefreshInFlight: Promise<Session> | null = null;
+
+class IcResolverError extends Error {
+  readonly retryable: boolean;
+  readonly status: number | null;
+
+  constructor(message: string, retryable: boolean, status: number | null = null) {
+    super(message);
+    this.name = 'IcResolverError';
+    this.retryable = retryable;
+    this.status = status;
+  }
+}
+
+export function isRetryableIcResolverError(error: unknown): boolean {
+  return error instanceof IcResolverError && error.retryable;
+}
 
 function unresolvedSignal(): ExpresswaySignal {
   return {
@@ -85,18 +104,99 @@ function parseSignal(value: unknown): ExpresswaySignal {
   };
 }
 
-async function getFunctionErrorMessage(error: unknown) {
+async function getFunctionErrorDetails(error: unknown): Promise<{
+  message: string;
+  status: number | null;
+}> {
   const fallback = error instanceof Error && error.message
     ? error.message
     : 'IC解決サーバーへの接続に失敗しました';
   const context = (error as { context?: unknown } | null)?.context;
-  if (!(context instanceof Response)) return fallback;
+  if (typeof Response === 'undefined' || !(context instanceof Response)) {
+    return { message: fallback, status: null };
+  }
   try {
     const body = await context.clone().json() as { error?: unknown };
-    return typeof body?.error === 'string' && body.error.trim() ? body.error.trim() : fallback;
+    return {
+      message: typeof body?.error === 'string' && body.error.trim() ? body.error.trim() : fallback,
+      status: context.status,
+    };
   } catch {
-    return fallback;
+    return { message: fallback, status: context.status };
   }
+}
+
+function isRetryableHttpStatus(status: number | null) {
+  if (status == null) return true;
+  return status === 401 || status === 408 || status === 425 || status === 429 || status >= 500;
+}
+
+function authErrorMessage(error: unknown, fallback: string) {
+  return error instanceof Error && error.message.trim() ? error.message.trim() : fallback;
+}
+
+async function refreshResolverSession(current: Session): Promise<Session> {
+  if (!driverSupabase) throw new IcResolverError('Supabase が未設定です', true);
+  if (sessionRefreshInFlight) return sessionRefreshInFlight;
+
+  sessionRefreshInFlight = (async () => {
+    try {
+      const { data, error } = await driverSupabase.auth.refreshSession({
+        refresh_token: current.refresh_token,
+      });
+      if (error) {
+        throw new IcResolverError(authErrorMessage(error, 'ログイン状態を更新できませんでした'), true);
+      }
+      if (!data.session?.access_token) {
+        throw new IcResolverError('ログイン状態を更新できませんでした', true);
+      }
+      return data.session;
+    } catch (error) {
+      if (error instanceof IcResolverError) throw error;
+      throw new IcResolverError(authErrorMessage(error, 'ログイン状態を更新できませんでした'), true);
+    }
+  })();
+
+  try {
+    return await sessionRefreshInFlight;
+  } finally {
+    sessionRefreshInFlight = null;
+  }
+}
+
+async function getResolverSession(): Promise<Session> {
+  if (!driverSupabase) throw new IcResolverError('Supabase が未設定です', true);
+  let result;
+  try {
+    result = await driverSupabase.auth.getSession();
+  } catch (error) {
+    throw new IcResolverError(authErrorMessage(error, 'ログイン状態を確認できませんでした'), true);
+  }
+  const { data, error } = result;
+  if (error) {
+    throw new IcResolverError(authErrorMessage(error, 'ログイン状態を確認できませんでした'), true);
+  }
+  const session = data.session;
+  if (!session?.access_token) throw new IcResolverError('ログインが必要です', true);
+  const expiresAtMs = (session.expires_at ?? 0) * 1000;
+  if (expiresAtMs <= Date.now() + SESSION_REFRESH_MARGIN_MS) {
+    return refreshResolverSession(session);
+  }
+  return session;
+}
+
+async function invokeWithSession(
+  session: Session,
+  body: { deviceId: string; lat: number; lon: number; radiusM: number },
+) {
+  if (!driverSupabase) throw new IcResolverError('Supabase が未設定です', true);
+  return driverSupabase.functions.invoke<FunctionResponse<EdgeExpresswaySignal>>(
+    EDGE_FUNCTION_NAME,
+    {
+      body,
+      headers: { Authorization: `Bearer ${session.access_token}` },
+    },
+  );
 }
 
 async function invokeIcResolver(lat: number, lon: number, radiusM: number): Promise<ExpresswaySignal> {
@@ -104,26 +204,38 @@ async function invokeIcResolver(lat: number, lon: number, radiusM: number): Prom
     throw new Error('Supabase が未設定のためIC名を取得できません');
   }
 
-  const { data: sessionData, error: sessionError } = await driverSupabase.auth.getSession();
-  if (sessionError) throw sessionError;
-  if (!sessionData.session?.access_token) {
-    throw new Error('ログインが必要です');
+  let session = await getResolverSession();
+  const { stableDeviceKey } = await getStableDeviceKey();
+  const body = {
+    deviceId: stableDeviceKey,
+    lat,
+    lon,
+    radiusM,
+  };
+
+  let response;
+  try {
+    response = await invokeWithSession(session, body);
+  } catch (error) {
+    throw new IcResolverError(authErrorMessage(error, 'IC解決サーバーへの接続に失敗しました'), true);
   }
 
-  const { stableDeviceKey } = await getStableDeviceKey();
-  const { data, error } = await driverSupabase.functions.invoke<FunctionResponse<EdgeExpresswaySignal>>(
-    EDGE_FUNCTION_NAME,
-    {
-      body: {
-        deviceId: stableDeviceKey,
-        lat,
-        lon,
-        radiusM,
-      },
-    },
-  );
+  if (response.error) {
+    const firstError = await getFunctionErrorDetails(response.error);
+    if (firstError.status === 401) {
+      session = await refreshResolverSession(session);
+      try {
+        response = await invokeWithSession(session, body);
+      } catch (error) {
+        throw new IcResolverError(authErrorMessage(error, 'IC解決サーバーへの接続に失敗しました'), true);
+      }
+    }
+  }
+
+  const { data, error } = response;
   if (error) {
-    throw new Error(await getFunctionErrorMessage(error));
+    const details = await getFunctionErrorDetails(error);
+    throw new IcResolverError(details.message, isRetryableHttpStatus(details.status), details.status);
   }
   if (!data?.ok) {
     throw new Error(data?.error?.trim() || 'IC解決サーバー処理に失敗しました');

@@ -62,10 +62,7 @@ function formatJstTime(utcIso: string): string {
 
 function formatRoundedJstTime(utcIso: string): string {
   const rounded = roundToQuarterMinutes(minuteOfDayExactJst(jstDateKey(utcIso), utcIso));
-  const hours = Math.floor(rounded / 60);
-  const minutes = rounded % 60;
-  if (hours >= 24) return '24:00';
-  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
+  return formatReportMinute(rounded);
 }
 
 function jstDayStartMs(dateKey: string): number {
@@ -73,14 +70,23 @@ function jstDayStartMs(dateKey: string): number {
 }
 
 function minuteOfDayExactJst(dateKey: string, utcIso: string): number {
-  const raw = (new Date(utcIso).getTime() - jstDayStartMs(dateKey)) / 60000;
+  const raw = minuteOffsetExactJst(dateKey, utcIso);
   if (!Number.isFinite(raw)) return 0;
   return Math.min(DAY_TOTAL_MIN, Math.max(0, raw));
 }
 
+function minuteOffsetExactJst(dateKey: string, utcIso: string): number {
+  return (new Date(utcIso).getTime() - jstDayStartMs(dateKey)) / 60000;
+}
+
 function roundToQuarterMinutes(minutes: number): number {
-  const rounded = Math.round(minutes / QUARTER_MIN) * QUARTER_MIN;
+  const rounded = roundToQuarterOffset(minutes);
   return Math.min(DAY_TOTAL_MIN, Math.max(0, rounded));
+}
+
+function roundToQuarterOffset(minutes: number): number {
+  if (!Number.isFinite(minutes)) return 0;
+  return Math.round(minutes / QUARTER_MIN) * QUARTER_MIN;
 }
 
 function utcFromJstMinute(dateKey: string, minute: number, clamp = true): string {
@@ -543,6 +549,17 @@ type RoundedInterval = {
   category: DayCategory;
 };
 
+export type ProjectedReportTimelineEvent = {
+  event: TripEvent;
+  effectiveMinute: number;
+  effectiveTs: string;
+};
+
+export type ReportTimelineProjection = {
+  events: ProjectedReportTimelineEvent[];
+  minimumEndMinute: number;
+};
+
 type DayState = {
   category: DayCategory;
   tripActive: boolean;
@@ -584,6 +601,131 @@ function getMinDurationEndPair(type: TripEventType): ReportMinDurationPair | und
 function buildOpenMinDurationKey(pair: ReportMinDurationPair, event: TripEvent, fallbackIndex: number): string {
   const sessionId = getEventSessionId(event, pair.sessionKey);
   return `${pair.startType}:${pair.endType}:${sessionId ?? `event-${fallbackIndex}`}`;
+}
+
+function projectRoundedEventBoundaries(
+  dateKey: string,
+  sourceEvents: TripEvent[],
+  initialBoundary = 0,
+  clampToDay = true,
+): ReportTimelineProjection {
+  const events = [...sourceEvents].sort((a, b) => a.ts.localeCompare(b.ts));
+  const activeMinDurations = new Map<string, { startMin: number; minutes: number }>();
+  const projected: ProjectedReportTimelineEvent[] = [];
+  let cursor = initialBoundary;
+
+  for (let index = 0; index < events.length; index++) {
+    const event = events[index];
+    const rawBoundary = clampToDay
+      ? roundToQuarterMinutes(minuteOfDayExactJst(dateKey, event.ts))
+      : Math.max(0, roundToQuarterOffset(minuteOffsetExactJst(dateKey, event.ts)));
+    let boundary = Math.max(rawBoundary, cursor);
+    const endPair = getMinDurationEndPair(event.type);
+    let activeMinKey: string | undefined;
+
+    if (endPair) {
+      const sessionId = getEventSessionId(event, endPair.sessionKey);
+      if (sessionId) {
+        activeMinKey = `${endPair.startType}:${endPair.endType}:${sessionId}`;
+      } else {
+        const prefix = `${endPair.startType}:${endPair.endType}:`;
+        activeMinKey = Array.from(activeMinDurations.keys())
+          .filter(key => key.startsWith(prefix))
+          .pop();
+      }
+      const activeMin = activeMinKey ? activeMinDurations.get(activeMinKey) : undefined;
+      if (activeMin) {
+        boundary = Math.max(
+          boundary,
+          clampToDay
+            ? Math.min(DAY_TOTAL_MIN, activeMin.startMin + activeMin.minutes)
+            : activeMin.startMin + activeMin.minutes,
+        );
+      }
+    }
+
+    projected.push({
+      event,
+      effectiveMinute: boundary,
+      effectiveTs: utcFromJstMinute(dateKey, boundary, clampToDay),
+    });
+
+    const startPair = getMinDurationStartPair(event.type);
+    if (startPair) {
+      const minDuration = getReportMinDurationMinutes(event);
+      if (minDuration > 0) {
+        activeMinDurations.set(buildOpenMinDurationKey(startPair, event, index), {
+          startMin: boundary,
+          minutes: minDuration,
+        });
+      }
+    }
+    if (activeMinKey) {
+      activeMinDurations.delete(activeMinKey);
+    }
+    cursor = boundary;
+  }
+
+  let minimumEndMinute = cursor;
+  for (const activeMin of activeMinDurations.values()) {
+    minimumEndMinute = Math.max(
+      minimumEndMinute,
+      clampToDay
+        ? Math.min(DAY_TOTAL_MIN, activeMin.startMin + activeMin.minutes)
+        : activeMin.startMin + activeMin.minutes,
+    );
+  }
+  return { events: projected, minimumEndMinute };
+}
+
+export function projectReportTimeline(day: DayRecord): ProjectedReportTimelineEvent[] {
+  return projectRoundedEventBoundaries(day.dateKey, day.events).events;
+}
+
+export function projectTripReportTimelines(days: DayRecord[]): Map<number, ReportTimelineProjection> {
+  const orderedDays = [...days].sort((a, b) => (
+    a.dateKey.localeCompare(b.dateKey) || a.dayIndex - b.dayIndex
+  ));
+  const projections = new Map<number, ReportTimelineProjection>();
+  if (orderedDays.length === 0) return projections;
+
+  const originDateKey = orderedDays[0].dateKey;
+  const absoluteProjection = projectRoundedEventBoundaries(
+    originDateKey,
+    orderedDays.flatMap(day => day.events),
+    0,
+    false,
+  );
+  const absoluteByEvent = new Map(
+    absoluteProjection.events.map(projected => [projected.event, projected] as const),
+  );
+  const originStartMs = jstDayStartMs(originDateKey);
+
+  for (const day of orderedDays) {
+    const dayOffset = (jstDayStartMs(day.dateKey) - originStartMs) / 60000;
+    const events = [...day.events]
+      .sort((a, b) => a.ts.localeCompare(b.ts))
+      .map(event => {
+        const absolute = absoluteByEvent.get(event);
+        const effectiveMinute = Math.min(
+          DAY_TOTAL_MIN,
+          Math.max(0, (absolute?.effectiveMinute ?? dayOffset) - dayOffset),
+        );
+        return {
+          event,
+          effectiveMinute,
+          effectiveTs: utcFromJstMinute(day.dateKey, effectiveMinute),
+        };
+      });
+    projections.set(day.dayIndex, {
+      events,
+      minimumEndMinute: Math.min(
+        DAY_TOTAL_MIN,
+        Math.max(0, absoluteProjection.minimumEndMinute - dayOffset),
+      ),
+    });
+  }
+  return projections;
 }
 
 function getReportWindow(
@@ -701,16 +843,16 @@ function categoryAfterEvent(
   }
 }
 
-function buildRoundedIntervals(day: DayRecord, currentTs?: string): RoundedInterval[] {
+function buildRoundedIntervals(
+  day: DayRecord,
+  currentTs?: string,
+  tripProjection?: ReportTimelineProjection,
+): RoundedInterval[] {
   const events = [...day.events].sort((a, b) => a.ts.localeCompare(b.ts));
   const { startMin: windowStart, endMin: windowEnd } = getReportWindow(day, events, currentTs);
   const hasReportMinDurationStart = events.some(event =>
     getMinDurationStartPair(event.type) && getReportMinDurationMinutes(event) > 0,
   );
-  if (windowEnd <= windowStart && !hasReportMinDurationStart) {
-    return [];
-  }
-
   if (events.length === 0) {
     return [{ startMin: windowStart, endMin: windowEnd, category: 'rest' }];
   }
@@ -720,68 +862,46 @@ function buildRoundedIntervals(day: DayRecord, currentTs?: string): RoundedInter
     return boundary >= windowStart && boundary <= windowEnd;
   });
 
+  const scopedSet = new Set(scopedEvents);
+  const projection = tripProjection
+    ? {
+        events: tripProjection.events.filter(projected => scopedSet.has(projected.event)),
+        minimumEndMinute: tripProjection.minimumEndMinute,
+      }
+    : projectRoundedEventBoundaries(day.dateKey, scopedEvents, windowStart);
+  const projectedWindowEnd = Math.max(
+    projection.minimumEndMinute,
+    ...projection.events.map(projected => projected.effectiveMinute),
+  );
+  const effectiveWindowEnd = Math.max(windowEnd, projectedWindowEnd);
+
+  if (effectiveWindowEnd <= windowStart && !hasReportMinDurationStart) {
+    return [];
+  }
+
   if (scopedEvents.length === 0) {
     return [{ startMin: windowStart, endMin: windowEnd, category: 'rest' }];
   }
 
+  const projectedEvents = projection.events;
   const intervals: RoundedInterval[] = [];
   let cursor = windowStart;
   const initialState = inferInitialState(day, scopedEvents);
   let tripActive = initialState.tripActive;
   let currentCategory = initialState.category;
-  const activeMinDurations = new Map<string, { startMin: number; minutes: number }>();
 
-  for (let index = 0; index < scopedEvents.length; index++) {
-    const event = scopedEvents[index];
-    const rawBoundary = roundToQuarterMinutes(minuteOfDayExactJst(day.dateKey, event.ts));
-    let boundary = Math.max(rawBoundary, cursor);
-    const endPair = getMinDurationEndPair(event.type);
-    let activeMinKey: string | undefined;
-    if (endPair) {
-      const sessionId = getEventSessionId(event, endPair.sessionKey);
-      if (sessionId) {
-        activeMinKey = `${endPair.startType}:${endPair.endType}:${sessionId}`;
-      } else {
-        const prefix = `${endPair.startType}:${endPair.endType}:`;
-        activeMinKey = Array.from(activeMinDurations.keys())
-          .filter(key => key.startsWith(prefix))
-          .pop();
-      }
-      const activeMin = activeMinKey ? activeMinDurations.get(activeMinKey) : undefined;
-      if (activeMin) {
-        boundary = Math.max(
-          boundary,
-          Math.min(DAY_TOTAL_MIN, activeMin.startMin + activeMin.minutes),
-        );
-      }
-    }
-
+  for (const projectedEvent of projectedEvents) {
+    const { event, effectiveMinute: boundary } = projectedEvent;
     if (boundary > cursor) {
       intervals.push({ startMin: cursor, endMin: boundary, category: currentCategory });
     }
     const next = categoryAfterEvent(event.type, currentCategory, tripActive);
     currentCategory = next.category;
     tripActive = next.tripActive;
-    const startPair = getMinDurationStartPair(event.type);
-    if (startPair) {
-      const minDuration = getReportMinDurationMinutes(event);
-      if (minDuration > 0) {
-        activeMinDurations.set(buildOpenMinDurationKey(startPair, event, index), {
-          startMin: boundary,
-          minutes: minDuration,
-        });
-      }
-    }
-    if (activeMinKey) {
-      activeMinDurations.delete(activeMinKey);
-    }
     cursor = boundary;
   }
 
-  let finalEnd = windowEnd;
-  for (const activeMin of activeMinDurations.values()) {
-    finalEnd = Math.max(finalEnd, Math.min(DAY_TOTAL_MIN, activeMin.startMin + activeMin.minutes));
-  }
+  const finalEnd = Math.max(effectiveWindowEnd, projection.minimumEndMinute);
 
   if (cursor < finalEnd) {
     intervals.push({ startMin: cursor, endMin: finalEnd, category: currentCategory });
@@ -810,23 +930,24 @@ function buildRoundedPairDetails(
   day: DayRecord,
   startType: TripEventType,
   endType: TripEventType,
+  tripProjection?: ReportTimelineProjection,
 ): Array<{ startTs: string; endTs: string; minutes: number; customer?: string; volume?: number; address?: string }> {
   const events = [...day.events].sort((a, b) => a.ts.localeCompare(b.ts));
   const starts = events.filter(event => event.type === startType);
   const ends = events.filter(event => event.type === endType);
+  const effectiveMinutes = new Map(
+    (tripProjection ?? projectRoundedEventBoundaries(day.dateKey, events)).events
+      .map(projected => [projected.event, projected.effectiveMinute] as const),
+  );
   const details: Array<{ startTs: string; endTs: string; minutes: number; customer?: string; volume?: number; address?: string }> = [];
 
   for (let i = 0; i < Math.min(starts.length, ends.length); i++) {
     const start = starts[i];
     const end = ends[i];
-    const startMin = roundToQuarterMinutes(minuteOfDayExactJst(day.dateKey, start.ts));
-    const endMin = roundToQuarterMinutes(minuteOfDayExactJst(day.dateKey, end.ts));
-    const minDuration = getReportMinDurationMinutes(start);
-    const safeEnd = Math.max(
-      startMin,
-      endMin,
-      minDuration > 0 ? Math.min(DAY_TOTAL_MIN, startMin + minDuration) : startMin,
-    );
+    const startMin = effectiveMinutes.get(start)
+      ?? roundToQuarterMinutes(minuteOfDayExactJst(day.dateKey, start.ts));
+    const safeEnd = effectiveMinutes.get(end)
+      ?? roundToQuarterMinutes(minuteOfDayExactJst(day.dateKey, end.ts));
     details.push({
       startTs: utcFromJstMinute(day.dateKey, startMin),
       endTs: utcFromJstMinute(day.dateKey, safeEnd),
@@ -958,52 +1079,87 @@ function subtractSegments(
   return mergeTimeSegments(result);
 }
 
-function buildTripFerrySegmentsByDay(days: DayRecord[]): Map<number, TimeSegmentDetail[]> {
-  const byDay = new Map<number, TimeSegmentDetail[]>();
-  const events = days
-    .flatMap(day => day.events.map(event => ({ ...event, dayIndex: day.dayIndex })))
-    .sort((a, b) => a.ts.localeCompare(b.ts));
-  const starts = events.filter(event => event.type === 'boarding');
-  const ends = events.filter(event => event.type === 'disembark');
+function buildTripPairDetailsByDay(
+  days: DayRecord[],
+  projections: Map<number, ReportTimelineProjection>,
+  startType: TripEventType,
+  endType: TripEventType,
+  sessionKey: string,
+): Map<number, LoadDetail[]> {
+  const byDay = new Map<number, LoadDetail[]>();
+  const entries = days
+    .flatMap(day => day.events.map(event => ({ event, dayIndex: day.dayIndex })))
+    .sort((a, b) => a.event.ts.localeCompare(b.event.ts));
+  const starts = entries.filter(entry => entry.event.type === startType);
+  const ends = entries.filter(entry => entry.event.type === endType);
+  const usedEnds = new Set<TripEvent>();
+  const projectedByEvent = new Map(
+    days.flatMap(day => (
+      projections.get(day.dayIndex)?.events.map(item => [item.event, item] as const) ?? []
+    )),
+  );
 
-  for (let index = 0; index < Math.min(starts.length, ends.length); index++) {
-    const start = starts[index];
-    const end = ends[index];
-    const startMs = new Date(start.ts).getTime();
-    const endMs = Math.max(startMs, new Date(end.ts).getTime());
+  for (const startEntry of starts) {
+    const start = startEntry.event;
+    const sessionId = getEventSessionId(start, sessionKey);
+    const endEntry = ends.find(candidate => {
+      if (usedEnds.has(candidate.event)) return false;
+      if (sessionId) return getEventSessionId(candidate.event, sessionKey) === sessionId;
+      return candidate.event.ts >= start.ts;
+    });
+    if (!endEntry) continue;
+    usedEnds.add(endEntry.event);
+
+    const projectedStart = projectedByEvent.get(start);
+    const projectedEnd = projectedByEvent.get(endEntry.event);
+    const startMs = Date.parse(projectedStart?.effectiveTs ?? start.ts);
+    const endMs = Date.parse(projectedEnd?.effectiveTs ?? endEntry.event.ts);
     if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) continue;
 
     for (const day of days) {
       const dayStartMs = jstDayStartMs(day.dateKey);
-      const dayEndMs = dayStartMs + 24 * 60 * 60 * 1000;
+      const dayEndMs = dayStartMs + DAY_TOTAL_MIN * 60000;
       const overlapStartMs = Math.max(startMs, dayStartMs);
       const overlapEndMs = Math.min(endMs, dayEndMs);
       if (overlapEndMs <= overlapStartMs) continue;
-      const roundedStartMin = roundToQuarterMinutes(
-        minuteOfDayExactJst(day.dateKey, new Date(overlapStartMs).toISOString()),
-      );
-      const roundedEndMin = roundToQuarterMinutes(
-        minuteOfDayExactJst(day.dateKey, new Date(overlapEndMs).toISOString()),
-      );
-      const minDuration = start.dayIndex === day.dayIndex ? getReportMinDurationMinutes(start) : 0;
-      const safeEndMin = Math.max(
-        roundedEndMin,
-        minDuration > 0 ? Math.min(DAY_TOTAL_MIN, roundedStartMin + minDuration) : roundedEndMin,
-      );
-      if (safeEndMin <= roundedStartMin) continue;
-      const entry = byDay.get(day.dayIndex) ?? [];
-      entry.push({
-        startTs: utcFromJstMinute(day.dateKey, roundedStartMin),
-        endTs: utcFromJstMinute(day.dateKey, safeEndMin),
-        durationMinutes: safeEndMin - roundedStartMin,
-        continuesFromPreviousDay: overlapStartMs > startMs,
-        continuesToNextDay: overlapEndMs < endMs,
-      });
-      byDay.set(day.dayIndex, entry);
+      const detail: LoadDetail = {
+        customer: start.customer ?? endEntry.event.customer ?? '',
+        volume: start.volume ?? endEntry.event.volume ?? 0,
+        startTs: new Date(overlapStartMs).toISOString(),
+        endTs: new Date(overlapEndMs).toISOString(),
+        durationMinutes: Math.round((overlapEndMs - overlapStartMs) / 60000),
+        address: start.address ?? endEntry.event.address,
+      };
+      const current = byDay.get(day.dayIndex) ?? [];
+      current.push(detail);
+      byDay.set(day.dayIndex, current);
     }
   }
 
   return byDay;
+}
+
+function buildTripFerrySegmentsByDay(
+  days: DayRecord[],
+  projections: Map<number, ReportTimelineProjection>,
+): Map<number, TimeSegmentDetail[]> {
+  const details = buildTripPairDetailsByDay(
+    days,
+    projections,
+    'boarding',
+    'disembark',
+    'ferrySessionId',
+  );
+  return new Map(
+    Array.from(details.entries()).map(([dayIndex, items]) => [
+      dayIndex,
+      items.map(item => ({
+        startTs: item.startTs,
+        endTs: item.endTs,
+        durationMinutes: item.durationMinutes,
+      })),
+    ]),
+  );
 }
 
 function getRollingDriveMinutes(days: DayRecord[], metricsList: DayMetrics[], index: number, spanDays: number): number {
@@ -1094,9 +1250,13 @@ function computeEarliestRestart(day: DayRecord, restMinimumMinutes: number): str
   return utcFromJstMinute(day.dateKey, restartMin, false);
 }
 
-export function computeDayMetrics(day: DayRecord, currentTs?: string): DayMetrics {
+export function computeDayMetrics(
+  day: DayRecord,
+  currentTs?: string,
+  tripProjection?: ReportTimelineProjection,
+): DayMetrics {
   const alerts: ReportAlert[] = [];
-  const intervals = buildRoundedIntervals(day, currentTs);
+  const intervals = buildRoundedIntervals(day, currentTs, tripProjection);
   const coveredMin = intervals.reduce((sum, interval) => sum + Math.max(0, interval.endMin - interval.startMin), 0);
   const isPartialDay = coveredMin < DAY_TOTAL_MIN;
   const driveMin = sumCategoryMinutes(intervals, 'drive');
@@ -1106,7 +1266,7 @@ export function computeDayMetrics(day: DayRecord, currentTs?: string): DayMetric
   const waitMin = sumCategoryMinutes(intervals, 'wait');
   const loadMin = sumCategoryMinutes(intervals, 'load');
   const unloadMin = sumCategoryMinutes(intervals, 'unload');
-  const ferrySegments = buildRoundedPairDetails(day, 'boarding', 'disembark').map(segment => ({
+  const ferrySegments = buildRoundedPairDetails(day, 'boarding', 'disembark', tripProjection).map(segment => ({
     startTs: segment.startTs,
     endTs: segment.endTs,
     durationMinutes: segment.minutes,
@@ -1143,7 +1303,7 @@ export function computeDayMetrics(day: DayRecord, currentTs?: string): DayMetric
   const nextConstraintRemaining = Math.max(0, ruleProfile.constraintLimitMinutes - constraintMin);
   const earliestRestart = computeEarliestRestart(day, ruleProfile.restMinimumMinutes);
 
-  const loads: LoadDetail[] = buildRoundedPairDetails(day, 'load_start', 'load_end').map(d => ({
+  const loads: LoadDetail[] = buildRoundedPairDetails(day, 'load_start', 'load_end', tripProjection).map(d => ({
     customer: d.customer ?? '',
     volume: d.volume ?? 0,
     startTs: d.startTs,
@@ -1152,7 +1312,7 @@ export function computeDayMetrics(day: DayRecord, currentTs?: string): DayMetric
     address: d.address,
   }));
 
-  const unloads: LoadDetail[] = buildRoundedPairDetails(day, 'unload_start', 'unload_end').map(d => ({
+  const unloads: LoadDetail[] = buildRoundedPairDetails(day, 'unload_start', 'unload_end', tripProjection).map(d => ({
     customer: d.customer ?? '',
     volume: d.volume ?? 0,
     startTs: d.startTs,
@@ -1201,16 +1361,37 @@ export function computeTripDayMetrics(
   options?: { currentTs?: string },
 ): DayMetrics[] {
   const currentTs = options?.currentTs;
-  const base = trip.days.map(day => computeDayMetrics(day, currentTs));
+  const reportProjections = projectTripReportTimelines(trip.days);
+  const base = trip.days.map(day => (
+    computeDayMetrics(day, currentTs, reportProjections.get(day.dayIndex))
+  ));
   const continuous = computeContinuousDriveTimeline(trip.days, currentTs).byDay;
-  const ferryByDay = buildTripFerrySegmentsByDay(trip.days);
+  const ferryByDay = buildTripFerrySegmentsByDay(trip.days, reportProjections);
+  const loadsByDay = buildTripPairDetailsByDay(
+    trip.days,
+    reportProjections,
+    'load_start',
+    'load_end',
+    'loadSessionId',
+  );
+  const unloadsByDay = buildTripPairDetailsByDay(
+    trip.days,
+    reportProjections,
+    'unload_start',
+    'unload_end',
+    'unloadSessionId',
+  );
 
   return base.map((metrics, index) => {
     const day = trip.days[index];
     const ferrySegments = ferryByDay.get(day.dayIndex) ?? metrics.ferrySegments;
     const ferryMinutes = ferrySegments.reduce((sum, segment) => sum + segment.durationMinutes, 0);
     const ruleProfile = getRuleProfile(day, ferryMinutes, trip);
-    const intervals = buildRoundedIntervals(day, currentTs);
+    const intervals = buildRoundedIntervals(
+      day,
+      currentTs,
+      reportProjections.get(day.dayIndex),
+    );
     const coveredMin = intervals.reduce((sum, interval) => sum + Math.max(0, interval.endMin - interval.startMin), 0);
     const baseRestSegments = buildCategorySegments(day, intervals, 'rest');
     const baseRestMinutes = baseRestSegments.reduce((sum, segment) => sum + segment.durationMinutes, 0);
@@ -1295,6 +1476,8 @@ export function computeTripDayMetrics(
       nextConstraintRemaining,
       restUnderLimit: !isPartialDay && restEquivalentMinutes > 0 && restEquivalentMinutes < ruleProfile.restMinimumMinutes,
       restSegments,
+      loads: loadsByDay.get(day.dayIndex) ?? metrics.loads,
+      unloads: unloadsByDay.get(day.dayIndex) ?? metrics.unloads,
       earliestRestart: computeEarliestRestart(day, ruleProfile.restMinimumMinutes),
       alerts,
     };
@@ -1359,6 +1542,14 @@ export function formatMinutesShort(min: number): string {
   const h = Math.floor(min / 60);
   const m = min % 60;
   return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+}
+
+export function formatReportMinute(minute: number): string {
+  const normalized = Math.min(DAY_TOTAL_MIN, Math.max(0, Math.round(minute)));
+  if (normalized >= DAY_TOTAL_MIN) return '24:00';
+  const hours = Math.floor(normalized / 60);
+  const minutes = normalized % 60;
+  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
 }
 
 export { formatJstTime, formatRoundedJstTime, diffMinutes, toJstDate, jstDateKey };

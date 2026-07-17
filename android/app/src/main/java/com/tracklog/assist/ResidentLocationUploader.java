@@ -121,7 +121,10 @@ final class ResidentLocationUploader {
         if (result.statusCode < 200 || result.statusCode >= 300) {
             throw new TokenRefreshException(
                     "Token refresh returned HTTP " + result.statusCode,
-                    ResidentLocationUploadPolicy.isPermanentRefreshFailure(result.statusCode)
+                    ResidentLocationUploadPolicy.isPermanentRefreshFailure(
+                            result.statusCode,
+                            result.body
+                    )
             );
         }
         JSONObject body = new JSONObject(result.body);

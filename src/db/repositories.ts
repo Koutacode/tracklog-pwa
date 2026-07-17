@@ -10,7 +10,12 @@ import type {
   EventType,
   RoutePoint,
 } from '../domain/types';
-import { computeTotals } from '../domain/metrics';
+import {
+  buildBreakToRestTransition,
+  computeTotals,
+  isRestStartOdoCheckpoint,
+  type BreakToRestTransition,
+} from '../domain/metrics';
 import { parseJsonInput } from '../domain/jsonInput';
 import {
   normalizeRoutePointAccuracy,
@@ -25,6 +30,13 @@ import { resolveNearestIC } from '../services/icResolver';
  */
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+function resolveOccurredAt(occurredAt?: string): string {
+  if (occurredAt == null) return nowIso();
+  const timestampMs = Date.parse(occurredAt);
+  if (!Number.isFinite(timestampMs)) throw new Error('操作時刻が不正です');
+  return new Date(timestampMs).toISOString();
 }
 
 export function uuid(): string {
@@ -64,11 +76,12 @@ const META_PENDING_EXPRESSWAY_END_DECISION = 'pendingExpresswayEndDecision';
 const META_REMOTE_ROUTE_POINTS_UPLOADED_THROUGH = 'remoteRoutePointsUploadedThrough';
 const IC_RESOLVE_RETRY_LIMIT = 6;
 // Bump this when resolver behavior changes so previously exhausted failures retry.
-const IC_RESOLVE_ALGORITHM_VERSION = 8;
+const IC_RESOLVE_ALGORITHM_VERSION = 9;
 const IC_RESOLVE_BACKOFF_BASE_MS = 2 * 60 * 1000;
 const IC_RESOLVE_BACKOFF_CAP_MS = 60 * 60 * 1000;
 const EXPRESSWAY_EVENT_TYPES = ['expressway', 'expressway_start', 'expressway_end'] as const;
 const REPORT_MIN_DURATION_MINUTES = 15;
+const AUTO_REST_REASON_FERRY_BOARDING = 'ferry_boarding';
 
 export type AutoExpresswayConfig = {
   speedKmh: number;
@@ -226,11 +239,15 @@ function computeIcResolveBackoffMs(retryCount: number): number {
   return Math.min(IC_RESOLVE_BACKOFF_CAP_MS, IC_RESOLVE_BACKOFF_BASE_MS * 2 ** exponent);
 }
 
-function canRetryIcResolve(ev: AppEvent, nowMs: number): boolean {
-  const status = (ev as any).extras?.icResolveStatus;
-  if (status == null || status === 'pending') return true;
-  if (status !== 'failed') return false;
+function canRetryIcResolve(ev: AppEvent, nowMs: number, ignorePendingBackoff = false): boolean {
   if (isStaleIcResolveAlgorithm(ev)) return true;
+  const status = (ev as any).extras?.icResolveStatus;
+  if (status == null || status === 'pending') {
+    if (ignorePendingBackoff) return true;
+    const nextRetryMs = getIcResolveNextRetryAtMs(ev);
+    return nextRetryMs == null || nextRetryMs <= nowMs;
+  }
+  if (status !== 'failed') return false;
   const retryCount = getIcResolveRetryCount(ev);
   if (retryCount >= IC_RESOLVE_RETRY_LIMIT) return false;
   const nextRetryMs = getIcResolveNextRetryAtMs(ev);
@@ -694,7 +711,8 @@ async function recomputeTripEndTotals(tripId: string) {
   const start = events.find(e => e.type === 'trip_start') as TripStartEvent | undefined;
   const end = [...events].reverse().find(e => e.type === 'trip_end') as TripEndEvent | undefined;
   if (!start || !end) return;
-  const restStarts = events.filter(e => e.type === 'rest_start') as RestStartEvent[];
+  const restStarts = (events.filter(e => e.type === 'rest_start') as RestStartEvent[])
+    .filter(isRestStartOdoCheckpoint);
   restStarts.sort((a, b) => a.ts.localeCompare(b.ts));
   const lastRestStartOdo = restStarts.length > 0 ? restStarts[restStarts.length - 1].extras.odoKm : undefined;
   const totals = computeTotals({
@@ -951,6 +969,7 @@ export async function startTrip(params: {
   odoKm: number;
   geo?: Geo;
   address?: string;
+  occurredAt?: string;
 }): Promise<{ tripId: string; event: TripStartEvent }> {
   const tripId = uuid();
   let event: TripStartEvent | undefined;
@@ -963,7 +982,7 @@ export async function startTrip(params: {
       id: uuid(),
       tripId,
       type: 'trip_start',
-      ts: nowIso(),
+      ts: resolveOccurredAt(params.occurredAt),
       geo: params.geo,
       address: params.address,
       syncStatus: 'pending',
@@ -984,6 +1003,7 @@ export async function endTrip(params: {
   odoEndKm: number;
   geo?: Geo;
   address?: string;
+  occurredAt?: string;
 }): Promise<{ event: TripEndEvent }> {
   let event: TripEndEvent | undefined;
   await db.transaction('rw', db.events, db.meta, db.routePoints, async () => {
@@ -994,7 +1014,8 @@ export async function endTrip(params: {
     const events = await getTripEventsCached(params.tripId);
     assertTripOpen(events);
     const start = events.find(e => e.type === 'trip_start') as TripStartEvent;
-    const restStarts = events.filter(e => e.type === 'rest_start') as RestStartEvent[];
+    const restStarts = (events.filter(e => e.type === 'rest_start') as RestStartEvent[])
+      .filter(isRestStartOdoCheckpoint);
     restStarts.sort((a, b) => a.ts.localeCompare(b.ts));
     const lastRestStartOdo = restStarts.length > 0
       ? restStarts[restStarts.length - 1].extras.odoKm
@@ -1014,7 +1035,7 @@ export async function endTrip(params: {
       id: uuid(),
       tripId: params.tripId,
       type: 'trip_end',
-      ts: nowIso(),
+      ts: resolveOccurredAt(params.occurredAt),
       geo: params.geo,
       address: params.address,
       syncStatus: 'pending',
@@ -1041,6 +1062,7 @@ export async function startRest(params: {
   odoKm: number;
   geo?: Geo;
   address?: string;
+  occurredAt?: string;
 }): Promise<{ restSessionId: string; event: RestStartEvent }> {
   const restSessionId = uuid();
   let event: RestStartEvent | undefined;
@@ -1048,6 +1070,9 @@ export async function startRest(params: {
     const events = await getTripEventsCached(params.tripId);
     assertTripOpen(events);
     assertCanStartBasicToggle(events, BASIC_TOGGLE_GROUPS[0]);
+    if (!Number.isFinite(params.odoKm) || params.odoKm <= 0) {
+      throw new Error('休息開始にはODOが必要です');
+    }
     const lastOdo = findLatestOdoCheckpoint(events);
     if (lastOdo != null && params.odoKm < lastOdo) {
       throw new Error('休息開始メーターが前回メーターより小さいため保存できません');
@@ -1056,7 +1081,7 @@ export async function startRest(params: {
       id: uuid(),
       tripId: params.tripId,
       type: 'rest_start',
-      ts: nowIso(),
+      ts: resolveOccurredAt(params.occurredAt),
       geo: params.geo,
       address: params.address,
       syncStatus: 'pending',
@@ -1079,8 +1104,10 @@ export async function endRest(params: {
   dayClose: boolean;
   geo?: Geo;
   address?: string;
+  occurredAt?: string;
 }): Promise<{ event: RestEndEvent }> {
   let event: RestEndEvent | undefined;
+  const occurredAt = resolveOccurredAt(params.occurredAt);
   await db.transaction('rw', db.events, db.routePoints, async () => {
     const events = await getTripEventsCached(params.tripId);
     assertTripOpen(events);
@@ -1089,11 +1116,17 @@ export async function endRest(params: {
       throw new Error('対応する休息開始が進行中ではありません');
     }
     const dayIndex = params.dayClose ? getNextDayIndexFromTripEvents(events) : undefined;
+    const openFerrySessionId = findOpenToggleSessionId(
+      events,
+      'boarding',
+      'disembark',
+      'ferrySessionId',
+    );
     event = {
       id: uuid(),
       tripId: params.tripId,
       type: 'rest_end',
-      ts: nowIso(),
+      ts: occurredAt,
       geo: params.geo,
       address: params.address,
       syncStatus: 'pending',
@@ -1103,6 +1136,21 @@ export async function endRest(params: {
         ...(dayIndex != null ? { dayIndex } : {}),
       },
     };
+    if (openFerrySessionId) {
+      await putEventWithRoutePointTx({
+        id: uuid(),
+        tripId: params.tripId,
+        type: 'disembark',
+        ts: occurredAt,
+        geo: params.geo,
+        address: params.address,
+        syncStatus: 'pending',
+        extras:
+          openFerrySessionId === '__legacy__'
+            ? undefined
+            : { ferrySessionId: openFerrySessionId },
+      });
+    }
     await putEventWithRoutePointTx(event);
   });
   if (!event) throw new Error('休息終了イベントを保存できませんでした');
@@ -1126,7 +1174,9 @@ function getNextDayIndexFromTripEvents(events: AppEvent[]): number {
 function findLatestOdoCheckpoint(events: AppEvent[]): number | null {
   const sorted = [...events].sort((a, b) => b.ts.localeCompare(a.ts));
   for (const e of sorted) {
-    if (e.type === 'rest_start') return (e as RestStartEvent).extras.odoKm;
+    if (e.type === 'rest_start' && isRestStartOdoCheckpoint(e as RestStartEvent)) {
+      return (e as RestStartEvent).extras.odoKm ?? null;
+    }
     if (e.type === 'trip_start') return (e as TripStartEvent).extras.odoKm;
     if (e.type === 'trip_end') return (e as TripEndEvent).extras.odoKm;
   }
@@ -1139,13 +1189,14 @@ function baseEvent(params: {
   type: any;
   geo?: Geo;
   address?: string;
+  occurredAt?: string;
   extras?: Record<string, unknown>;
 }): AppEvent {
   return {
     id: uuid(),
     tripId: params.tripId,
     type: params.type,
-    ts: nowIso(),
+    ts: resolveOccurredAt(params.occurredAt),
     geo: params.geo,
     address: params.address,
     syncStatus: 'pending',
@@ -1208,7 +1259,7 @@ function requireOpenToggle(events: AppEvent[], group: BasicToggleGroup): string 
 }
 
 async function startBasicToggleOperation(
-  params: { tripId: string; geo?: Geo; address?: string },
+  params: { tripId: string; geo?: Geo; address?: string; occurredAt?: string },
   group: BasicToggleGroup,
   notifyReason: string,
 ): Promise<{ sessionId: string; event: AppEvent }> {
@@ -1223,6 +1274,7 @@ async function startBasicToggleOperation(
       type: group.start,
       geo: params.geo,
       address: params.address,
+      occurredAt: params.occurredAt,
       extras: {
         [group.key]: sessionId,
         reportMinDurationMinutes: REPORT_MIN_DURATION_MINUTES,
@@ -1236,7 +1288,7 @@ async function startBasicToggleOperation(
 }
 
 async function endBasicToggleOperation(
-  params: { tripId: string; geo?: Geo; address?: string },
+  params: { tripId: string; geo?: Geo; address?: string; occurredAt?: string },
   group: BasicToggleGroup,
   notifyReason: string,
 ): Promise<AppEvent> {
@@ -1250,6 +1302,7 @@ async function endBasicToggleOperation(
       type: group.end,
       geo: params.geo,
       address: params.address,
+      occurredAt: params.occurredAt,
       extras: open === '__legacy__' ? undefined : { [group.key]: open },
     });
     await putEventWithRoutePointTx(event);
@@ -1260,7 +1313,7 @@ async function endBasicToggleOperation(
 }
 
 // Load (積込) operations
-export async function startLoad(params: { tripId: string; geo?: Geo; address?: string }) {
+export async function startLoad(params: { tripId: string; geo?: Geo; address?: string; occurredAt?: string }) {
   const { sessionId } = await startBasicToggleOperation(
     params,
     BASIC_TOGGLE_GROUPS[2],
@@ -1269,12 +1322,12 @@ export async function startLoad(params: { tripId: string; geo?: Geo; address?: s
   return { loadSessionId: sessionId };
 }
 
-export async function endLoad(params: { tripId: string; geo?: Geo; address?: string }) {
+export async function endLoad(params: { tripId: string; geo?: Geo; address?: string; occurredAt?: string }) {
   await endBasicToggleOperation(params, BASIC_TOGGLE_GROUPS[2], 'event-load_end');
 }
 
 // Unload (荷卸) operations
-export async function startUnload(params: { tripId: string; geo?: Geo; address?: string }) {
+export async function startUnload(params: { tripId: string; geo?: Geo; address?: string; occurredAt?: string }) {
   const { sessionId } = await startBasicToggleOperation(
     params,
     BASIC_TOGGLE_GROUPS[3],
@@ -1283,12 +1336,12 @@ export async function startUnload(params: { tripId: string; geo?: Geo; address?:
   return { unloadSessionId: sessionId };
 }
 
-export async function endUnload(params: { tripId: string; geo?: Geo; address?: string }) {
+export async function endUnload(params: { tripId: string; geo?: Geo; address?: string; occurredAt?: string }) {
   await endBasicToggleOperation(params, BASIC_TOGGLE_GROUPS[3], 'event-unload_end');
 }
 
 // Break (休憩) operations
-export async function startBreak(params: { tripId: string; geo?: Geo; address?: string }) {
+export async function startBreak(params: { tripId: string; geo?: Geo; address?: string; occurredAt?: string }) {
   const { sessionId } = await startBasicToggleOperation(
     params,
     BASIC_TOGGLE_GROUPS[1],
@@ -1297,8 +1350,68 @@ export async function startBreak(params: { tripId: string; geo?: Geo; address?: 
   return { breakSessionId: sessionId };
 }
 
-export async function endBreak(params: { tripId: string; geo?: Geo; address?: string }) {
-  await endBasicToggleOperation(params, BASIC_TOGGLE_GROUPS[1], 'event-break_end');
+async function putBreakToRestTransitionTx(transition: BreakToRestTransition): Promise<void> {
+  await putEventWithRoutePointTx(transition.breakEnd);
+  await putEventWithRoutePointTx({
+    ...transition.restStart,
+    extras: {
+      ...transition.restStart.extras,
+      reportMinDurationMinutes: REPORT_MIN_DURATION_MINUTES,
+    },
+  });
+}
+
+export async function reconcileBreakToRestThreshold(params: {
+  tripId: string;
+  evaluatedAt?: string;
+}): Promise<boolean> {
+  const evaluatedAt = resolveOccurredAt(params.evaluatedAt);
+  let transitioned = false;
+  await db.transaction('rw', db.events, db.routePoints, async () => {
+    const events = await getTripEventsCached(params.tripId);
+    if (!events.some(event => event.type === 'trip_start')) return;
+    const transition = buildBreakToRestTransition(events, evaluatedAt);
+    if (!transition) return;
+    await putBreakToRestTransitionTx(transition);
+    transitioned = true;
+  });
+  if (transitioned) notifyRemoteMutation('event-break-auto-rest');
+  return transitioned;
+}
+
+export async function endBreak(params: {
+  tripId: string;
+  geo?: Geo;
+  address?: string;
+  occurredAt?: string;
+}) {
+  const occurredAt = resolveOccurredAt(params.occurredAt);
+  let transitioned = false;
+  let event: AppEvent | undefined;
+  await db.transaction('rw', db.events, db.routePoints, async () => {
+    const events = await getTripEventsCached(params.tripId);
+    assertTripOpen(events);
+    const transition = buildBreakToRestTransition(events, occurredAt);
+    if (transition) {
+      await putBreakToRestTransitionTx(transition);
+      transitioned = true;
+      return;
+    }
+
+    const open = requireOpenToggle(events, BASIC_TOGGLE_GROUPS[1]);
+    event = baseEvent({
+      tripId: params.tripId,
+      type: 'break_end',
+      geo: params.geo,
+      address: params.address,
+      occurredAt,
+      extras: open === '__legacy__' ? undefined : { breakSessionId: open },
+    });
+    await putEventWithRoutePointTx(event);
+  });
+  if (!transitioned && !event) throw new Error('休憩終了イベントを保存できませんでした');
+  notifyRemoteMutation(transitioned ? 'event-break-auto-rest' : 'event-break_end');
+  return { autoRestStarted: transitioned };
 }
 
 // Refuel (給油)
@@ -1307,6 +1420,7 @@ export async function addRefuel(params: {
   liters: number;
   geo?: Geo;
   address?: string;
+  occurredAt?: string;
 }) {
   if (!Number.isFinite(params.liters) || params.liters <= 0) {
     throw new Error('給油量が不正です');
@@ -1316,6 +1430,7 @@ export async function addRefuel(params: {
     type: 'refuel',
     geo: params.geo,
     address: params.address,
+    occurredAt: params.occurredAt,
     extras: { liters: params.liters },
   });
   await addEvent(e);
@@ -1323,18 +1438,133 @@ export async function addRefuel(params: {
 
 // Ferry boarding / disembark (フェリー乗船 / 下船)
 export async function addBoarding(
-  params: { tripId: string; geo?: Geo; address?: string },
+  params: { tripId: string; geo?: Geo; address?: string; occurredAt?: string },
 ): Promise<{ ferrySessionId: string; autoRestStarted: boolean }> {
-  const { sessionId } = await startBasicToggleOperation(
-    params,
-    BASIC_TOGGLE_GROUPS[4],
-    'ferry-boarding',
-  );
-  return { ferrySessionId: sessionId, autoRestStarted: false };
+  const occurredAt = resolveOccurredAt(params.occurredAt);
+  const ferrySessionId = uuid();
+  const boardingEventId = uuid();
+  const generatedRestSessionId = uuid();
+  let autoRestStarted = false;
+
+  await db.transaction('rw', db.events, db.routePoints, async () => {
+    const events = await getTripEventsCached(params.tripId);
+    assertTripOpen(events);
+
+    const breakTransition = buildBreakToRestTransition(events, occurredAt);
+    if (breakTransition) {
+      await putBreakToRestTransitionTx(breakTransition);
+      events.push(breakTransition.breakEnd, breakTransition.restStart);
+    }
+
+    const openBreak = findOpenToggleSessionId(events, 'break_start', 'break_end', 'breakSessionId');
+    const openLoad = findOpenToggleSessionId(events, 'load_start', 'load_end', 'loadSessionId');
+    const openUnload = findOpenToggleSessionId(events, 'unload_start', 'unload_end', 'unloadSessionId');
+    if (openBreak || openLoad || openUnload) {
+      throw new Error('進行中の休憩・積込・荷卸を終了してからフェリー乗船を記録してください');
+    }
+
+    const openFerry = findOpenToggleSessionId(events, 'boarding', 'disembark', 'ferrySessionId');
+    if (openFerry) throw new Error('フェリー乗船が開始済みです（下船を押してください）');
+    const openRest = findOpenToggleSessionId(events, 'rest_start', 'rest_end', 'restSessionId');
+    autoRestStarted = !openRest;
+
+    if (autoRestStarted) {
+      await putEventWithRoutePointTx({
+        id: uuid(),
+        tripId: params.tripId,
+        type: 'rest_start',
+        ts: occurredAt,
+        geo: params.geo,
+        address: params.address,
+        syncStatus: 'pending',
+        extras: {
+          restSessionId: generatedRestSessionId,
+          autoReason: AUTO_REST_REASON_FERRY_BOARDING,
+          generatedFrom: boardingEventId,
+          reportMinDurationMinutes: REPORT_MIN_DURATION_MINUTES,
+        },
+      } as RestStartEvent);
+    }
+
+    await putEventWithRoutePointTx({
+      id: boardingEventId,
+      tripId: params.tripId,
+      type: 'boarding',
+      ts: occurredAt,
+      geo: params.geo,
+      address: params.address,
+      syncStatus: 'pending',
+      extras: {
+        ferrySessionId,
+        reportMinDurationMinutes: REPORT_MIN_DURATION_MINUTES,
+        ...(autoRestStarted ? { autoRestSessionId: generatedRestSessionId } : {}),
+      },
+    });
+  });
+  notifyRemoteMutation('ferry-boarding');
+  return { ferrySessionId, autoRestStarted };
 }
 
-export async function addDisembark(params: { tripId: string; geo?: Geo; address?: string }) {
-  await endBasicToggleOperation(params, BASIC_TOGGLE_GROUPS[4], 'event-disembark');
+export async function addDisembark(params: {
+  tripId: string;
+  geo?: Geo;
+  address?: string;
+  occurredAt?: string;
+}) {
+  const occurredAt = resolveOccurredAt(params.occurredAt);
+  let event: AppEvent | undefined;
+  await db.transaction('rw', db.events, db.routePoints, async () => {
+    const events = await getTripEventsCached(params.tripId);
+    assertTripOpen(events);
+    const openFerrySessionId = requireOpenToggle(events, BASIC_TOGGLE_GROUPS[4]);
+    const boarding = [...events]
+      .filter(candidate => candidate.type === 'boarding')
+      .reverse()
+      .find(candidate => (
+        openFerrySessionId === '__legacy__'
+          ? true
+          : candidate.extras?.ferrySessionId === openFerrySessionId
+      ));
+    const autoRestSessionId = typeof boarding?.extras?.autoRestSessionId === 'string'
+      ? boarding.extras.autoRestSessionId.trim()
+      : '';
+
+    event = baseEvent({
+      tripId: params.tripId,
+      type: 'disembark',
+      geo: params.geo,
+      address: params.address,
+      occurredAt,
+      extras:
+        openFerrySessionId === '__legacy__'
+          ? undefined
+          : { ferrySessionId: openFerrySessionId },
+    });
+    await putEventWithRoutePointTx(event);
+
+    if (
+      autoRestSessionId
+      && findOpenToggleSessionId(events, 'rest_start', 'rest_end', 'restSessionId') === autoRestSessionId
+    ) {
+      await putEventWithRoutePointTx({
+        id: uuid(),
+        tripId: params.tripId,
+        type: 'rest_end',
+        ts: occurredAt,
+        geo: params.geo,
+        address: params.address,
+        syncStatus: 'pending',
+        extras: {
+          restSessionId: autoRestSessionId,
+          dayClose: false,
+          autoReason: 'ferry_disembark',
+          generatedFrom: event.id,
+        },
+      } as RestEndEvent);
+    }
+  });
+  if (!event) throw new Error('フェリー下船イベントを保存できませんでした');
+  notifyRemoteMutation('event-disembark');
 }
 
 // Point mark (地点マーク)
@@ -1343,12 +1573,14 @@ export async function addPointMark(params: {
   geo?: Geo;
   address?: string;
   label?: string;
+  occurredAt?: string;
 }) {
   const e = baseEvent({
     tripId: params.tripId,
     type: 'point_mark',
     geo: params.geo,
     address: params.address,
+    occurredAt: params.occurredAt,
     extras: params.label ? { label: params.label } : undefined,
   });
   await addEvent(e);
@@ -1359,6 +1591,7 @@ export async function startExpressway(params: {
   tripId: string;
   geo?: Geo;
   address?: string;
+  occurredAt?: string;
   autoDecision?: AutoExpresswayDecisionReason;
 }) {
   const expresswaySessionId = uuid();
@@ -1368,6 +1601,7 @@ export async function startExpressway(params: {
     type: 'expressway_start',
     geo: params.geo,
     address: params.address,
+    occurredAt: params.occurredAt,
     extras: {
       expresswaySessionId,
       icResolveStatus: 'pending',
@@ -1393,6 +1627,7 @@ export async function endExpressway(params: {
   tripId: string;
   geo?: Geo;
   address?: string;
+  occurredAt?: string;
   autoDecision?: AutoExpresswayDecisionReason;
 }) {
   let eventId = '';
@@ -1408,6 +1643,7 @@ export async function endExpressway(params: {
       type: 'expressway_end',
       geo: params.geo,
       address: params.address,
+      occurredAt: params.occurredAt,
       extras:
         open === '__legacy__'
           ? {
@@ -1431,13 +1667,16 @@ export async function endExpressway(params: {
   return { eventId };
 }
 
-export async function getPendingExpresswayEvents(tripId?: string) {
+export async function getPendingExpresswayEvents(
+  tripId?: string,
+  options?: { ignorePendingBackoff?: boolean },
+) {
   const arr = tripId
     ? await db.events.where('[tripId+type]').anyOf(EXPRESSWAY_EVENT_TYPES.map(t => [tripId, t])).toArray()
     : await db.events.where('type').anyOf([...EXPRESSWAY_EVENT_TYPES]).toArray();
   const nowMs = Date.now();
   return arr
-    .filter(e => canRetryIcResolve(e, nowMs))
+    .filter(e => canRetryIcResolve(e, nowMs, options?.ignorePendingBackoff === true))
     .sort((a, b) => {
       const aStale = isStaleIcResolveAlgorithm(a);
       const bStale = isStaleIcResolveAlgorithm(b);
@@ -1509,6 +1748,8 @@ export async function updateExpresswayResolved(params: {
   status: 'resolved' | 'failed' | 'pending';
   icName?: string;
   icDistanceM?: number;
+  nextRetryAt?: string | null;
+  errorMessage?: string;
 }) {
   const ev = await db.events.get(params.eventId);
   if (!ev) return;
@@ -1525,7 +1766,18 @@ export async function updateExpresswayResolved(params: {
   }
   if (params.status === 'pending') {
     if (extras.icResolveRetryCount == null) extras.icResolveRetryCount = 0;
-    delete extras.icResolveNextRetryAt;
+    extras.icResolveLastAttemptAt = new Date().toISOString();
+    if (params.nextRetryAt) {
+      extras.icResolveNextRetryAt = params.nextRetryAt;
+    } else {
+      delete extras.icResolveNextRetryAt;
+    }
+    const message = params.errorMessage?.trim();
+    if (message) {
+      extras.icResolveError = message.slice(0, 180);
+    } else {
+      delete extras.icResolveError;
+    }
   }
   await db.events.update(params.eventId, { extras, syncStatus: 'pending' });
   notifyRemoteMutation('expressway-resolved');

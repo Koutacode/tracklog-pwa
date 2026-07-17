@@ -73,9 +73,17 @@ export type TripEndEvent = BaseEvent & {
   extras: { odoKm: number; totalKm: number; lastLegKm: number };
 };
 
+export type RestStartExtras = Record<string, unknown> & {
+  restSessionId: string;
+  odoKm?: number;
+  autoReason?: string;
+  generatedFrom?: string;
+  reportMinDurationMinutes?: number;
+};
+
 export type RestStartEvent = BaseEvent & {
   type: 'rest_start';
-  extras: { restSessionId: string; odoKm: number };
+  extras: RestStartExtras;
 };
 
 export type RestEndEvent = BaseEvent & {

@@ -17,6 +17,7 @@ import androidx.core.content.ContextCompat;
 final class ResidentLocationState {
     static final String PREFERENCES_NAME = "tracklog_resident_location";
     static final String KEY_ACTIVE_TRIP_ID = "active_trip_id";
+    static final String KEY_ROUTE_PAUSE_AT_MS = "route_pause_at_ms";
     static final String KEY_APPROVED = "approved";
     static final String KEY_SETUP_COMPLETE = "setup_complete";
     static final String KEY_ENABLED = "enabled";
@@ -46,6 +47,7 @@ final class ResidentLocationState {
             boolean approved,
             boolean setupComplete,
             String activeTripId,
+            long routePauseAtMs,
             String supabaseUrl,
             String anonKey,
             String accessToken,
@@ -78,7 +80,8 @@ final class ResidentLocationState {
                 .putBoolean(KEY_APPROVED, approved)
                 .putBoolean(KEY_SETUP_COMPLETE, setupComplete)
                 .putBoolean(KEY_ENABLED, enabled)
-                .putString(KEY_ACTIVE_TRIP_ID, normalizedTripId);
+                .putString(KEY_ACTIVE_TRIP_ID, normalizedTripId)
+                .putLong(KEY_ROUTE_PAUSE_AT_MS, Math.max(0L, routePauseAtMs));
         if (approved && authorization.isConfigured() && !authorizationBlocked) {
             writeAuthorization(editor, authorization);
             editor.remove(KEY_BLOCKED_AUTHORIZATION_FINGERPRINT);
@@ -96,6 +99,7 @@ final class ResidentLocationState {
         }
         if (clearActiveTrip) {
             editor.remove(KEY_ACTIVE_TRIP_ID);
+            editor.remove(KEY_ROUTE_PAUSE_AT_MS);
         }
         editor.commit();
     }
@@ -114,6 +118,18 @@ final class ResidentLocationState {
 
     static String getActiveTripId(Context context) {
         return normalizeTripId(preferences(context).getString(KEY_ACTIVE_TRIP_ID, ""));
+    }
+
+    static long getRoutePauseAtMs(Context context) {
+        return Math.max(0L, preferences(context).getLong(KEY_ROUTE_PAUSE_AT_MS, 0L));
+    }
+
+    static boolean shouldRecordRouteAt(Context context, long timestampMs) {
+        return shouldRecordRouteAt(getRoutePauseAtMs(context), timestampMs);
+    }
+
+    static boolean shouldRecordRouteAt(long pauseAtMs, long timestampMs) {
+        return pauseAtMs <= 0L || timestampMs < pauseAtMs;
     }
 
     static boolean isEligible(Context context) {

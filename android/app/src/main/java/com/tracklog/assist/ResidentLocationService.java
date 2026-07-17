@@ -190,7 +190,7 @@ public final class ResidentLocationService extends Service implements LocationLi
             return;
         }
         String tripId = ResidentLocationState.getActiveTripId(this);
-        if (!tripId.isEmpty()) {
+        if (!tripId.isEmpty() && ResidentLocationState.shouldRecordRouteAt(this, System.currentTimeMillis())) {
             try {
                 ResidentLocationQueue.append(this, tripId, location);
             } catch (Exception exception) {

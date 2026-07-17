@@ -29,6 +29,13 @@ public class ExampleUnitTest {
     }
 
     @Test
+    public void routePauseThreshold_isExclusive() {
+        assertTrue(ResidentLocationState.shouldRecordRouteAt(10_000L, 9_999L));
+        assertFalse(ResidentLocationState.shouldRecordRouteAt(10_000L, 10_000L));
+        assertTrue(ResidentLocationState.shouldRecordRouteAt(0L, 10_000L));
+    }
+
+    @Test
     public void residentEligibility_doesNotRequireActiveTrip() {
         assertTrue(ResidentLocationState.isEligibleState(true, true, true));
         assertFalse(ResidentLocationState.isEligibleState(false, true, true));
@@ -43,7 +50,7 @@ public class ExampleUnitTest {
                 ResidentLocationUploadPolicy.classifyStatus(401, false)
         );
         assertEquals(
-                ResidentLocationUploadPolicy.Action.STOP_AUTHORIZATION,
+                ResidentLocationUploadPolicy.Action.RETRY,
                 ResidentLocationUploadPolicy.classifyStatus(401, true)
         );
         assertEquals(
@@ -54,11 +61,16 @@ public class ExampleUnitTest {
                 ResidentLocationUploadPolicy.Action.RETRY,
                 ResidentLocationUploadPolicy.classifyStatus(503, false)
         );
-        assertTrue(ResidentLocationUploadPolicy.isPermanentRefreshFailure(400));
-        assertTrue(ResidentLocationUploadPolicy.isPermanentRefreshFailure(401));
-        assertTrue(ResidentLocationUploadPolicy.isPermanentRefreshFailure(403));
-        assertFalse(ResidentLocationUploadPolicy.isPermanentRefreshFailure(429));
-        assertFalse(ResidentLocationUploadPolicy.isPermanentRefreshFailure(500));
+        assertTrue(ResidentLocationUploadPolicy.isPermanentRefreshFailure(
+                400,
+                "{\"error_code\":\"refresh_token_already_used\",\"msg\":\"Invalid Refresh Token: Already Used\"}"
+        ));
+        assertFalse(ResidentLocationUploadPolicy.isPermanentRefreshFailure(401, "temporary token race"));
+        assertTrue(ResidentLocationUploadPolicy.isPermanentRefreshFailure(400, "refresh_token_not_found"));
+        assertTrue(ResidentLocationUploadPolicy.isPermanentRefreshFailure(401, "Invalid Refresh Token"));
+        assertTrue(ResidentLocationUploadPolicy.isPermanentRefreshFailure(403, ""));
+        assertFalse(ResidentLocationUploadPolicy.isPermanentRefreshFailure(429, ""));
+        assertFalse(ResidentLocationUploadPolicy.isPermanentRefreshFailure(500, ""));
     }
 
     @Test

@@ -11,8 +11,10 @@ import {
   getPendingExpresswayEndDecision,
   getPendingExpresswayEndPrompt,
   getRouteTrackingMode,
+  reconcileBreakToRestThreshold,
 } from '../db/repositories';
 import type { AppEvent } from '../domain/types';
+import { getOpenBreakToRestThresholdTs } from '../domain/metrics';
 import {
   startResidentLocationUpdates,
   startRouteTracking,
@@ -34,6 +36,7 @@ import { pollTracklogAdminMessages } from '../services/adminMessages';
 import { ensureTracklogPushRegistration } from '../services/pushRegistration';
 import {
   acknowledgeNativeResidentLocationPoints,
+  invalidateNativeResidentLocationSessionRestore,
   peekNativeResidentLocationPoints,
   reconcileNativeResidentLocation,
   restoreNativeResidentLocationSession,
@@ -108,10 +111,15 @@ export default function RouteTrackingSupervisor() {
     const stopAllLocationWork = async (
       nativeReason: 'manual' | 'permission-denied' | 'approval-rejected' | 'signed-out' = 'manual',
     ) => {
+      // Clear native credentials first on sign-out so an in-flight WebView sync
+      // cannot restore an account that the user has just left.
+      if (native && nativeReason === 'signed-out') {
+        await stopNativeResidentLocation({ reason: nativeReason });
+      }
       stopLocationHeartbeat();
       await stopResidentLocationUpdates();
       await stopRouteTracking();
-      if (native) {
+      if (native && nativeReason !== 'signed-out') {
         await stopNativeResidentLocation({ reason: nativeReason });
       }
     };
@@ -139,6 +147,10 @@ export default function RouteTrackingSupervisor() {
           } catch (error) {
             console.warn('[resident-location] session refresh handoff failed', error);
           }
+        }
+        const reconciliationTripId = await getActiveTripId();
+        if (reconciliationTripId) {
+          await reconcileBreakToRestThreshold({ tripId: reconciliationTripId });
         }
         const identity = await getDriverIdentity();
         const approved =
@@ -253,6 +265,7 @@ export default function RouteTrackingSupervisor() {
             approved: true,
             setupComplete: true,
             activeTripId: tripId,
+            routePauseAt: getOpenBreakToRestThresholdTs(events),
           });
         } else {
           await startRouteTracking(tripId, mode);
@@ -282,7 +295,11 @@ export default function RouteTrackingSupervisor() {
       if (event === 'SIGNED_OUT') {
         lifecycleEpoch += 1;
         syncQueued = false;
-        void stopAllLocationWork('signed-out');
+        invalidateNativeResidentLocationSessionRestore();
+        void (async () => {
+          await stopAllLocationWork('signed-out');
+          if (!disposed) void sync();
+        })();
         return;
       }
       void sync();

@@ -14,11 +14,13 @@ public final class ResidentLocationPlugin extends Plugin {
         boolean approved = Boolean.TRUE.equals(call.getBoolean("approved", false));
         boolean setupComplete = Boolean.TRUE.equals(call.getBoolean("setupComplete", false));
         String activeTripId = call.getString("activeTripId", "");
+        long routePauseAtMs = Math.max(0L, call.getLong("routePauseAtMs", 0L));
         ResidentLocationState.reconcile(
                 getContext(),
                 approved,
                 setupComplete,
                 activeTripId,
+                routePauseAtMs,
                 call.getString("supabaseUrl", ""),
                 call.getString("anonKey", ""),
                 call.getString("accessToken", ""),
@@ -97,6 +99,7 @@ public final class ResidentLocationPlugin extends Plugin {
         result.put("running", ResidentLocationService.isRunning());
         result.put("startRequested", startRequested);
         result.put("activeTripId", ResidentLocationState.getActiveTripId(getContext()));
+        result.put("routePauseAtMs", ResidentLocationState.getRoutePauseAtMs(getContext()));
         result.put("queuedPointCount", ResidentLocationQueue.count(getContext()));
         result.put("authorizationConfigured", ResidentLocationState.getAuthorization(getContext()).isConfigured());
         result.put("authorizationBlocked", ResidentLocationState.isAuthorizationBlocked(getContext()));

@@ -20,6 +20,7 @@ import {
   endExpressway as dbEndExpressway,
   backfillMissingAddresses,
   clearPendingExpresswayEndDecision,
+  reconcileBreakToRestThreshold,
 } from '../db/repositories';
 import { getGeoWithAddress } from '../services/geo';
 import {
@@ -88,11 +89,14 @@ export function useTripManager() {
     setLoading(true);
     try {
       const active = await getActiveTripId();
-      setTripId(active);
       if (active) {
+        const transitioned = await reconcileBreakToRestThreshold({ tripId: active });
+        if (transitioned) requestRouteTrackingSync();
         const ev = await getEventsByTripId(active);
+        setTripId(active);
         setEvents(ev);
       } else {
+        setTripId(null);
         setEvents([]);
       }
     } finally {
@@ -125,8 +129,9 @@ export function useTripManager() {
   // Event handlers
   const handleStartTrip = useCallback(async (odoKm: number) => {
     return runOperation('trip-start', async () => {
+      const occurredAt = new Date().toISOString();
       const { geo, address } = await captureGeoOnce();
-      const { tripId: newTripId } = await dbStartTrip({ odoKm, geo, address });
+      const { tripId: newTripId } = await dbStartTrip({ odoKm, geo, address, occurredAt });
       setTripId(newTripId);
       requestRouteTrackingSync();
       await refresh();
@@ -137,8 +142,9 @@ export function useTripManager() {
   const handleEndTrip = useCallback(async (odoEndKm: number) => {
     if (!tripId) return;
     return runOperation('trip-end', async () => {
+      const occurredAt = new Date().toISOString();
       const { geo, address } = await captureGeoOnce();
-      const { event } = await dbEndTrip({ tripId, odoEndKm, geo, address });
+      const { event } = await dbEndTrip({ tripId, odoEndKm, geo, address, occurredAt });
       requestRouteTrackingSync();
       await refresh();
       return event;
@@ -148,8 +154,9 @@ export function useTripManager() {
   const handleStartRest = useCallback(async (odoKm: number) => {
     if (!tripId) return;
     return runOperation('rest-start', async () => {
+      const occurredAt = new Date().toISOString();
       const { geo, address } = await captureGeoOnce();
-      const result = await dbStartRest({ tripId, odoKm, geo, address });
+      const result = await dbStartRest({ tripId, odoKm, geo, address, occurredAt });
       requestRouteTrackingSync();
       await refresh();
       return result;
@@ -159,8 +166,9 @@ export function useTripManager() {
   const handleEndRest = useCallback(async (restSessionId: string) => {
     if (!tripId) return;
     return runOperation('rest-end', async () => {
+      const occurredAt = new Date().toISOString();
       const { geo, address } = await captureGeoOnce();
-      const result = await dbEndRest({ tripId, restSessionId, dayClose: false, geo, address });
+      const result = await dbEndRest({ tripId, restSessionId, dayClose: false, geo, address, occurredAt });
       requestRouteTrackingSync();
       await refresh();
       return result;
@@ -173,25 +181,33 @@ export function useTripManager() {
   ) => {
     if (!tripId) return;
     return runOperation(`${type}-${action}` as TripOperation, async () => {
+      const occurredAt = new Date().toISOString();
       const { geo, address } = await captureGeoOnce();
 
       if (type === 'load') {
-        action === 'start' ? await dbStartLoad({ tripId, geo, address }) : await dbEndLoad({ tripId, geo, address });
+        action === 'start'
+          ? await dbStartLoad({ tripId, geo, address, occurredAt })
+          : await dbEndLoad({ tripId, geo, address, occurredAt });
       } else if (type === 'unload') {
-        action === 'start' ? await dbStartUnload({ tripId, geo, address }) : await dbEndUnload({ tripId, geo, address });
+        action === 'start'
+          ? await dbStartUnload({ tripId, geo, address, occurredAt })
+          : await dbEndUnload({ tripId, geo, address, occurredAt });
       } else if (type === 'break') {
-        action === 'start' ? await dbStartBreak({ tripId, geo, address }) : await dbEndBreak({ tripId, geo, address });
+        action === 'start'
+          ? await dbStartBreak({ tripId, geo, address, occurredAt })
+          : await dbEndBreak({ tripId, geo, address, occurredAt });
       } else if (type === 'expressway') {
         if (action === 'start') {
-          const { eventId } = await dbStartExpressway({ tripId, geo, address });
+          const { eventId } = await dbStartExpressway({ tripId, geo, address, occurredAt });
           enqueueExpresswayIcResolution({ eventId, geo });
         } else {
-          const { eventId } = await dbEndExpressway({ tripId, geo, address });
+          const { eventId } = await dbEndExpressway({ tripId, geo, address, occurredAt });
           enqueueExpresswayIcResolution({ eventId, geo });
         }
         await cancelNativeExpresswayEndPrompt(tripId);
         await clearPendingExpresswayEndDecision(tripId);
       }
+      if (type === 'break') requestRouteTrackingSync();
       await refresh();
       return true;
     });
@@ -200,8 +216,9 @@ export function useTripManager() {
   const handleAddRefuel = useCallback(async (liters: number) => {
     if (!tripId) return;
     return runOperation('refuel', async () => {
+      const occurredAt = new Date().toISOString();
       const { geo, address } = await captureGeoOnce();
-      await dbAddRefuel({ tripId, liters, geo, address });
+      await dbAddRefuel({ tripId, liters, geo, address, occurredAt });
       await refresh();
       return true;
     });
@@ -210,11 +227,12 @@ export function useTripManager() {
   const handleAddFerry = useCallback(async (action: 'boarding' | 'disembark') => {
     if (!tripId) return;
     return runOperation(`ferry-${action}`, async () => {
+      const occurredAt = new Date().toISOString();
       const { geo, address } = await captureGeoOnce();
       if (action === 'boarding') {
-        await dbAddBoarding({ tripId, geo, address });
+        await dbAddBoarding({ tripId, geo, address, occurredAt });
       } else {
-        await dbAddDisembark({ tripId, geo, address });
+        await dbAddDisembark({ tripId, geo, address, occurredAt });
       }
       requestRouteTrackingSync();
       await refresh();
@@ -225,8 +243,9 @@ export function useTripManager() {
   const handleAddPointMark = useCallback(async (label: string) => {
     if (!tripId) return;
     return runOperation('point-mark', async () => {
+      const occurredAt = new Date().toISOString();
       const { geo, address } = await captureGeoOnce();
-      await dbAddPointMark({ tripId, geo, address, label });
+      await dbAddPointMark({ tripId, geo, address, label, occurredAt });
       await refresh();
       return true;
     });

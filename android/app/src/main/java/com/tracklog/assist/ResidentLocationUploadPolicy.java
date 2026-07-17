@@ -1,5 +1,7 @@
 package com.tracklog.assist;
 
+import org.json.JSONObject;
+
 import java.net.URI;
 
 final class ResidentLocationUploadPolicy {
@@ -22,13 +24,38 @@ final class ResidentLocationUploadPolicy {
         if (statusCode >= 200 && statusCode < 300) return Action.SUCCESS;
         if (statusCode == 403) return Action.STOP_AUTHORIZATION;
         if (statusCode == 401) {
-            return refreshAlreadyAttempted ? Action.STOP_AUTHORIZATION : Action.REFRESH;
+            return refreshAlreadyAttempted ? Action.RETRY : Action.REFRESH;
         }
         return Action.RETRY;
     }
 
-    static boolean isPermanentRefreshFailure(int statusCode) {
-        return statusCode == 400 || statusCode == 401 || statusCode == 403;
+    static boolean isPermanentRefreshFailure(int statusCode, String responseBody) {
+        if (statusCode == 403) return true;
+        if (statusCode != 400 && statusCode != 401) return false;
+        String normalized = responseBody == null ? "" : responseBody.trim().toLowerCase();
+        String errorCode = "";
+        try {
+            JSONObject payload = new JSONObject(responseBody == null ? "" : responseBody);
+            errorCode = payload.optString("error_code", payload.optString("code", ""))
+                    .trim()
+                    .toLowerCase();
+        } catch (Exception ignored) {
+            // Some Supabase/proxy responses are plain text; use the fallback below.
+        }
+        if (errorCode.equals("refresh_token_already_used")
+                || errorCode.equals("refresh_token_not_found")
+                || errorCode.equals("session_not_found")
+                || errorCode.equals("user_not_found")) {
+            return true;
+        }
+        return normalized.contains("refresh_token_not_found")
+                || normalized.contains("refresh token not found")
+                || normalized.contains("refresh_token_already_used")
+                || normalized.contains("refresh token already used")
+                || normalized.contains("invalid refresh token: already used")
+                || normalized.contains("invalid refresh token")
+                || normalized.contains("session not found")
+                || normalized.contains("user not found");
     }
 
     static String normalizeBaseUrl(String value) {

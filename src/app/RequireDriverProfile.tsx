@@ -5,6 +5,7 @@ import type { DriverIdentity } from '../domain/remoteTypes';
 import {
   getDriverIdentity,
   initializeDriverIdentity,
+  onDriverAuthStateChange,
   sendDriverMagicLink,
   setDriverProfileLocal,
   verifyDriverEmailOtp,
@@ -431,6 +432,7 @@ export default function RequireDriverProfile({ children }: Props) {
   const [setupReadiness, setSetupReadiness] = useState<NativeSetupReadiness | null>(null);
   const [setupLoading, setSetupLoading] = useState(false);
   const wasBlockedRef = useRef(false);
+  const identityRefreshVersionRef = useRef(0);
 
   const refreshNativeSetup = async () => {
     setSetupLoading(true);
@@ -442,42 +444,51 @@ export default function RequireDriverProfile({ children }: Props) {
   };
 
   const refreshIdentity = async () => {
+    const refreshVersion = ++identityRefreshVersionRef.current;
     setLoading(true);
     try {
-      const current = await getDriverIdentity();
-      const next = current.configured ? await initializeDriverIdentity() : current;
-      setIdentity(next);
-      if (hasApprovedProfile(next)) {
-        await refreshNativeSetup();
+      let next: DriverIdentity;
+      try {
+        next = await initializeDriverIdentity();
+      } catch {
+        next = await getDriverIdentity();
       }
+      if (refreshVersion === identityRefreshVersionRef.current) setIdentity(next);
     } catch {
-      setIdentity(await getDriverIdentity());
+      // Keep the last known gate state when both Auth and local persistence are unavailable.
     } finally {
-      setLoading(false);
+      if (refreshVersion === identityRefreshVersionRef.current) setLoading(false);
     }
   };
 
+  const refreshIdentityRef = useRef(refreshIdentity);
+  refreshIdentityRef.current = refreshIdentity;
+
   useEffect(() => {
-    let active = true;
-    void (async () => {
-      try {
-        const current = await getDriverIdentity();
-        const next = current.configured ? await initializeDriverIdentity() : current;
-        if (active) {
-          setIdentity(next);
-        }
-      } catch {
-        if (active) {
-          setIdentity(await getDriverIdentity());
-        }
-      } finally {
-        if (active) {
-          setLoading(false);
-        }
-      }
-    })();
+    void refreshIdentityRef.current();
     return () => {
-      active = false;
+      identityRefreshVersionRef.current += 1;
+    };
+  }, []);
+
+  useEffect(() => {
+    const recheckIdentity = () => {
+      void refreshIdentityRef.current();
+    };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') recheckIdentity();
+    };
+    const unsubscribeAuth = onDriverAuthStateChange(event => {
+      if (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED' || event === 'SIGNED_OUT') {
+        recheckIdentity();
+      }
+    });
+    window.addEventListener('online', recheckIdentity);
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => {
+      unsubscribeAuth();
+      window.removeEventListener('online', recheckIdentity);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
     };
   }, []);
 

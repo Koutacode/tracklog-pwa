@@ -5,7 +5,11 @@ import {
   updateExpresswayResolved,
 } from '../db/repositories';
 import type { Geo } from '../domain/types';
-import { resolveNearestIC, type IcResult } from './icResolver';
+import {
+  isRetryableIcResolverError,
+  resolveNearestIC,
+  type IcResult,
+} from './icResolver';
 
 export type ExpresswayIcResolutionSource =
   | 'immediate'
@@ -27,7 +31,8 @@ export type ExpresswayIcResolutionOutcome =
   | {
       status: 'deferred';
       source: ExpresswayIcResolutionSource;
-      reason: 'offline';
+      reason: 'offline' | 'temporary';
+      error?: string;
     };
 
 export type ExpresswayIcResolutionRequest = {
@@ -41,6 +46,7 @@ type EnqueueRequest = Omit<ExpresswayIcResolutionRequest, 'source'> & {
 };
 
 const EXPRESSWAY_EVENT_TYPES = new Set(['expressway', 'expressway_start', 'expressway_end']);
+const TEMPORARY_RETRY_DELAY_MS = 2 * 60 * 1000;
 const inFlightByEventId = new Map<string, Promise<ExpresswayIcResolutionOutcome>>();
 let retryBatchInFlight: Promise<boolean> | null = null;
 
@@ -71,6 +77,7 @@ async function performResolution(
   const geo = await loadEventGeo(eventId, request.geo);
 
   if (!isOnline()) {
+    await updateExpresswayResolved({ eventId, status: 'pending' });
     return { status: 'deferred', source: request.source, reason: 'offline' };
   }
 
@@ -96,6 +103,20 @@ async function performResolution(
     return { status: 'resolved', source: request.source, result };
   } catch (error) {
     const message = errorMessage(error);
+    if (isRetryableIcResolverError(error)) {
+      await updateExpresswayResolved({
+        eventId,
+        status: 'pending',
+        nextRetryAt: new Date(Date.now() + TEMPORARY_RETRY_DELAY_MS).toISOString(),
+        errorMessage: message,
+      });
+      return {
+        status: 'deferred',
+        source: request.source,
+        reason: 'temporary',
+        error: message,
+      };
+    }
     await markExpresswayResolveFailure({ eventId, errorMessage: message });
     return { status: 'failed', source: request.source, error: message };
   }
@@ -142,13 +163,16 @@ export function enqueueNotificationExpresswayEndIcResolution(input: {
   });
 }
 
-export async function retryPendingExpresswayIcResolutions(limit = 8): Promise<boolean> {
+export async function retryPendingExpresswayIcResolutions(
+  limit = 8,
+  options?: { ignorePendingBackoff?: boolean },
+): Promise<boolean> {
   if (retryBatchInFlight) return retryBatchInFlight;
   if (!isOnline()) return false;
 
   retryBatchInFlight = (async () => {
     const boundedLimit = Math.min(20, Math.max(1, Math.round(limit)));
-    const pending = (await getPendingExpresswayEvents()).slice(0, boundedLimit);
+    const pending = (await getPendingExpresswayEvents(undefined, options)).slice(0, boundedLimit);
     let updatedAny = false;
     for (const event of pending) {
       const outcome = await resolveExpresswayIcResolution({
@@ -171,6 +195,12 @@ export async function retryPendingExpresswayIcResolutions(limit = 8): Promise<bo
 export async function resolveExpresswayIcManually(eventId: string): Promise<IcResult> {
   const outcome = await resolveExpresswayIcResolution({ eventId, source: 'manual' });
   if (outcome.status === 'resolved') return outcome.result;
-  if (outcome.status === 'deferred') throw new Error('オフラインのためIC名を取得できません');
+  if (outcome.status === 'deferred') {
+    throw new Error(
+      outcome.reason === 'offline'
+        ? 'オフラインのためIC名を取得できません'
+        : outcome.error || 'IC解決サーバーに一時的に接続できません',
+    );
+  }
   throw new Error(outcome.error);
 }
