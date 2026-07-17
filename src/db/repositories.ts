@@ -24,6 +24,15 @@ import {
 } from '../domain/routePointTelemetry';
 import { reverseGeocode } from '../services/geo';
 import { resolveNearestIC } from '../services/icResolver';
+import {
+  canRetryIcResolve as canRetryIcResolveExtras,
+  computeIcResolveBackoffMs,
+  getIcResolveAlgorithmVersion as getIcResolveAlgorithmVersionFromExtras,
+  getIcResolveRetryCount as getIcResolveRetryCountFromExtras,
+  IC_RESOLVE_ALGORITHM_VERSION,
+  IC_RESOLVE_RETRY_LIMIT,
+  isStaleIcResolveAlgorithm as isStaleIcResolveAlgorithmExtras,
+} from '../services/expresswayIcRetryPolicy';
 
 /*
  * Utilities
@@ -74,11 +83,6 @@ const META_ROUTE_TRACKING_MODE = 'routeTrackingMode';
 const META_PENDING_EXPRESSWAY_END_PROMPT = 'pendingExpresswayEndPrompt';
 const META_PENDING_EXPRESSWAY_END_DECISION = 'pendingExpresswayEndDecision';
 const META_REMOTE_ROUTE_POINTS_UPLOADED_THROUGH = 'remoteRoutePointsUploadedThrough';
-const IC_RESOLVE_RETRY_LIMIT = 6;
-// Bump this when resolver behavior changes so previously exhausted failures retry.
-const IC_RESOLVE_ALGORITHM_VERSION = 9;
-const IC_RESOLVE_BACKOFF_BASE_MS = 2 * 60 * 1000;
-const IC_RESOLVE_BACKOFF_CAP_MS = 60 * 60 * 1000;
 const EXPRESSWAY_EVENT_TYPES = ['expressway', 'expressway_start', 'expressway_end'] as const;
 const REPORT_MIN_DURATION_MINUTES = 15;
 const AUTO_REST_REASON_FERRY_BOARDING = 'ferry_boarding';
@@ -209,50 +213,20 @@ function normalizeAutoExpresswayDecisionReason(raw: unknown): AutoExpresswayDeci
   };
 }
 
-function parsePositiveInt(raw: unknown): number {
-  const n = Number(raw);
-  if (!Number.isFinite(n)) return 0;
-  return Math.max(0, Math.floor(n));
-}
-
 function getIcResolveRetryCount(ev: AppEvent): number {
-  return parsePositiveInt((ev as any).extras?.icResolveRetryCount);
+  return getIcResolveRetryCountFromExtras((ev as any).extras);
 }
 
 function getIcResolveAlgorithmVersion(ev: AppEvent): number {
-  return parsePositiveInt((ev as any).extras?.icResolveAlgorithmVersion);
+  return getIcResolveAlgorithmVersionFromExtras((ev as any).extras);
 }
 
 function isStaleIcResolveAlgorithm(ev: AppEvent): boolean {
-  return getIcResolveAlgorithmVersion(ev) < IC_RESOLVE_ALGORITHM_VERSION;
-}
-
-function getIcResolveNextRetryAtMs(ev: AppEvent): number | null {
-  const nextRetryAt = (ev as any).extras?.icResolveNextRetryAt;
-  if (typeof nextRetryAt !== 'string' || !nextRetryAt.trim()) return null;
-  const ms = Date.parse(nextRetryAt);
-  return Number.isFinite(ms) ? ms : null;
-}
-
-function computeIcResolveBackoffMs(retryCount: number): number {
-  const exponent = Math.max(0, retryCount - 1);
-  return Math.min(IC_RESOLVE_BACKOFF_CAP_MS, IC_RESOLVE_BACKOFF_BASE_MS * 2 ** exponent);
+  return isStaleIcResolveAlgorithmExtras((ev as any).extras);
 }
 
 function canRetryIcResolve(ev: AppEvent, nowMs: number, ignorePendingBackoff = false): boolean {
-  if (isStaleIcResolveAlgorithm(ev)) return true;
-  const status = (ev as any).extras?.icResolveStatus;
-  if (status == null || status === 'pending') {
-    if (ignorePendingBackoff) return true;
-    const nextRetryMs = getIcResolveNextRetryAtMs(ev);
-    return nextRetryMs == null || nextRetryMs <= nowMs;
-  }
-  if (status !== 'failed') return false;
-  const retryCount = getIcResolveRetryCount(ev);
-  if (retryCount >= IC_RESOLVE_RETRY_LIMIT) return false;
-  const nextRetryMs = getIcResolveNextRetryAtMs(ev);
-  if (nextRetryMs == null) return true;
-  return nextRetryMs <= nowMs;
+  return canRetryIcResolveExtras((ev as any).extras, nowMs, ignorePendingBackoff);
 }
 
 function normalizePendingExpresswayEndPrompt(raw: unknown): PendingExpresswayEndPrompt | null {
@@ -1792,7 +1766,7 @@ export async function markExpresswayResolveFailure(params: {
   if (!ev) {
     return { retryCount: 0, exhausted: true, nextRetryAt: null as string | null };
   }
-  const previousAlgorithmVersion = parsePositiveInt((ev as any).extras?.icResolveAlgorithmVersion);
+  const previousAlgorithmVersion = getIcResolveAlgorithmVersion(ev);
   const previousRetryCount =
     previousAlgorithmVersion < IC_RESOLVE_ALGORITHM_VERSION ? 0 : getIcResolveRetryCount(ev);
   const retryCount = previousRetryCount + 1;
