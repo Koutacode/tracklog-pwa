@@ -1,5 +1,7 @@
 package com.tracklog.assist;
 
+import android.content.Context;
+
 import com.getcapacitor.JSArray;
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
@@ -11,34 +13,96 @@ import com.getcapacitor.annotation.CapacitorPlugin;
 public final class ResidentLocationPlugin extends Plugin {
     @PluginMethod
     public void reconcile(PluginCall call) {
+        long requestEpoch = ResidentLocationUploader.currentAuthorizationMutationEpoch();
         boolean approved = Boolean.TRUE.equals(call.getBoolean("approved", false));
         boolean setupComplete = Boolean.TRUE.equals(call.getBoolean("setupComplete", false));
         String activeTripId = call.getString("activeTripId", "");
         long routePauseAtMs = Math.max(0L, call.getLong("routePauseAtMs", 0L));
-        ResidentLocationState.reconcile(
-                getContext(),
-                approved,
-                setupComplete,
-                activeTripId,
-                routePauseAtMs,
-                call.getString("supabaseUrl", ""),
-                call.getString("anonKey", ""),
-                call.getString("accessToken", ""),
-                call.getString("refreshToken", ""),
-                call.getString("deviceId", "")
-        );
+        Context appContext = getContext().getApplicationContext();
+        getBridge().execute(() -> {
+            boolean startRequested = false;
+            synchronized (ResidentLocationUploader.AUTHORIZATION_REFRESH_LOCK) {
+                if (ResidentLocationUploader.isLatestAuthorizationMutation(requestEpoch)) {
+                    ResidentLocationState.reconcile(
+                            appContext,
+                            approved,
+                            setupComplete,
+                            activeTripId,
+                            routePauseAtMs
+                    );
+                    startRequested = ResidentLocationService.startIfEligible(appContext);
+                }
+            }
+            call.resolve(buildStatus(startRequested));
+        });
+    }
 
-        boolean startRequested = ResidentLocationService.startIfEligible(getContext());
-        call.resolve(buildStatus(startRequested));
+    @PluginMethod
+    public void installAuthorization(PluginCall call) {
+        ResidentLocationState.Authorization authorization =
+                ResidentLocationState.Authorization.create(
+                        call.getString("supabaseUrl", ""),
+                        call.getString("anonKey", ""),
+                        call.getString("accessToken", ""),
+                        call.getString("refreshToken", ""),
+                        call.getString("deviceId", ""),
+                        System.currentTimeMillis()
+                );
+        if (!authorization.isConfigured()) {
+            call.reject("認証情報が不足しています。");
+            return;
+        }
+        long requestEpoch = ResidentLocationUploader.beginAuthorizationMutation();
+        Context appContext = getContext().getApplicationContext();
+        getBridge().execute(() -> {
+            boolean installed = false;
+            synchronized (ResidentLocationUploader.AUTHORIZATION_REFRESH_LOCK) {
+                if (ResidentLocationUploader.isLatestAuthorizationMutation(requestEpoch)) {
+                    installed = ResidentLocationState.installAuthorization(
+                            appContext,
+                            authorization
+                    );
+                    boolean applied = ResidentLocationUploader
+                            .markAuthorizationMutationApplied(requestEpoch);
+                    if (installed && applied) {
+                        ResidentLocationService.startIfEligible(appContext);
+                    }
+                }
+            }
+            if (!installed && ResidentLocationUploader.isLatestAuthorizationMutation(requestEpoch)) {
+                call.reject("認証情報を保存できませんでした。");
+                return;
+            }
+            ResidentLocationState.Authorization current =
+                    ResidentLocationState.getAuthorization(appContext);
+            call.resolve(buildAuthorization(
+                    current,
+                    ResidentLocationState.isAuthorizationBlocked(appContext)
+            ));
+        });
     }
 
     @PluginMethod
     public void stop(PluginCall call) {
+        long requestEpoch = ResidentLocationUploader.beginAuthorizationMutation();
         boolean clearAuthorization = Boolean.TRUE.equals(call.getBoolean("clearAuthorization", false));
         boolean clearActiveTrip = Boolean.TRUE.equals(call.getBoolean("clearActiveTrip", false));
-        ResidentLocationState.stop(getContext(), clearAuthorization, clearActiveTrip);
-        ResidentLocationService.stop(getContext());
-        call.resolve(buildStatus(false));
+        Context appContext = getContext().getApplicationContext();
+        getBridge().execute(() -> {
+            synchronized (ResidentLocationUploader.AUTHORIZATION_REFRESH_LOCK) {
+                if (ResidentLocationUploader.isLatestAuthorizationMutation(requestEpoch)) {
+                    ResidentLocationState.stop(
+                            appContext,
+                            clearAuthorization,
+                            clearActiveTrip
+                    );
+                    if (ResidentLocationUploader.markAuthorizationMutationApplied(requestEpoch)) {
+                        ResidentLocationService.stop(appContext);
+                    }
+                }
+            }
+            call.resolve(buildStatus(false));
+        });
     }
 
     @PluginMethod
@@ -50,12 +114,51 @@ public final class ResidentLocationPlugin extends Plugin {
     public void getAuthorization(PluginCall call) {
         ResidentLocationState.Authorization authorization =
                 ResidentLocationState.getAuthorization(getContext());
-        JSObject result = new JSObject();
-        result.put("configured", authorization.isConfigured());
-        result.put("accessToken", authorization.accessToken);
-        result.put("refreshToken", authorization.refreshToken);
-        result.put("updatedAt", authorization.updatedAt);
-        call.resolve(result);
+        call.resolve(buildAuthorization(
+                authorization,
+                ResidentLocationState.isAuthorizationBlocked(getContext())
+        ));
+    }
+
+    @PluginMethod
+    public void refreshAuthorization(PluginCall call) {
+        long requestEpoch = ResidentLocationUploader.currentAuthorizationMutationEpoch();
+        boolean force = Boolean.TRUE.equals(call.getBoolean("force", false));
+        Context appContext = getContext().getApplicationContext();
+        getBridge().execute(() -> {
+            try {
+                ResidentLocationUploader.AuthorizationRefreshResult result =
+                        ResidentLocationUploader.refreshAuthorizationForWebView(
+                                appContext,
+                                requestEpoch,
+                                force
+                        );
+                if (result.cancelled) {
+                    call.reject("認証更新は新しい認証操作により取り消されました。");
+                    return;
+                }
+                call.resolve(buildAuthorization(result.authorization, result.blocked));
+            } catch (Exception exception) {
+                call.reject("認証情報を更新できませんでした。", exception);
+            }
+        });
+    }
+
+    @PluginMethod
+    public void blockAuthorization(PluginCall call) {
+        long requestEpoch = ResidentLocationUploader.currentAuthorizationMutationEpoch();
+        Context appContext = getContext().getApplicationContext();
+        ResidentLocationState.Authorization expected =
+                ResidentLocationState.getAuthorization(appContext);
+        getBridge().execute(() -> {
+            ResidentLocationUploader.AuthorizationRefreshResult result =
+                    ResidentLocationUploader.blockAuthorization(
+                            appContext,
+                            expected,
+                            requestEpoch
+                    );
+            call.resolve(buildAuthorization(result.authorization, result.blocked));
+        });
     }
 
     @PluginMethod
@@ -113,6 +216,19 @@ public final class ResidentLocationPlugin extends Plugin {
         settings.put("exactAlarm", readiness.exactAlarm);
         settings.put("locationEnabled", readiness.locationEnabled);
         result.put("settings", settings);
+        return result;
+    }
+
+    private JSObject buildAuthorization(
+            ResidentLocationState.Authorization authorization,
+            boolean blocked
+    ) {
+        JSObject result = new JSObject();
+        result.put("configured", authorization.isConfigured());
+        result.put("accessToken", authorization.accessToken);
+        result.put("refreshToken", authorization.refreshToken);
+        result.put("updatedAt", authorization.updatedAt);
+        result.put("blocked", blocked);
         return result;
     }
 }

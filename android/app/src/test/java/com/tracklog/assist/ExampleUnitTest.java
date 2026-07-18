@@ -44,6 +44,142 @@ public class ExampleUnitTest {
     }
 
     @Test
+    public void blockedAuthorization_keepsServiceEligibleButDisablesUpload() {
+        ResidentLocationState.RoutineReconcilePolicy policy =
+                ResidentLocationState.routineReconcilePolicy(true, true, true, true);
+
+        assertTrue(policy.enabled);
+        assertTrue(policy.preserveAuthorization);
+        assertTrue(policy.preserveBlockedFingerprint);
+        assertTrue(policy.authorizationBlocked);
+        assertFalse(ResidentLocationState.isUploadAllowedState(true, true));
+        assertTrue(ResidentLocationState.isUploadAllowedState(true, false));
+        assertFalse(ResidentLocationState.isUploadAllowedState(false, false));
+    }
+
+    @Test
+    public void routineReconcile_ignoresEmptyWebAuthorizationAndKeepsConfiguredNativeAuth() {
+        ResidentLocationState.Authorization nativeAuthorization =
+                ResidentLocationState.Authorization.create(
+                        "https://example.supabase.co",
+                        "anon",
+                        "native-access",
+                        "native-refresh",
+                        "device",
+                        1L
+                );
+        ResidentLocationState.Authorization emptyWebAuthorization =
+                ResidentLocationState.Authorization.create("", "", "", "", "", 2L);
+        ResidentLocationState.RoutineReconcilePolicy policy =
+                ResidentLocationState.routineReconcilePolicy(
+                        true,
+                        true,
+                        nativeAuthorization.isConfigured(),
+                        false
+                );
+
+        assertFalse(emptyWebAuthorization.isConfigured());
+        assertTrue(policy.enabled);
+        assertTrue(policy.preserveAuthorization);
+        assertTrue(policy.preserveBlockedFingerprint);
+    }
+
+    @Test
+    public void authorizationCredentialCas_rejectsOld403AgainstNewAuthorization() {
+        ResidentLocationState.Authorization oldAuthorization =
+                ResidentLocationState.Authorization.create(
+                        "https://example.supabase.co",
+                        "anon",
+                        "old-access",
+                        "old-refresh",
+                        "device",
+                        1L
+                );
+        ResidentLocationState.Authorization newAuthorization =
+                ResidentLocationState.Authorization.create(
+                        "https://example.supabase.co",
+                        "anon",
+                        "new-access",
+                        "new-refresh",
+                        "device",
+                        2L
+                );
+
+        assertTrue(ResidentLocationState.authorizationCredentialsMatch(
+                oldAuthorization,
+                oldAuthorization
+        ));
+        assertFalse(ResidentLocationState.authorizationCredentialsMatch(
+                oldAuthorization,
+                newAuthorization
+        ));
+    }
+
+    @Test
+    public void blockedFingerprint_isKeptOnlyForTheSameAuthorization() {
+        ResidentLocationState.Authorization first = ResidentLocationState.Authorization.create(
+                "https://example.supabase.co",
+                "anon",
+                "access-1",
+                "refresh-1",
+                "device",
+                1L
+        );
+        ResidentLocationState.Authorization second = ResidentLocationState.Authorization.create(
+                "https://example.supabase.co",
+                "anon",
+                "access-2",
+                "refresh-2",
+                "device",
+                2L
+        );
+
+        assertTrue(ResidentLocationState.shouldRemainAuthorizationBlocked(
+                first.fingerprint(),
+                first.fingerprint()
+        ));
+        assertFalse(ResidentLocationState.shouldRemainAuthorizationBlocked(
+                first.fingerprint(),
+                second.fingerprint()
+        ));
+        assertFalse(ResidentLocationState.shouldRemainAuthorizationBlocked("", first.fingerprint()));
+    }
+
+    @Test
+    public void accessJwt_requiresAtLeastFiveMinutesRemaining() {
+        long nowMs = 1_700_000_000_000L;
+        assertTrue(ResidentLocationUploader.hasMinimumExpirationValidity(
+                1_700_000_300_000L,
+                nowMs,
+                300_000L
+        ));
+        assertFalse(ResidentLocationUploader.hasMinimumExpirationValidity(
+                1_700_000_299_000L,
+                nowMs,
+                300_000L
+        ));
+        assertFalse(ResidentLocationUploader.hasMinimumExpirationValidity(
+                0L,
+                nowMs,
+                300_000L
+        ));
+        assertFalse(ResidentLocationUploader.hasMinimumJwtValidity(
+                "not-a-jwt",
+                nowMs,
+                300_000L
+        ));
+    }
+
+    @Test
+    public void nativeAuthorizationRefresh_isForcedAfterAnAuthenticated401() {
+        assertFalse(ResidentLocationUploader.shouldRefreshAuthorization(true, false, true, false));
+        assertTrue(ResidentLocationUploader.shouldRefreshAuthorization(true, false, true, true));
+        assertTrue(ResidentLocationUploader.shouldRefreshAuthorization(true, false, false, false));
+        assertFalse(ResidentLocationUploader.shouldRefreshAuthorization(true, true, false, true));
+        assertFalse(ResidentLocationUploader.shouldRefreshAuthorization(false, false, false, true));
+    }
+
+    @Test
     public void uploadPolicy_stopsOnlyOnExplicitAuthorizationRejection() {
         assertEquals(
                 ResidentLocationUploadPolicy.Action.REFRESH,
@@ -89,4 +225,5 @@ public class ExampleUnitTest {
         assertEquals("", ResidentLocationUploadPolicy.normalizeBaseUrl("http://example.test"));
         assertEquals("", ResidentLocationUploadPolicy.normalizeBaseUrl("not-a-url"));
     }
+
 }

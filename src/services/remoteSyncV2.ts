@@ -23,7 +23,8 @@ import {
   type MissingParentCandidate,
 } from '../domain/reportSyncConflict';
 import { withRemoteSyncSignalsSuppressed } from '../app/remoteSyncSignal';
-import { driverSupabase } from './supabase';
+import { restoreNativeResidentLocationSession } from './nativeResidentLocation';
+import { driverAuthSupabase, driverSupabase } from './supabase';
 
 type SyncEntity =
   | 'trip'
@@ -1202,8 +1203,11 @@ async function getFunctionErrorMessage(error: unknown) {
 }
 
 export async function performRemoteSyncV2(identity: DriverIdentity): Promise<void> {
-  if (!driverSupabase || !identity.deviceId) throw new Error('同期に必要な端末情報がありません');
-  const { data: sessionData, error: sessionError } = await driverSupabase.auth.getSession();
+  if (!driverSupabase || !driverAuthSupabase || !identity.deviceId) {
+    throw new Error('同期に必要な端末情報がありません');
+  }
+  await restoreNativeResidentLocationSession();
+  const { data: sessionData, error: sessionError } = await driverAuthSupabase.auth.getSession();
   if (sessionError) throw sessionError;
   const userId = sessionData.session?.user?.id?.trim();
   if (!userId || sessionData.session?.user?.is_anonymous) throw new Error('メール認証済みアカウントでログインしてください');

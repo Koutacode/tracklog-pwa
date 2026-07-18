@@ -25,6 +25,11 @@ function assertEqual<T>(actual: T, expected: T, message: string) {
   }
 }
 
+function jwt(sub: string, iat: number, exp: number) {
+  const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
+  return `${encode({ alg: 'none' })}.${encode({ sub, iat, exp, session_id: 'session-a' })}.signature`;
+}
+
 async function run() {
   const local = new MemoryStorage();
   const indexed = new MemoryStorage();
@@ -53,6 +58,31 @@ async function run() {
     restoredLocal.getItem('tracklog-driver-auth'),
     'legacy-session',
     'restored session is mirrored back to localStorage',
+  );
+
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const staleLocalSession = JSON.stringify({
+    access_token: jwt('driver-a', nowSeconds - 600, nowSeconds + 600),
+    refresh_token: 'stale-local-refresh',
+  });
+  const newerIndexedSession = JSON.stringify({
+    access_token: jwt('driver-a', nowSeconds - 30, nowSeconds + 3600),
+    refresh_token: 'newer-indexed-refresh',
+  });
+  const competingLocal = new MemoryStorage();
+  const competingIndexed = new MemoryStorage();
+  competingLocal.setItem('tracklog-driver-auth', staleLocalSession);
+  competingIndexed.setItem('tracklog-driver-auth', newerIndexedSession);
+  const competingStorage = createMirroredAuthStorage(competingLocal, competingIndexed);
+  assertEqual(
+    await competingStorage.getItem('tracklog-driver-auth'),
+    newerIndexedSession,
+    'newer same-account IndexedDB session wins over stale localStorage',
+  );
+  assertEqual(
+    competingLocal.getItem('tracklog-driver-auth'),
+    newerIndexedSession,
+    'the selected IndexedDB session repairs localStorage',
   );
 
   await restoredStorage.setItem('tracklog-driver-auth-code-verifier', 'pkce');
@@ -127,7 +157,7 @@ async function run() {
     'network failure remains retryable',
   );
 
-  console.log('remoteAuthPersistence: 18 tests passed');
+  console.log('remoteAuthPersistence: 20 tests passed');
 }
 
 void run().catch(error => {

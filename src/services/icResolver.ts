@@ -1,6 +1,8 @@
+import { Capacitor } from '@capacitor/core';
 import type { Session } from '@supabase/supabase-js';
 import { getStableDeviceKey } from './deviceIdentity';
-import { driverSupabase, SUPABASE_CONFIGURED } from './supabase';
+import { restoreNativeResidentLocationSession } from './nativeResidentLocation';
+import { driverAuthSupabase, driverSupabase, SUPABASE_CONFIGURED } from './supabase';
 
 export type IcResult = { icName: string; distanceM: number };
 
@@ -29,6 +31,10 @@ const MIN_RADIUS_M = 250;
 const MAX_RADIUS_M = 12000;
 const SESSION_REFRESH_MARGIN_MS = 60_000;
 let sessionRefreshInFlight: Promise<Session> | null = null;
+
+function isAndroidNative() {
+  return Capacitor.isNativePlatform() && Capacitor.getPlatform() === 'android';
+}
 
 class IcResolverError extends Error {
   readonly retryable: boolean;
@@ -136,14 +142,20 @@ function authErrorMessage(error: unknown, fallback: string) {
 }
 
 async function refreshResolverSession(current: Session): Promise<Session> {
-  if (!driverSupabase) throw new IcResolverError('Supabase が未設定です', true);
+  if (!driverAuthSupabase) throw new IcResolverError('Supabase が未設定です', true);
   if (sessionRefreshInFlight) return sessionRefreshInFlight;
 
   sessionRefreshInFlight = (async () => {
     try {
-      const { data, error } = await driverSupabase.auth.refreshSession({
-        refresh_token: current.refresh_token,
-      });
+      const result = isAndroidNative()
+        ? await (async () => {
+            await restoreNativeResidentLocationSession({ forceRefresh: true });
+            return driverAuthSupabase.auth.getSession();
+          })()
+        : await driverAuthSupabase.auth.refreshSession({
+            refresh_token: current.refresh_token,
+          });
+      const { data, error } = result;
       if (error) {
         throw new IcResolverError(authErrorMessage(error, 'ログイン状態を更新できませんでした'), true);
       }
@@ -165,10 +177,11 @@ async function refreshResolverSession(current: Session): Promise<Session> {
 }
 
 async function getResolverSession(): Promise<Session> {
-  if (!driverSupabase) throw new IcResolverError('Supabase が未設定です', true);
+  if (!driverAuthSupabase) throw new IcResolverError('Supabase が未設定です', true);
   let result;
   try {
-    result = await driverSupabase.auth.getSession();
+    await restoreNativeResidentLocationSession();
+    result = await driverAuthSupabase.auth.getSession();
   } catch (error) {
     throw new IcResolverError(authErrorMessage(error, 'ログイン状態を確認できませんでした'), true);
   }

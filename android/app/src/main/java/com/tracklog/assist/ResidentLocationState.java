@@ -47,48 +47,37 @@ final class ResidentLocationState {
             boolean approved,
             boolean setupComplete,
             String activeTripId,
-            long routePauseAtMs,
-            String supabaseUrl,
-            String anonKey,
-            String accessToken,
-            String refreshToken,
-            String deviceId
+            long routePauseAtMs
     ) {
         String normalizedTripId = normalizeTripId(activeTripId);
         Authorization currentAuthorization = getAuthorization(context);
-        Authorization authorization = Authorization.create(
-                supabaseUrl,
-                anonKey,
-                accessToken,
-                refreshToken,
-                deviceId,
-                System.currentTimeMillis()
-        );
-        if (authorization.sameCredentials(currentAuthorization)) {
-            authorization = currentAuthorization;
-        }
-        String blockedFingerprint = preferences(context)
-                .getString(KEY_BLOCKED_AUTHORIZATION_FINGERPRINT, "");
-        boolean authorizationBlocked = authorization.isConfigured()
-                && authorization.fingerprint().equals(blockedFingerprint);
-        boolean enabled = isEligibleState(
+        RoutineReconcilePolicy policy = routineReconcilePolicy(
                 approved,
                 setupComplete,
-                authorization.isConfigured() && !authorizationBlocked
+                currentAuthorization.isConfigured(),
+                isAuthorizationBlocked(context)
         );
-        SharedPreferences.Editor editor = preferences(context).edit()
+        preferences(context).edit()
                 .putBoolean(KEY_APPROVED, approved)
                 .putBoolean(KEY_SETUP_COMPLETE, setupComplete)
-                .putBoolean(KEY_ENABLED, enabled)
+                .putBoolean(KEY_ENABLED, policy.enabled)
                 .putString(KEY_ACTIVE_TRIP_ID, normalizedTripId)
-                .putLong(KEY_ROUTE_PAUSE_AT_MS, Math.max(0L, routePauseAtMs));
-        if (approved && authorization.isConfigured() && !authorizationBlocked) {
-            writeAuthorization(editor, authorization);
-            editor.remove(KEY_BLOCKED_AUTHORIZATION_FINGERPRINT);
-        } else if (!approved) {
-            clearAuthorization(editor);
-        }
-        editor.commit();
+                .putLong(KEY_ROUTE_PAUSE_AT_MS, Math.max(0L, routePauseAtMs))
+                .commit();
+    }
+
+    static boolean installAuthorization(Context context, Authorization authorization) {
+        if (authorization == null || !authorization.isConfigured()) return false;
+        boolean enabled = isEligibleState(
+                isApproved(context),
+                isSetupComplete(context),
+                true
+        );
+        SharedPreferences.Editor editor = preferences(context).edit()
+                .putBoolean(KEY_ENABLED, enabled)
+                .remove(KEY_BLOCKED_AUTHORIZATION_FINGERPRINT);
+        writeAuthorization(editor, authorization);
+        return editor.commit();
     }
 
     static void stop(Context context, boolean clearAuthorization, boolean clearActiveTrip) {
@@ -96,6 +85,7 @@ final class ResidentLocationState {
         if (clearAuthorization) {
             editor.putBoolean(KEY_APPROVED, false).putBoolean(KEY_SETUP_COMPLETE, false);
             clearAuthorization(editor);
+            editor.remove(KEY_BLOCKED_AUTHORIZATION_FINGERPRINT);
         }
         if (clearActiveTrip) {
             editor.remove(KEY_ACTIVE_TRIP_ID);
@@ -141,6 +131,33 @@ final class ResidentLocationState {
         return approved && setupComplete && authorizationConfigured;
     }
 
+    static RoutineReconcilePolicy routineReconcilePolicy(
+            boolean approved,
+            boolean setupComplete,
+            boolean existingAuthorizationConfigured,
+            boolean authorizationBlocked
+    ) {
+        return new RoutineReconcilePolicy(
+                isEligibleState(approved, setupComplete, existingAuthorizationConfigured),
+                true,
+                true,
+                authorizationBlocked
+        );
+    }
+
+    static boolean isUploadAllowedState(boolean authorizationConfigured, boolean authorizationBlocked) {
+        return authorizationConfigured && !authorizationBlocked;
+    }
+
+    static boolean shouldRemainAuthorizationBlocked(
+            String blockedFingerprint,
+            String authorizationFingerprint
+    ) {
+        return blockedFingerprint != null
+                && !blockedFingerprint.isEmpty()
+                && blockedFingerprint.equals(authorizationFingerprint);
+    }
+
     static Authorization getAuthorization(Context context) {
         SharedPreferences preferences = preferences(context);
         return Authorization.create(
@@ -153,8 +170,14 @@ final class ResidentLocationState {
         );
     }
 
-    static void updateTokens(Context context, String accessToken, String refreshToken) {
+    static boolean updateTokensIfCurrent(
+            Context context,
+            Authorization expected,
+            String accessToken,
+            String refreshToken
+    ) {
         Authorization current = getAuthorization(context);
+        if (!authorizationCredentialsMatch(expected, current)) return false;
         Authorization updated = Authorization.create(
                 current.supabaseUrl,
                 current.anonKey,
@@ -163,10 +186,15 @@ final class ResidentLocationState {
                 current.deviceId,
                 System.currentTimeMillis()
         );
-        if (!updated.isConfigured()) return;
+        if (!updated.isConfigured()) return false;
         SharedPreferences.Editor editor = preferences(context).edit();
         writeAuthorization(editor, updated);
-        editor.commit();
+        String blockedFingerprint = preferences(context)
+                .getString(KEY_BLOCKED_AUTHORIZATION_FINGERPRINT, "");
+        if (!shouldRemainAuthorizationBlocked(blockedFingerprint, updated.fingerprint())) {
+            editor.remove(KEY_BLOCKED_AUTHORIZATION_FINGERPRINT);
+        }
+        return editor.commit();
     }
 
     static long getLastUploadAttemptAt(Context context) {
@@ -185,8 +213,12 @@ final class ResidentLocationState {
         preferences(context).edit().putLong(KEY_LAST_UPLOAD_SUCCESS_AT, timestampMs).commit();
     }
 
-    static void clearAuthorizationAndDisable(Context context) {
+    static boolean clearAuthorizationAndDisableIfCurrent(
+            Context context,
+            Authorization expected
+    ) {
         Authorization current = getAuthorization(context);
+        if (!authorizationCredentialsMatch(expected, current)) return false;
         SharedPreferences.Editor editor = preferences(context).edit()
                 .putBoolean(KEY_ENABLED, false)
                 .putBoolean(KEY_APPROVED, false);
@@ -194,13 +226,46 @@ final class ResidentLocationState {
         if (current.isConfigured()) {
             editor.putString(KEY_BLOCKED_AUTHORIZATION_FINGERPRINT, current.fingerprint());
         }
-        editor.commit();
+        return editor.commit();
+    }
+
+    static boolean blockAuthorizationIfCurrent(Context context, Authorization expected) {
+        Authorization current = getAuthorization(context);
+        if (!current.isConfigured() || !authorizationCredentialsMatch(expected, current)) {
+            return false;
+        }
+        return preferences(context).edit()
+                .putString(KEY_BLOCKED_AUTHORIZATION_FINGERPRINT, current.fingerprint())
+                .commit();
+    }
+
+    static boolean authorizationCredentialsMatch(Authorization expected, Authorization current) {
+        return expected != null && expected.sameCredentials(current);
     }
 
     static boolean isAuthorizationBlocked(Context context) {
         return !preferences(context)
                 .getString(KEY_BLOCKED_AUTHORIZATION_FINGERPRINT, "")
                 .isEmpty();
+    }
+
+    static final class RoutineReconcilePolicy {
+        final boolean enabled;
+        final boolean preserveAuthorization;
+        final boolean preserveBlockedFingerprint;
+        final boolean authorizationBlocked;
+
+        RoutineReconcilePolicy(
+                boolean enabled,
+                boolean preserveAuthorization,
+                boolean preserveBlockedFingerprint,
+                boolean authorizationBlocked
+        ) {
+            this.enabled = enabled;
+            this.preserveAuthorization = preserveAuthorization;
+            this.preserveBlockedFingerprint = preserveBlockedFingerprint;
+            this.authorizationBlocked = authorizationBlocked;
+        }
     }
 
     private static void writeAuthorization(SharedPreferences.Editor editor, Authorization authorization) {

@@ -32,12 +32,21 @@ import {
   initializeDriverIdentity,
   setRemoteLastSyncAt,
 } from './remoteAuth';
-import { driverSupabase, SUPABASE_CONFIGURED } from './supabase';
+import { restoreNativeResidentLocationSession } from './nativeResidentLocation';
+import { driverAuthSupabase, driverSupabase, SUPABASE_CONFIGURED } from './supabase';
 import { performRemoteSyncV2 } from './remoteSyncV2';
 
 type Listener = (state: RemoteSyncState) => void;
 
 const listeners = new Set<Listener>();
+
+async function getCurrentDriverSession() {
+  if (!driverAuthSupabase) return null;
+  await restoreNativeResidentLocationSession();
+  const { data, error } = await driverAuthSupabase.auth.getSession();
+  if (error) throw error;
+  return data.session;
+}
 
 let state: RemoteSyncState = {
   configured: SUPABASE_CONFIGURED,
@@ -306,8 +315,8 @@ async function getUserDeviceIds(userId: string): Promise<string[]> {
 
 async function fetchTableByDeviceIds<T extends Record<string, unknown>>(table: string): Promise<T[]> {
   if (!driverSupabase) return [];
-  const session = await driverSupabase.auth.getSession();
-  const userId = session.data.session?.user?.id?.trim();
+  const session = await getCurrentDriverSession();
+  const userId = session?.user?.id?.trim();
   if (!userId) return [];
   const deviceIds = await getUserDeviceIds(userId);
   if (deviceIds.length === 0) return [];
@@ -334,8 +343,8 @@ async function fetchTableByDeviceIds<T extends Record<string, unknown>>(table: s
 
 async function fetchUserCloudTripHeaders(): Promise<RemoteTripHeader[]> {
   if (!driverSupabase) return [];
-  const session = await driverSupabase.auth.getSession();
-  const userId = session.data.session?.user?.id?.trim();
+  const session = await getCurrentDriverSession();
+  const userId = session?.user?.id?.trim();
   if (!userId) return [];
   const deviceIds = await getUserDeviceIds(userId);
   if (deviceIds.length === 0) return [];
@@ -360,8 +369,8 @@ async function fetchUserCloudTripHeaders(): Promise<RemoteTripHeader[]> {
 
 async function fetchUserDeletedTripIds(): Promise<Set<string>> {
   if (!driverSupabase) return new Set();
-  const session = await driverSupabase.auth.getSession();
-  const userId = session.data.session?.user?.id?.trim();
+  const session = await getCurrentDriverSession();
+  const userId = session?.user?.id?.trim();
   if (!userId) return new Set();
   const deviceIds = await getUserDeviceIds(userId);
   if (deviceIds.length === 0) return new Set();
@@ -390,8 +399,8 @@ async function fetchUserDeletedTripIds(): Promise<Set<string>> {
 
 async function fetchUserDeletedEventIds(): Promise<Set<string>> {
   if (!driverSupabase) return new Set();
-  const session = await driverSupabase.auth.getSession();
-  const userId = session.data.session?.user?.id?.trim();
+  const session = await getCurrentDriverSession();
+  const userId = session?.user?.id?.trim();
   if (!userId) return new Set();
   const deviceIds = await getUserDeviceIds(userId);
   if (deviceIds.length === 0) return new Set();
@@ -444,8 +453,8 @@ async function uploadDeletedEventTombstones(deviceId: string): Promise<Set<strin
   const ids = new Set(local.map(item => item.eventId).filter(Boolean));
   if (local.length === 0 || !driverSupabase) return ids;
 
-  const session = await driverSupabase.auth.getSession();
-  const userId = session.data.session?.user?.id?.trim();
+  const session = await getCurrentDriverSession();
+  const userId = session?.user?.id?.trim();
   if (!userId) return ids;
 
   const rows: RemoteDeletedEventTombstone[] = uniqueByKey(local, item => item.eventId).map(item => ({

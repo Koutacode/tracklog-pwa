@@ -34,9 +34,9 @@ import {
 } from '../services/locationHeartbeat';
 import { pollTracklogAdminMessages } from '../services/adminMessages';
 import { ensureTracklogPushRegistration } from '../services/pushRegistration';
+import { isDriverExplicitSignOutRequested } from '../services/authStorageKeys';
 import {
   acknowledgeNativeResidentLocationPoints,
-  invalidateNativeResidentLocationSessionRestore,
   peekNativeResidentLocationPoints,
   reconcileNativeResidentLocation,
   restoreNativeResidentLocationSession,
@@ -124,6 +124,12 @@ export default function RouteTrackingSupervisor() {
       }
     };
 
+    const stopWebLocationWork = async () => {
+      stopLocationHeartbeat();
+      await stopResidentLocationUpdates();
+      await stopRouteTracking();
+    };
+
     const maybeRequestForegroundHeartbeat = () => {
       if (document.visibilityState !== 'visible') return;
       const now = Date.now();
@@ -159,8 +165,16 @@ export default function RouteTrackingSupervisor() {
           identity.profileComplete &&
           identity.approvalStatus === 'approved';
         if (!approved) {
-          const reason = !identity.authInitialized ? 'signed-out' : 'approval-rejected';
-          await stopAllLocationWork(reason);
+          if (native && !identity.authInitialized && !isDriverExplicitSignOutRequested()) {
+            // A Supabase refresh can temporarily remove only the WebView
+            // session. Keep the approved native enrollment available for the
+            // startup handoff instead of converting it into a real sign-out.
+            await stopWebLocationWork();
+          } else {
+            await stopAllLocationWork(
+              isDriverExplicitSignOutRequested() ? 'signed-out' : 'approval-rejected',
+            );
+          }
           return;
         }
 
@@ -295,9 +309,19 @@ export default function RouteTrackingSupervisor() {
       if (event === 'SIGNED_OUT') {
         lifecycleEpoch += 1;
         syncQueued = false;
-        invalidateNativeResidentLocationSessionRestore();
         void (async () => {
-          await stopAllLocationWork('signed-out');
+          if (isDriverExplicitSignOutRequested()) {
+            await stopAllLocationWork('signed-out');
+            return;
+          }
+          await stopWebLocationWork();
+          if (native) {
+            try {
+              await restoreNativeResidentLocationSession();
+            } catch (error) {
+              console.warn('[resident-location] signed-out recovery deferred', error);
+            }
+          }
           if (!disposed) void sync();
         })();
         return;

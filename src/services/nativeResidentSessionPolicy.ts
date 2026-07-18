@@ -1,11 +1,11 @@
-type JwtSessionClaims = {
+export type JwtSessionClaims = {
   sub: string;
   iat: number;
   exp: number;
   sessionId: string | null;
 };
 
-function decodeJwtSessionClaims(token: string): JwtSessionClaims | null {
+export function decodeJwtSessionClaims(token: string): JwtSessionClaims | null {
   const payload = token.split('.')[1];
   if (!payload || typeof atob !== 'function' || typeof TextDecoder === 'undefined') return null;
   try {
@@ -30,22 +30,24 @@ export function getJwtSessionId(token: string): string | null {
 }
 
 /** Returns true only when native credentials are safe and newer than WebView persistence. */
-export function shouldRestoreNativeAuthorization(
+function shouldUseNativeAuthorization(
   nativeAccessToken: string,
   persistedAccessToken: string | null | undefined,
-  nowMs = Date.now(),
+  nowMs: number,
+  allowSessionHandoff: boolean,
 ): boolean {
-  // Without a persisted WebView session we cannot prove that the native token
-  // belongs to the account that is still signed in. This also prevents an
-  // explicit sign-out from being undone by the background service.
-  if (!persistedAccessToken) return false;
   const nativeClaims = decodeJwtSessionClaims(nativeAccessToken);
+  // Native authorization is cleared before an explicit driver sign-out. If
+  // WebView persistence alone disappeared, the remaining native credentials
+  // are the durable enrollment for this approved Android installation.
+  if (!persistedAccessToken) return !!nativeClaims;
   const persistedClaims = decodeJwtSessionClaims(persistedAccessToken);
   if (!persistedClaims) return !!nativeClaims;
   if (!nativeClaims) return false;
   if (nativeClaims.sub !== persistedClaims.sub) return false;
   if (
-    nativeClaims.sessionId
+    !allowSessionHandoff
+    && nativeClaims.sessionId
     && persistedClaims.sessionId
     && nativeClaims.sessionId !== persistedClaims.sessionId
   ) {
@@ -59,4 +61,156 @@ export function shouldRestoreNativeAuthorization(
   if (nativeUsable !== persistedUsable) return nativeUsable;
   if (nativeClaims.iat !== persistedClaims.iat) return nativeClaims.iat > persistedClaims.iat;
   return nativeClaims.exp > persistedClaims.exp;
+}
+
+export function shouldRestoreNativeAuthorization(
+  nativeAccessToken: string,
+  persistedAccessToken: string | null | undefined,
+  nowMs = Date.now(),
+): boolean {
+  return shouldUseNativeAuthorization(
+    nativeAccessToken,
+    persistedAccessToken,
+    nowMs,
+    false,
+  );
+}
+
+export function shouldBootstrapNativeAuthorization(
+  nativeAccessToken: string,
+  persistedAccessToken: string | null | undefined,
+  nowMs = Date.now(),
+): boolean {
+  return shouldUseNativeAuthorization(
+    nativeAccessToken,
+    persistedAccessToken,
+    nowMs,
+    true,
+  );
+}
+
+export function shouldInstallWebAuthorizationIntoNative(input: {
+  nativeConfigured: boolean;
+  nativeAccessToken: string;
+  nativeRefreshToken: string;
+  webAccessToken: string;
+  webRefreshToken: string;
+  nowMs?: number;
+}): boolean {
+  if (!input.webAccessToken || !input.webRefreshToken) return false;
+  if (
+    input.nativeAccessToken === input.webAccessToken
+    && input.nativeRefreshToken === input.webRefreshToken
+  ) {
+    return false;
+  }
+  if (!input.nativeConfigured) return true;
+  return shouldBootstrapNativeAuthorization(
+    input.webAccessToken,
+    input.nativeAccessToken,
+    input.nowMs,
+  );
+}
+
+function parseStoredSession(raw: string | null): {
+  raw: string;
+  session: Record<string, unknown>;
+  accessToken: string;
+  claims: JwtSessionClaims;
+  hasUser: boolean;
+} | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    if (!parsed || typeof parsed !== 'object') return null;
+    const session = (
+      parsed.currentSession && typeof parsed.currentSession === 'object'
+        ? parsed.currentSession
+        : parsed
+    ) as Record<string, unknown>;
+    const accessToken = typeof session.access_token === 'string' ? session.access_token.trim() : '';
+    const claims = decodeJwtSessionClaims(accessToken);
+    if (!accessToken || !claims) return null;
+    return {
+      raw,
+      session,
+      accessToken,
+      claims,
+      hasUser: !!session.user && typeof session.user === 'object',
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function selectPreferredPersistedAuthSession(
+  localRaw: string | null,
+  indexedRaw: string | null,
+  nowMs = Date.now(),
+): string | null {
+  const local = parseStoredSession(localRaw);
+  const indexed = parseStoredSession(indexedRaw);
+  if (!local) return indexed?.raw ?? null;
+  if (!indexed) return local.raw;
+  if (local.accessToken === indexed.accessToken) {
+    return indexed.hasUser && !local.hasUser ? indexed.raw : local.raw;
+  }
+  // localStorage remains authoritative across different accounts. Native
+  // bootstrap will then reject a credential belonging to the other account.
+  if (local.claims.sub !== indexed.claims.sub) return local.raw;
+  if (shouldBootstrapNativeAuthorization(indexed.accessToken, local.accessToken, nowMs)) {
+    return indexed.raw;
+  }
+  if (shouldBootstrapNativeAuthorization(local.accessToken, indexed.accessToken, nowMs)) {
+    return local.raw;
+  }
+  return indexed.hasUser && !local.hasUser ? indexed.raw : local.raw;
+}
+
+export function buildNativeBootstrappedSession(input: {
+  nativeAccessToken: string;
+  nativeRefreshToken: string;
+  persistedRaw: string | null;
+  nowMs?: number;
+}): string | null {
+  const nativeAccessToken = input.nativeAccessToken.trim();
+  const nativeRefreshToken = input.nativeRefreshToken.trim();
+  if (!nativeAccessToken || !nativeRefreshToken) return null;
+
+  let persisted: Record<string, unknown> = {};
+  if (input.persistedRaw) {
+    try {
+      const parsed = JSON.parse(input.persistedRaw) as unknown;
+      if (parsed && typeof parsed === 'object') persisted = parsed as Record<string, unknown>;
+    } catch {
+      persisted = {};
+    }
+  }
+  const persistedSession = (
+    persisted.currentSession && typeof persisted.currentSession === 'object'
+      ? persisted.currentSession
+      : persisted
+  ) as Record<string, unknown>;
+  const persistedAccessToken = typeof persistedSession.access_token === 'string'
+    ? persistedSession.access_token
+    : null;
+  const nowMs = input.nowMs ?? Date.now();
+  if (!shouldBootstrapNativeAuthorization(nativeAccessToken, persistedAccessToken, nowMs)) {
+    return null;
+  }
+
+  const claims = decodeJwtSessionClaims(nativeAccessToken);
+  if (!claims) return null;
+  const nowSeconds = Math.floor(nowMs / 1000);
+  const nextSession: Record<string, unknown> = {
+    ...persistedSession,
+    access_token: nativeAccessToken,
+    refresh_token: nativeRefreshToken,
+    token_type: typeof persistedSession.token_type === 'string'
+      ? persistedSession.token_type
+      : 'bearer',
+    expires_at: claims.exp,
+    expires_in: Math.max(0, claims.exp - nowSeconds),
+  };
+  return JSON.stringify(nextSession);
 }

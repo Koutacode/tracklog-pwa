@@ -1,85 +1,41 @@
-import { Capacitor, registerPlugin } from '@capacitor/core';
+import { Capacitor } from '@capacitor/core';
 import { getStableDeviceKey } from './deviceIdentity';
 import {
   clearPersistedDriverAuthSession,
-  driverSupabase,
+  driverAuthSupabase,
   getPersistedDriverAuthTokens,
   SUPABASE_CONFIGURED,
 } from './supabase';
-import { getJwtSessionId, shouldRestoreNativeAuthorization } from './nativeResidentSessionPolicy';
+import { isDriverExplicitSignOutRequested } from './authStorageKeys';
+import { isPermanentDriverAuthFailure } from './driverAuthFailurePolicy';
+import {
+  canApplyDriverAuthIntent,
+  getDriverAuthIntentGeneration,
+  withDriverAuthMutation,
+} from './driverAuthMutationLock';
+import {
+  deferNativeAuthRecovery,
+  getDeferredNativeAuthRecoveryError,
+  resetNativeAuthRecoveryBackoff,
+} from './nativeAuthRecoveryBackoff';
+import {
+  getJwtSessionId,
+  shouldInstallWebAuthorizationIntoNative,
+  shouldRestoreNativeAuthorization,
+} from './nativeResidentSessionPolicy';
+import {
+  ResidentLocation,
+  type NativeResidentLocationPoint,
+  type NativeResidentLocationSettings,
+  type NativeResidentLocationStatus,
+} from './residentLocationBridge';
 
-export type NativeResidentLocationPoint = {
-  id: string;
-  tripId: string;
-  ts: string;
-  lat: number;
-  lng: number;
-  accuracy: number | null;
-  speed: number | null;
-  heading: number | null;
-  source: 'background';
-  provider: string | null;
-};
-
-export type NativeResidentLocationSettings = {
-  foregroundLocation: boolean;
-  backgroundLocation: boolean;
-  notifications: boolean;
-  batteryOptimization: boolean;
-  exactAlarm: boolean;
-  locationEnabled: boolean;
-};
-
-export type NativeResidentLocationStatus = {
-  approved: boolean;
-  setupComplete: boolean;
-  enabled: boolean;
-  eligible: boolean;
-  ready: boolean;
-  running: boolean;
-  startRequested: boolean;
-  activeTripId: string;
-  routePauseAtMs: number;
-  queuedPointCount: number;
-  authorizationConfigured: boolean;
-  authorizationBlocked: boolean;
-  lastUploadAt: number;
-  settings: NativeResidentLocationSettings;
-};
-
-export type NativeResidentLocationAuthorization = {
-  configured: boolean;
-  accessToken: string;
-  refreshToken: string;
-  updatedAt: number;
-};
-
-type ResidentLocationPlugin = {
-  reconcile(options: {
-    approved: boolean;
-    setupComplete: boolean;
-    activeTripId: string;
-    routePauseAtMs: number;
-    supabaseUrl: string;
-    anonKey: string;
-    accessToken: string;
-    refreshToken: string;
-    deviceId: string;
-  }): Promise<NativeResidentLocationStatus>;
-  stop(options: {
-    clearAuthorization: boolean;
-    clearActiveTrip: boolean;
-  }): Promise<NativeResidentLocationStatus>;
-  getStatus(): Promise<NativeResidentLocationStatus>;
-  getAuthorization(): Promise<NativeResidentLocationAuthorization>;
-  peek(options: { limit: number }): Promise<{
-    points: NativeResidentLocationPoint[];
-    remaining: number;
-  }>;
-  acknowledge(options: { ids: string[] }): Promise<{ remaining: number }>;
-};
-
-const ResidentLocation = registerPlugin<ResidentLocationPlugin>('ResidentLocation');
+export type {
+  NativeResidentLocationAuthorization,
+  NativeResidentLocationPoint,
+  NativeResidentLocationSettings,
+  NativeResidentLocationStatus,
+} from './residentLocationBridge';
 
 const EMPTY_SETTINGS: NativeResidentLocationSettings = {
   foregroundLocation: false,
@@ -111,10 +67,29 @@ const SUPABASE_URL = (import.meta.env?.VITE_SUPABASE_URL ?? '').trim();
 const SUPABASE_ANON_KEY = (import.meta.env?.VITE_SUPABASE_ANON_KEY ?? '').trim();
 let restoredAuthorizationUpdatedAt = 0;
 let restoreAuthorizationInFlight: Promise<boolean> | null = null;
+let restoreAuthorizationForceInFlight = false;
 let restoreAuthorizationGeneration = 0;
 
 function isAndroidNative() {
   return Capacitor.isNativePlatform() && Capacitor.getPlatform() === 'android';
+}
+
+function isResidentAuthIntentCurrent(generation: number) {
+  return canApplyDriverAuthIntent(
+    generation,
+    getDriverAuthIntentGeneration(),
+    isDriverExplicitSignOutRequested(),
+  );
+}
+
+function needsNativeSessionHydration(
+  authorization: { accessToken: string; refreshToken: string },
+  persisted: Awaited<ReturnType<typeof getPersistedDriverAuthTokens>>,
+) {
+  return !!persisted
+    && !persisted.hasUser
+    && persisted.accessToken === authorization.accessToken
+    && persisted.refreshToken === authorization.refreshToken;
 }
 
 export async function reconcileNativeResidentLocation(options: {
@@ -124,62 +99,192 @@ export async function reconcileNativeResidentLocation(options: {
   routePauseAt?: string | null;
 }): Promise<NativeResidentLocationStatus> {
   if (!isAndroidNative()) return EMPTY_STATUS;
+  const authIntent = getDriverAuthIntentGeneration();
+  if (!isResidentAuthIntentCurrent(authIntent)) return ResidentLocation.getStatus();
+  const client = driverAuthSupabase;
   await restoreNativeResidentLocationSession();
-  const { data, error } = driverSupabase
-    ? await driverSupabase.auth.getSession()
+  if (!isResidentAuthIntentCurrent(authIntent)) return ResidentLocation.getStatus();
+  const { data, error } = client
+    ? await client.auth.getSession()
     : { data: { session: null }, error: null };
   if (error) throw error;
+  if (!isResidentAuthIntentCurrent(authIntent)) return ResidentLocation.getStatus();
   const session = data.session;
-  const { stableDeviceKey } = await getStableDeviceKey();
+  if (session && client) {
+    const nativeAuthorization = await ResidentLocation.getAuthorization();
+    if (!isResidentAuthIntentCurrent(authIntent)) return ResidentLocation.getStatus();
+    const shouldInstall = shouldInstallWebAuthorizationIntoNative({
+      nativeConfigured: nativeAuthorization.configured,
+      nativeAccessToken: nativeAuthorization.accessToken,
+      nativeRefreshToken: nativeAuthorization.refreshToken,
+      webAccessToken: session.access_token,
+      webRefreshToken: session.refresh_token,
+    });
+    if (shouldInstall) {
+      const { data: verified, error: verificationError } = await client.auth.getUser();
+      if (!verificationError && verified.user) {
+        await installNativeResidentLocationAuthorization(authIntent);
+      } else if (verificationError) {
+        console.warn('[resident-location] newer WebView authorization was not installed', verificationError);
+      }
+    }
+  }
+  if (!isResidentAuthIntentCurrent(authIntent)) return ResidentLocation.getStatus();
   const routePauseAtMs = Date.parse(options.routePauseAt ?? '');
   return ResidentLocation.reconcile({
     approved: options.approved,
     setupComplete: options.setupComplete,
     activeTripId: options.activeTripId?.trim() ?? '',
     routePauseAtMs: Number.isFinite(routePauseAtMs) ? routePauseAtMs : 0,
-    supabaseUrl: SUPABASE_URL,
-    anonKey: SUPABASE_ANON_KEY,
-    accessToken: session?.access_token ?? '',
-    refreshToken: session?.refresh_token ?? '',
-    deviceId: stableDeviceKey,
   });
 }
 
-export async function restoreNativeResidentLocationSession(): Promise<boolean> {
-  if (!isAndroidNative() || !SUPABASE_CONFIGURED || !driverSupabase) return false;
-  if (restoreAuthorizationInFlight) return restoreAuthorizationInFlight;
+/** Explicitly installs a confirmed login session into the Android owner. */
+export async function installNativeResidentLocationAuthorization(
+  expectedAuthIntent = getDriverAuthIntentGeneration(),
+): Promise<boolean> {
+  const client = driverAuthSupabase;
+  if (!isAndroidNative() || !SUPABASE_CONFIGURED || !client) return false;
+  if (!isResidentAuthIntentCurrent(expectedAuthIntent)) return false;
+  const { data, error } = await client.auth.getSession();
+  if (error) throw error;
+  if (!isResidentAuthIntentCurrent(expectedAuthIntent)) return false;
+  const session = data.session;
+  if (!session?.access_token || !session.refresh_token) return false;
+  const { stableDeviceKey } = await getStableDeviceKey();
+  if (!isResidentAuthIntentCurrent(expectedAuthIntent)) return false;
+  await ResidentLocation.installAuthorization({
+    supabaseUrl: SUPABASE_URL,
+    anonKey: SUPABASE_ANON_KEY,
+    accessToken: session.access_token,
+    refreshToken: session.refresh_token,
+    deviceId: stableDeviceKey,
+  });
+  return isResidentAuthIntentCurrent(expectedAuthIntent);
+}
+
+export async function restoreNativeResidentLocationSession(options?: {
+  forceRefresh?: boolean;
+}): Promise<boolean> {
+  const client = driverAuthSupabase;
+  if (!isAndroidNative() || !SUPABASE_CONFIGURED || !client) return false;
+  if (isDriverExplicitSignOutRequested()) return false;
+  if (restoreAuthorizationInFlight) {
+    const currentRestore = restoreAuthorizationInFlight;
+    const currentRestoreWasForced = restoreAuthorizationForceInFlight;
+    const result = await currentRestore;
+    if (options?.forceRefresh && !currentRestoreWasForced) {
+      return restoreNativeResidentLocationSession(options);
+    }
+    return result;
+  }
+  const deferredError = getDeferredNativeAuthRecoveryError();
+  if (deferredError) throw deferredError;
 
   const restoreGeneration = restoreAuthorizationGeneration;
-  restoreAuthorizationInFlight = (async () => {
-    const authorization = await ResidentLocation.getAuthorization();
+  restoreAuthorizationForceInFlight = options?.forceRefresh === true;
+  restoreAuthorizationInFlight = withDriverAuthMutation(async () => {
     if (restoreGeneration !== restoreAuthorizationGeneration) return false;
-    if (!authorization.configured || !authorization.accessToken || !authorization.refreshToken) return false;
-    if (
-      restoredAuthorizationUpdatedAt > 0
-      && authorization.updatedAt <= restoredAuthorizationUpdatedAt
-    ) {
+    if (isDriverExplicitSignOutRequested()) return false;
+    let authorization;
+    try {
+      authorization = await ResidentLocation.refreshAuthorization({
+        force: options?.forceRefresh === true,
+      });
+    } catch (error) {
+      deferNativeAuthRecovery(error);
+      throw error;
+    }
+    if (restoreGeneration !== restoreAuthorizationGeneration) return false;
+    if (!authorization.configured || !authorization.accessToken || !authorization.refreshToken) {
+      resetNativeAuthRecoveryBackoff();
       return false;
     }
-
     const persisted = await getPersistedDriverAuthTokens();
-    if (!shouldRestoreNativeAuthorization(authorization.accessToken, persisted?.accessToken)) {
+    if (authorization.blocked) {
+      const sameBlockedCredential = !persisted || (
+        persisted.accessToken === authorization.accessToken
+        && persisted.refreshToken === authorization.refreshToken
+      );
+      if (sameBlockedCredential) {
+        await clearPersistedDriverAuthSession();
+        const { data: current } = await client.auth.getSession();
+        if (current.session) {
+          const { error: signOutError } = await client.auth.signOut({ scope: 'local' });
+          if (signOutError) {
+            console.warn('[resident-location] blocked session cleanup failed', signOutError);
+          }
+        }
+      }
+      restoredAuthorizationUpdatedAt = authorization.updatedAt || Date.now();
+      resetNativeAuthRecoveryBackoff();
+      return false;
+    }
+    if (
+      persisted
+      && restoredAuthorizationUpdatedAt > 0
+      && authorization.updatedAt <= restoredAuthorizationUpdatedAt
+    ) {
+      resetNativeAuthRecoveryBackoff();
+      return false;
+    }
+    if (
+      !shouldRestoreNativeAuthorization(authorization.accessToken, persisted?.accessToken)
+      && !needsNativeSessionHydration(authorization, persisted)
+    ) {
       restoredAuthorizationUpdatedAt = Math.max(
         restoredAuthorizationUpdatedAt,
         authorization.updatedAt,
       );
+      resetNativeAuthRecoveryBackoff();
+      return false;
+    }
+    if (restoreGeneration !== restoreAuthorizationGeneration) return false;
+    if (isDriverExplicitSignOutRequested()) return false;
+
+    // Login callbacks can replace the session while native state is being read.
+    // Check persistence again immediately before the mutation.
+    const latestPersisted = await getPersistedDriverAuthTokens();
+    if (
+      !shouldRestoreNativeAuthorization(authorization.accessToken, latestPersisted?.accessToken)
+      && !needsNativeSessionHydration(authorization, latestPersisted)
+    ) {
+      resetNativeAuthRecoveryBackoff();
       return false;
     }
     if (restoreGeneration !== restoreAuthorizationGeneration) return false;
 
     // Native upload may have rotated the refresh token while the WebView was suspended.
-    const { data, error } = await driverSupabase.auth.setSession({
+    const { data, error } = await client.auth.setSession({
       access_token: authorization.accessToken,
       refresh_token: authorization.refreshToken,
     });
-    if (error) throw error;
+    if (error) {
+      if (isPermanentDriverAuthFailure(error)) {
+        invalidateNativeResidentLocationSessionRestore();
+        restoredAuthorizationUpdatedAt = authorization.updatedAt || Date.now();
+        resetNativeAuthRecoveryBackoff();
+        await clearPersistedDriverAuthSession();
+        try {
+          await ResidentLocation.blockAuthorization();
+        } catch (blockError) {
+          console.warn('[resident-location] invalid native authorization could not be quarantined', blockError);
+        }
+        const { data: current } = await client.auth.getSession();
+        if (current.session) {
+          const { error: signOutError } = await client.auth.signOut({ scope: 'local' });
+          if (signOutError) {
+            console.warn('[resident-location] invalid WebView session cleanup failed', signOutError);
+          }
+        }
+      } else {
+        deferNativeAuthRecovery(error);
+      }
+      throw error;
+    }
     if (restoreGeneration !== restoreAuthorizationGeneration) {
       const restoredAccessToken = data.session?.access_token ?? authorization.accessToken;
-      const { data: current } = await driverSupabase.auth.getSession();
+      const { data: current } = await client.auth.getSession();
       const restoredSessionId = getJwtSessionId(restoredAccessToken);
       const currentSessionId = getJwtSessionId(current.session?.access_token ?? '');
       const sameRestoredSession = restoredSessionId && currentSessionId
@@ -189,7 +294,7 @@ export async function restoreNativeResidentLocationSession(): Promise<boolean> {
         // Remove mirrored storage first. signOut can otherwise return early on
         // a revoke-network error and leave this stale session persisted.
         await clearPersistedDriverAuthSession();
-        const { error: signOutError } = await driverSupabase.auth.signOut({ scope: 'local' });
+        const { error: signOutError } = await client.auth.signOut({ scope: 'local' });
         if (signOutError) {
           console.warn('[resident-location] stale restored session notification failed', signOutError);
         }
@@ -197,13 +302,15 @@ export async function restoreNativeResidentLocationSession(): Promise<boolean> {
       return false;
     }
     restoredAuthorizationUpdatedAt = authorization.updatedAt || Date.now();
+    resetNativeAuthRecoveryBackoff();
     return true;
-  })();
+  });
 
   try {
     return await restoreAuthorizationInFlight;
   } finally {
     restoreAuthorizationInFlight = null;
+    restoreAuthorizationForceInFlight = false;
   }
 }
 

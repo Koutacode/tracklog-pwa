@@ -1,13 +1,18 @@
 import { createClient } from '@supabase/supabase-js';
+import { Capacitor } from '@capacitor/core';
+import {
+  AUTH_CLEARED_KEY_SUFFIX,
+  AUTH_DB_NAME,
+  AUTH_DB_VERSION,
+  AUTH_STORE_NAME,
+  DRIVER_AUTH_STORAGE_KEY,
+  isDriverExplicitSignOutRequested,
+} from './authStorageKeys';
+import { selectPreferredPersistedAuthSession } from './nativeResidentSessionPolicy';
+import { ResidentLocation } from './residentLocationBridge';
 
 const supabaseUrl = (import.meta.env?.VITE_SUPABASE_URL ?? '').trim();
 const supabaseAnonKey = (import.meta.env?.VITE_SUPABASE_ANON_KEY ?? '').trim();
-
-const AUTH_DB_NAME = 'tracklog-auth';
-const AUTH_DB_VERSION = 1;
-const AUTH_STORE_NAME = 'sessions';
-const CLEARED_KEY_SUFFIX = ':tracklog-cleared';
-const DRIVER_AUTH_STORAGE_KEY = 'tracklog-driver-auth';
 
 export type AuthStorageAdapter = {
   getItem(key: string): string | null | Promise<string | null>;
@@ -16,6 +21,7 @@ export type AuthStorageAdapter = {
 };
 
 export const SUPABASE_CONFIGURED = !!supabaseUrl && !!supabaseAnonKey;
+const ANDROID_NATIVE = Capacitor.isNativePlatform() && Capacitor.getPlatform() === 'android';
 
 let authDatabasePromise: Promise<IDBDatabase> | null = null;
 
@@ -110,18 +116,37 @@ export function createMirroredAuthStorage(
         }
       }
 
+      let indexedValue: string | null = null;
+      try {
+        indexedValue = await indexedDbStorage.getItem(key);
+      } catch {
+        indexedValue = null;
+      }
+
       if (localValue != null) {
+        const preferredValue = key === DRIVER_AUTH_STORAGE_KEY
+          ? selectPreferredPersistedAuthSession(localValue, indexedValue) ?? localValue
+          : localValue;
+        if (localStorage && preferredValue !== localValue) {
+          try {
+            await localStorage.setItem(key, preferredValue);
+          } catch {
+            // IndexedDB remains usable if localStorage cannot be repaired.
+          }
+        }
         try {
-          await indexedDbStorage.setItem(key, localValue);
+          if (preferredValue !== indexedValue) {
+            await indexedDbStorage.setItem(key, preferredValue);
+          }
         } catch {
           // localStorage remains a valid compatibility source when IndexedDB is unavailable.
         }
-        return localValue;
+        return preferredValue;
       }
 
       if (localStorage) {
         try {
-          if (await localStorage.getItem(`${key}${CLEARED_KEY_SUFFIX}`)) {
+          if (await localStorage.getItem(`${key}${AUTH_CLEARED_KEY_SUFFIX}`)) {
             try {
               await indexedDbStorage.removeItem(key);
             } catch {
@@ -134,18 +159,12 @@ export function createMirroredAuthStorage(
         }
       }
 
-      let indexedValue: string | null = null;
-      try {
-        indexedValue = await indexedDbStorage.getItem(key);
-      } catch {
-        return null;
-      }
       if (indexedValue == null) return null;
 
       if (localStorage) {
         try {
           await localStorage.setItem(key, indexedValue);
-          await localStorage.removeItem(`${key}${CLEARED_KEY_SUFFIX}`);
+          await localStorage.removeItem(`${key}${AUTH_CLEARED_KEY_SUFFIX}`);
         } catch {
           // IndexedDB remains authoritative when localStorage cannot be written.
         }
@@ -157,7 +176,7 @@ export function createMirroredAuthStorage(
       if (localStorage) {
         try {
           await localStorage.setItem(key, value);
-          await localStorage.removeItem(`${key}${CLEARED_KEY_SUFFIX}`);
+          await localStorage.removeItem(`${key}${AUTH_CLEARED_KEY_SUFFIX}`);
           stored = true;
         } catch {
           // Continue so IndexedDB can retain the session.
@@ -175,7 +194,7 @@ export function createMirroredAuthStorage(
       if (localStorage) {
         try {
           await localStorage.removeItem(key);
-          await localStorage.setItem(`${key}${CLEARED_KEY_SUFFIX}`, '1');
+          await localStorage.setItem(`${key}${AUTH_CLEARED_KEY_SUFFIX}`, '1');
         } catch {
           // IndexedDB removal still prevents future session restoration.
         }
@@ -189,15 +208,38 @@ export function createMirroredAuthStorage(
   };
 }
 
-function buildClient(storageKey: string, storage?: AuthStorageAdapter) {
+function buildClient(
+  storageKey: string,
+  storage?: AuthStorageAdapter,
+  autoRefreshToken = true,
+) {
   if (!SUPABASE_CONFIGURED) return null;
   return createClient(supabaseUrl, supabaseAnonKey, {
     auth: {
-      autoRefreshToken: true,
+      autoRefreshToken,
       persistSession: true,
       detectSessionInUrl: false,
       storageKey,
       ...(storage ? { storage } : {}),
+    },
+  });
+}
+
+async function getNativeDriverAccessToken(): Promise<string | null> {
+  if (!ANDROID_NATIVE || isDriverExplicitSignOutRequested()) return null;
+  const authorization = await ResidentLocation.refreshAuthorization({ force: false });
+  if (!authorization.configured || authorization.blocked) return null;
+  return authorization.accessToken || null;
+}
+
+function buildNativeDriverDataClient() {
+  if (!SUPABASE_CONFIGURED) return null;
+  return createClient(supabaseUrl, supabaseAnonKey, {
+    accessToken: getNativeDriverAccessToken,
+    auth: {
+      autoRefreshToken: false,
+      persistSession: false,
+      detectSessionInUrl: false,
     },
   });
 }
@@ -210,6 +252,7 @@ const driverAuthStorage = createMirroredAuthStorage(
 export type PersistedDriverAuthTokens = {
   accessToken: string;
   refreshToken: string;
+  hasUser: boolean;
 };
 
 export async function getPersistedDriverAuthTokens(): Promise<PersistedDriverAuthTokens | null> {
@@ -229,7 +272,8 @@ export async function getPersistedDriverAuthTokens(): Promise<PersistedDriverAut
     ) as Record<string, unknown>;
     const accessToken = typeof session.access_token === 'string' ? session.access_token.trim() : '';
     const refreshToken = typeof session.refresh_token === 'string' ? session.refresh_token.trim() : '';
-    return accessToken && refreshToken ? { accessToken, refreshToken } : null;
+    const hasUser = !!session.user && typeof session.user === 'object';
+    return accessToken && refreshToken ? { accessToken, refreshToken, hasUser } : null;
   } catch {
     return null;
   }
@@ -244,5 +288,16 @@ export async function clearPersistedDriverAuthSession(): Promise<void> {
   ]);
 }
 
-export const driverSupabase = buildClient(DRIVER_AUTH_STORAGE_KEY, driverAuthStorage);
+// The Android foreground service is the sole refresh-token owner. This avoids
+// native/WebView rotation races while still allowing normal PWA auto-refresh.
+export const driverAuthSupabase = buildClient(
+  DRIVER_AUTH_STORAGE_KEY,
+  driverAuthStorage,
+  !ANDROID_NATIVE,
+);
+// Android data requests use a token callback backed by the native owner. This
+// client intentionally exposes no usable auth API, preventing implicit refresh.
+export const driverSupabase = ANDROID_NATIVE
+  ? buildNativeDriverDataClient()
+  : driverAuthSupabase;
 export const adminSupabase = buildClient('tracklog-admin-auth');

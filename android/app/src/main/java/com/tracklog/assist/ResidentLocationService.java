@@ -201,6 +201,12 @@ public final class ResidentLocationService extends Service implements LocationLi
     }
 
     private void uploadLatestLocation(Location location) {
+        ResidentLocationState.Authorization authorization =
+                ResidentLocationState.getAuthorization(this);
+        if (!ResidentLocationState.isUploadAllowedState(
+                authorization.isConfigured(),
+                ResidentLocationState.isAuthorizationBlocked(this)
+        )) return;
         long now = System.currentTimeMillis();
         if (!ResidentLocationUploadPolicy.shouldAttempt(
                 now,
@@ -215,7 +221,11 @@ public final class ResidentLocationService extends Service implements LocationLi
                 if (outcome == ResidentLocationUploader.Outcome.SUCCESS) {
                     ResidentLocationState.markUploadSuccess(this, System.currentTimeMillis());
                 } else if (outcome == ResidentLocationUploader.Outcome.STOPPED_AUTHORIZATION) {
-                    handler.post(this::stopResidentService);
+                    handler.post(() -> {
+                        if (!ResidentLocationState.isEligible(this)) {
+                            stopResidentService();
+                        }
+                    });
                 }
             } finally {
                 uploadInFlight.set(false);

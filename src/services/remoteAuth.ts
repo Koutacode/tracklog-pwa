@@ -5,8 +5,29 @@ import { requestImmediateRemoteSync } from '../app/remoteSyncSignal';
 import { db } from '../db/db';
 import type { AdminSession, DriverApprovalStatus, DriverIdentity } from '../domain/remoteTypes';
 import { getStableDeviceKey } from './deviceIdentity';
-import { adminSupabase, driverSupabase, SUPABASE_CONFIGURED } from './supabase';
-import { restoreNativeResidentLocationSession } from './nativeResidentLocation';
+import {
+  clearPersistedDriverAuthSession,
+  adminSupabase,
+  driverAuthSupabase,
+  driverSupabase,
+  SUPABASE_CONFIGURED,
+} from './supabase';
+import {
+  installNativeResidentLocationAuthorization,
+  invalidateNativeResidentLocationSessionRestore,
+  restoreNativeResidentLocationSession,
+  stopNativeResidentLocation,
+} from './nativeResidentLocation';
+import {
+  clearDriverExplicitSignOut,
+  markDriverExplicitSignOut,
+} from './authStorageKeys';
+import { isPermanentDriverAuthFailure } from './driverAuthFailurePolicy';
+import {
+  beginDriverAuthIntent,
+  isCurrentDriverAuthIntent,
+  withDriverAuthMutation,
+} from './driverAuthMutationLock';
 import {
   claimTracklogDeviceProfileViaFunction,
   migrateTracklogDeviceRecordsViaFunction,
@@ -132,34 +153,7 @@ export function isDriverProfileComplete(input: {
   return validateDriverProfile({ displayName, vehicleLabel, email, phone }).valid;
 }
 
-export function isPermanentDriverAuthFailure(error: unknown): boolean {
-  const record = error && typeof error === 'object' ? error as Record<string, unknown> : null;
-  const code = (
-    typeof record?.code === 'string'
-      ? record.code
-      : typeof record?.error_code === 'string'
-        ? record.error_code
-        : ''
-  ).trim().toLowerCase();
-  if (
-    code === 'refresh_token_already_used'
-    || code === 'refresh_token_not_found'
-    || code === 'session_not_found'
-    || code === 'user_not_found'
-  ) {
-    return true;
-  }
-  const text = error instanceof Error ? error.message.trim().toLowerCase() : '';
-  if (!text) return false;
-  return text.includes('refresh_token_not_found')
-    || text.includes('refresh token not found')
-    || text.includes('refresh_token_already_used')
-    || text.includes('refresh token already used')
-    || text.includes('invalid refresh token: already used')
-    || text.includes('invalid refresh token')
-    || text.includes('session not found')
-    || text.includes('user not found');
-}
+export { isPermanentDriverAuthFailure } from './driverAuthFailurePolicy';
 
 export function deriveDriverIdentityFromPersistence(input: {
   configured: boolean;
@@ -311,9 +305,9 @@ export async function getDriverIdentity(): Promise<DriverIdentity> {
 }
 
 async function getProfileIdentity() {
-  if (!SUPABASE_CONFIGURED || !driverSupabase) return null;
+  if (!SUPABASE_CONFIGURED || !driverAuthSupabase) return null;
   await restoreNativeResidentLocationSession();
-  const { data, error } = await driverSupabase.auth.getSession();
+  const { data, error } = await driverAuthSupabase.auth.getSession();
   if (error) throw error;
   const session = data.session;
   if (!session?.user) return null;
@@ -324,7 +318,7 @@ async function getProfileIdentity() {
 }
 
 export async function initializeDriverIdentity(): Promise<DriverIdentity> {
-  if (!SUPABASE_CONFIGURED || !driverSupabase) {
+  if (!SUPABASE_CONFIGURED || !driverAuthSupabase) {
     return getDriverIdentity();
   }
 
@@ -335,7 +329,7 @@ export async function initializeDriverIdentity(): Promise<DriverIdentity> {
   let session: Session | null;
   try {
     await restoreNativeResidentLocationSession();
-    const { data, error } = await driverSupabase.auth.getSession();
+    const { data, error } = await driverAuthSupabase.auth.getSession();
     if (error) throw error;
     session = data.session;
   } catch (error) {
@@ -631,7 +625,7 @@ export async function verifyAdminEmailOtp(email: string, token: string): Promise
 }
 
 export async function sendDriverMagicLink(email: string, redirectTo?: string): Promise<void> {
-  if (!SUPABASE_CONFIGURED || !driverSupabase) {
+  if (!SUPABASE_CONFIGURED || !driverAuthSupabase) {
     throw new Error('Supabase が未設定です');
   }
   const normalized = normalizeEmail(email);
@@ -646,7 +640,7 @@ export async function sendDriverMagicLink(email: string, redirectTo?: string): P
   if (lockedEmail && !sameEmailAddress(normalized, lockedEmail)) {
     throw new Error(`この端末は ${lockedEmail} のアカウントに紐づいています。同じメールで再認証してください。`);
   }
-  const { error } = await driverSupabase.auth.signInWithOtp({
+  const { error } = await driverAuthSupabase.auth.signInWithOtp({
     email: normalized,
     options: {
       emailRedirectTo: getDriverRedirectUrl(redirectTo),
@@ -657,7 +651,7 @@ export async function sendDriverMagicLink(email: string, redirectTo?: string): P
 }
 
 export async function sendDriverLoginLink(email: string, redirectTo?: string): Promise<void> {
-  if (!SUPABASE_CONFIGURED || !driverSupabase) {
+  if (!SUPABASE_CONFIGURED || !driverAuthSupabase) {
     throw new Error('Supabase が未設定です');
   }
   const normalized = normalizeEmail(email);
@@ -672,7 +666,7 @@ export async function sendDriverLoginLink(email: string, redirectTo?: string): P
   if (lockedEmail && !sameEmailAddress(normalized, lockedEmail)) {
     throw new Error(`この端末は ${lockedEmail} のアカウントに紐づいています。同じメールで再認証してください。`);
   }
-  const { error } = await driverSupabase.auth.signInWithOtp({
+  const { error } = await driverAuthSupabase.auth.signInWithOtp({
     email: normalized,
     options: {
       emailRedirectTo: getDriverRedirectUrl(redirectTo),
@@ -683,7 +677,8 @@ export async function sendDriverLoginLink(email: string, redirectTo?: string): P
 }
 
 export async function verifyDriverEmailOtp(email: string, token: string): Promise<DriverIdentity> {
-  if (!SUPABASE_CONFIGURED || !driverSupabase) {
+  const client = driverAuthSupabase;
+  if (!SUPABASE_CONFIGURED || !client) {
     throw new Error('Supabase が未設定です');
   }
   const normalized = normalizeEmail(email);
@@ -702,17 +697,55 @@ export async function verifyDriverEmailOtp(email: string, token: string): Promis
   if (lockedEmail && !sameEmailAddress(normalized, lockedEmail)) {
     throw new Error(`この端末は ${lockedEmail} のアカウントに紐づいています。同じメールで再認証してください。`);
   }
-  const { error } = await driverSupabase.auth.verifyOtp({
-    email: normalized,
-    token: normalizedToken,
-    type: 'email',
+  const authIntent = beginDriverAuthIntent();
+  invalidateNativeResidentLocationSessionRestore();
+  await withDriverAuthMutation(async () => {
+    const { error } = await client.auth.verifyOtp({
+      email: normalized,
+      token: normalizedToken,
+      type: 'email',
+    });
+    if (error) throw error;
+    if (!isCurrentDriverAuthIntent(authIntent)) {
+      throw new Error('認証処理は新しい操作により中止されました');
+    }
+    await Promise.all([
+      setMeta(META_REMOTE_AUTH_INITIALIZED, 'true'),
+      setMeta(META_DRIVER_EMAIL, normalized),
+    ]);
+    if (!isCurrentDriverAuthIntent(authIntent)) {
+      throw new Error('認証処理は新しい操作により中止されました');
+    }
+    clearDriverExplicitSignOut();
+    await installNativeResidentLocationAuthorization(authIntent).catch(error => {
+      console.warn('[resident-location] confirmed login could not be installed natively', error);
+    });
+    if (!isCurrentDriverAuthIntent(authIntent)) {
+      throw new Error('認証処理は新しい操作により中止されました');
+    }
   });
-  if (error) throw error;
-  await Promise.all([
-    setMeta(META_REMOTE_AUTH_INITIALIZED, 'true'),
-    setMeta(META_DRIVER_EMAIL, normalized),
-  ]);
   return initializeDriverIdentity();
+}
+
+export async function signOutDriver(): Promise<void> {
+  const client = driverAuthSupabase;
+  if (!client) return;
+  const authIntent = beginDriverAuthIntent();
+  markDriverExplicitSignOut();
+  invalidateNativeResidentLocationSessionRestore();
+  await withDriverAuthMutation(async () => {
+    if (!isCurrentDriverAuthIntent(authIntent)) return;
+    let nativeError: unknown = null;
+    try {
+      await stopNativeResidentLocation({ reason: 'signed-out' });
+    } catch (error) {
+      nativeError = error;
+    }
+    await clearPersistedDriverAuthSession();
+    const { error } = await client.auth.signOut({ scope: 'local' });
+    if (error) throw error;
+    if (nativeError) throw nativeError;
+  });
 }
 
 export async function getAdminGoogleSignInUrl(redirectTo?: string): Promise<string> {
@@ -752,8 +785,8 @@ export function onAdminAuthStateChange(callback: () => void) {
 }
 
 export function onDriverAuthStateChange(callback: (event: AuthChangeEvent) => void) {
-  if (!driverSupabase) return () => undefined;
-  const { data } = driverSupabase.auth.onAuthStateChange(event => {
+  if (!driverAuthSupabase) return () => undefined;
+  const { data } = driverAuthSupabase.auth.onAuthStateChange(event => {
     callback(event);
   });
   return () => {
@@ -798,7 +831,7 @@ function throwWebAuthCallbackError(parsed: ParsedWebAuthCallback) {
 }
 
 async function establishWebAuthSession(
-  client: NonNullable<typeof driverSupabase>,
+  client: NonNullable<typeof driverAuthSupabase>,
   parsed: ParsedWebAuthCallback,
 ) {
   if (parsed.code) {
@@ -819,6 +852,9 @@ async function establishWebAuthSession(
     return;
   }
 
+  if (Capacitor.isNativePlatform() && Capacitor.getPlatform() === 'android') {
+    throw new Error('認証情報が見つかりません。最新のログインメールからやり直してください。');
+  }
   const { data, error } = await client.auth.getSession();
   if (error) throw error;
   if (!data.session) {
@@ -827,8 +863,8 @@ async function establishWebAuthSession(
 }
 
 async function persistCurrentDriverSessionMetadata() {
-  if (!driverSupabase) return;
-  const { data, error } = await driverSupabase.auth.getSession();
+  if (!driverAuthSupabase) return;
+  const { data, error } = await driverAuthSupabase.auth.getSession();
   if (error) throw error;
   if (!data.session?.user) {
     throw new Error('運転者のログイン状態を確認できませんでした。');
@@ -857,14 +893,32 @@ export async function handleDriverWebAuthCallbackUrl(url: string): Promise<{
   handled: boolean;
   identity?: DriverIdentity;
 }> {
-  if (!SUPABASE_CONFIGURED || !driverSupabase) {
+  const client = driverAuthSupabase;
+  if (!SUPABASE_CONFIGURED || !client) {
     throw new Error('Supabase が未設定です');
   }
   const parsed = parseWebAuthCallbackUrl(url, WEB_DRIVER_CALLBACK_PATH);
   if (!parsed) return { handled: false };
   throwWebAuthCallbackError(parsed);
-  await establishWebAuthSession(driverSupabase, parsed);
-  await persistCurrentDriverSessionMetadata();
+  const authIntent = beginDriverAuthIntent();
+  invalidateNativeResidentLocationSessionRestore();
+  await withDriverAuthMutation(async () => {
+    await establishWebAuthSession(client, parsed);
+    if (!isCurrentDriverAuthIntent(authIntent)) {
+      throw new Error('認証処理は新しい操作により中止されました');
+    }
+    await persistCurrentDriverSessionMetadata();
+    if (!isCurrentDriverAuthIntent(authIntent)) {
+      throw new Error('認証処理は新しい操作により中止されました');
+    }
+    clearDriverExplicitSignOut();
+    await installNativeResidentLocationAuthorization(authIntent).catch(error => {
+      console.warn('[resident-location] confirmed login could not be installed natively', error);
+    });
+    if (!isCurrentDriverAuthIntent(authIntent)) {
+      throw new Error('認証処理は新しい操作により中止されました');
+    }
+  });
   return {
     handled: true,
     identity: await initializeDriverIdentity(),
@@ -932,7 +986,8 @@ export async function handleDriverAuthCallbackUrl(url: string): Promise<{
   handled: boolean;
   nextPath?: string;
 }> {
-  if (!SUPABASE_CONFIGURED || !driverSupabase) {
+  const client = driverAuthSupabase;
+  if (!SUPABASE_CONFIGURED || !client) {
     throw new Error('Supabase が未設定です');
   }
   const parsed = parseAuthCallbackUrl(url);
@@ -948,12 +1003,31 @@ export async function handleDriverAuthCallbackUrl(url: string): Promise<{
       nextPath: parsed.nextPath,
     };
   }
-  const { error } = await driverSupabase.auth.setSession({
-    access_token: parsed.accessToken,
-    refresh_token: parsed.refreshToken,
+  const accessToken = parsed.accessToken;
+  const refreshToken = parsed.refreshToken;
+  const authIntent = beginDriverAuthIntent();
+  invalidateNativeResidentLocationSessionRestore();
+  await withDriverAuthMutation(async () => {
+    const { error } = await client.auth.setSession({
+      access_token: accessToken,
+      refresh_token: refreshToken,
+    });
+    if (error) throw error;
+    if (!isCurrentDriverAuthIntent(authIntent)) {
+      throw new Error('認証処理は新しい操作により中止されました');
+    }
+    await persistCurrentDriverSessionMetadata();
+    if (!isCurrentDriverAuthIntent(authIntent)) {
+      throw new Error('認証処理は新しい操作により中止されました');
+    }
+    clearDriverExplicitSignOut();
+    await installNativeResidentLocationAuthorization(authIntent).catch(error => {
+      console.warn('[resident-location] confirmed login could not be installed natively', error);
+    });
+    if (!isCurrentDriverAuthIntent(authIntent)) {
+      throw new Error('認証処理は新しい操作により中止されました');
+    }
   });
-  if (error) throw error;
-  await persistCurrentDriverSessionMetadata();
   return {
     handled: true,
     nextPath: parsed.nextPath,
