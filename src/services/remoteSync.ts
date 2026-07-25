@@ -835,6 +835,13 @@ export async function runRemoteSync(reason = 'manual'): Promise<RemoteSyncState>
   if (inFlight) return inFlight;
   inFlight = (async () => {
     await hydrateRemoteSyncState();
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      emit({
+        syncing: false,
+        lastError: null,
+      });
+      return state;
+    }
     if (!SUPABASE_CONFIGURED || !driverSupabase) {
       return state;
     }

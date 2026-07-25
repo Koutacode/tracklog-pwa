@@ -1,31 +1,40 @@
-const CACHE_NAME = 'tracklog-shell-v3';
-const PRECACHE = ['/', '/manifest.webmanifest', '/apple-touch-icon.png', '/pwa-192.png', '/pwa-512.png'];
+const CACHE_NAME = __TRACKLOG_CACHE_NAME__;
+const CACHE_PREFIX = 'tracklog-shell-';
+const PRECACHE = __TRACKLOG_PRECACHE__;
 
 async function fetchAndCache(request) {
   const response = await fetch(request);
   if (response && response.ok) {
-    const copy = response.clone();
-    caches.open(CACHE_NAME).then(cache => cache.put(request, copy));
+    const cache = await caches.open(CACHE_NAME);
+    await cache.put(request, response.clone());
   }
   return response;
 }
 
 self.addEventListener('install', event => {
   event.waitUntil(
-    caches.open(CACHE_NAME).then(cache => cache.addAll(PRECACHE)).then(() => self.skipWaiting()),
+    caches
+      .open(CACHE_NAME)
+      .then(cache => cache.addAll(PRECACHE))
+      .then(() => self.skipWaiting()),
   );
 });
 
 self.addEventListener('activate', event => {
   event.waitUntil(
-    caches.keys().then(keys =>
-      Promise.all(
-        keys.map(key => {
-          if (key !== CACHE_NAME) return caches.delete(key);
-          return Promise.resolve(true);
-        }),
-      ),
-    ).then(() => self.clients.claim()),
+    caches
+      .keys()
+      .then(keys =>
+        Promise.all(
+          keys.map(key => {
+            if (key.startsWith(CACHE_PREFIX) && key !== CACHE_NAME) {
+              return caches.delete(key);
+            }
+            return Promise.resolve(true);
+          }),
+        ),
+      )
+      .then(() => self.clients.claim()),
   );
 });
 
@@ -98,8 +107,6 @@ self.addEventListener('notificationclick', event => {
   if (data.type !== 'TRACKLOG_ADMIN_PUSH_CLICK' || !data.messageId) return;
   const targetUrl = new URL('/messages', self.location.origin);
   targetUrl.searchParams.set('messageId', data.messageId);
-  // This internal marker lets the app fetch the message by id. Keep message
-  // content out of browser history, shared URLs, and referrer data.
   targetUrl.searchParams.set('tracklogPushMessageId', data.messageId);
 
   event.waitUntil((async () => {
@@ -140,13 +147,20 @@ self.addEventListener('fetch', event => {
     event.respondWith(
       fetchAndCache(request).catch(async () => {
         const cache = await caches.open(CACHE_NAME);
-        return (await cache.match('/')) || Response.error();
+        return (await cache.match('/index.html')) || (await cache.match('/')) || Response.error();
       }),
     );
     return;
   }
 
   if (url.origin !== self.location.origin) return;
+
+  if (url.pathname.startsWith('/assets/')) {
+    event.respondWith(
+      caches.match(request).then(cached => cached || fetchAndCache(request)),
+    );
+    return;
+  }
 
   event.respondWith(
     fetchAndCache(request).catch(async () => {

@@ -28,3 +28,4 @@ jobs:
       - run: npm run test:sync
       - run: npm run check:csp
       - run: npm run build
+      - run: npm run check:offline

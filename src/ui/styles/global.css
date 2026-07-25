@@ -27,6 +27,26 @@ body {
   line-height: 1.6;
 }
 
+.offline-status-banner {
+  position: sticky;
+  top: 0;
+  z-index: 1200;
+  width: 100%;
+  max-width: 560px;
+  min-height: 32px;
+  margin: 0 auto;
+  padding: calc(7px + env(safe-area-inset-top, 0px)) 24px 7px;
+  background: #f59e0b;
+  color: #111827;
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 18px;
+  text-align: center;
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.35);
+  box-sizing: border-box;
+  pointer-events: none;
+}
+
 code,
 pre {
   font-family: 'JetBrains Mono', 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;

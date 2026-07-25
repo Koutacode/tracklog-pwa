@@ -6,7 +6,6 @@ import {
 } from '../app/releaseInfo';
 
 const PWA_RELOAD_KEY = 'tracklog-pwa-reloaded-build';
-const PWA_CACHE_PREFIX = 'tracklog-';
 
 export type VersionManifest = {
   version?: string;
@@ -114,12 +113,6 @@ export async function checkLatestPwaBuild(): Promise<PwaBuildCheck> {
   };
 }
 
-async function clearTrackLogCaches() {
-  if (typeof window === 'undefined' || !('caches' in window)) return;
-  const keys = await caches.keys();
-  await Promise.all(keys.filter(key => key.startsWith(PWA_CACHE_PREFIX)).map(key => caches.delete(key)));
-}
-
 async function activateWaitingWorker() {
   if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) return;
   const registration = await navigator.serviceWorker.getRegistration();
@@ -135,7 +128,6 @@ export async function reloadPwaForLatestBuild(manifest?: VersionManifest, option
     sessionStorage.setItem(PWA_RELOAD_KEY, key);
   }
   await activateWaitingWorker();
-  await clearTrackLogCaches();
   window.location.reload();
   return true;
 }

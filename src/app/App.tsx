@@ -14,6 +14,7 @@ import { initializeDriverIdentity, onDriverAuthStateChange } from '../services/r
 import { runRemoteSync } from '../services/remoteSync';
 import { APP_VERSION } from './version';
 import AdminMessageToastHost from '../ui/components/AdminMessageToastHost';
+import OfflineStatusBanner from '../ui/components/OfflineStatusBanner';
 
 const HomeScreen = lazy(() => import('../ui/screens/HomeScreen'));
 const TripDetail = lazy(() => import('../ui/screens/TripDetail'));
@@ -80,6 +81,7 @@ function AppShell() {
       <PwaBootstrap />
       {!authRoute && (
         <>
+          <OfflineStatusBanner />
           <IcResolverJob />
           <LocalRecoveryBootstrap />
           <NativeUpdateNotice />
