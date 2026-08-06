@@ -1,4 +1,8 @@
 import type { DayRecord, TripEventType } from './reportTypes';
+import {
+  ALL_TOGGLE_DEFINITIONS,
+  resolveTogglePairing,
+} from './togglePairing';
 
 const MINUTE_MS = 60 * 1000;
 const DAY_MS = 24 * 60 * MINUTE_MS;
@@ -138,7 +142,7 @@ export function buildRegulationTimeline(
   const currentMs = currentTs == null ? null : Date.parse(currentTs);
   const hasValidCurrentTs = currentMs != null && Number.isFinite(currentMs);
   let eventOrder = 0;
-  const events = days
+  const rawEvents = days
     .flatMap(day => day.events.map(event => ({
       event,
       timestampMs: Date.parse(event.ts),
@@ -147,6 +151,13 @@ export function buildRegulationTimeline(
     .filter(item => Number.isFinite(item.timestampMs))
     .filter(item => !hasValidCurrentTs || item.timestampMs <= currentMs)
     .sort((a, b) => a.timestampMs - b.timestampMs || a.order - b.order);
+  const normalEventSet = new Set(
+    resolveTogglePairing(
+      rawEvents.map(item => item.event),
+      ALL_TOGGLE_DEFINITIONS,
+    ).normalEvents,
+  );
+  const events = rawEvents.filter(item => normalEventSet.has(item.event));
 
   if (events.length === 0) return [];
 

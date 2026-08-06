@@ -14,6 +14,11 @@ import type {
 import type { AppEvent, DayRun as SourceDayRun } from './types';
 import { parseJsonInput } from './jsonInput';
 import { computeContinuousDriveTimeline } from './regulationTimeline';
+import {
+  ALL_TOGGLE_DEFINITIONS,
+  resolveTogglePairing,
+  type TogglePairDefinition,
+} from './togglePairing';
 
 // --- Regulation constants (令和6年4月改正) ---
 const CONSTRAINT_WARNING_MIN = 13 * 60;         // 原則拘束 13h
@@ -177,6 +182,18 @@ function mapEvent(raw: RawEvent): TripEvent | null {
     memo: raw.memo,
     extras: raw.extras,
   };
+}
+
+function normalizeReportDays(days: DayRecord[]): DayRecord[] {
+  const pairing = resolveTogglePairing(
+    days.flatMap(day => day.events),
+    ALL_TOGGLE_DEFINITIONS,
+  );
+  const normalEvents = new Set(pairing.normalEvents);
+  return days.map(day => ({
+    ...day,
+    events: day.events.filter(event => normalEvents.has(event)),
+  }));
 }
 
 function hasImportableDayRuns(rawDayRuns?: RawDayRun[]): rawDayRuns is RawDayRun[] {
@@ -384,7 +401,8 @@ export function buildImportableDayRunsFromAppEvents(
   dayRuns: ReadonlyArray<Pick<SourceDayRun, 'dateKey' | 'km'>>,
 ): ImportableReportDayRun[] {
   const groupedEvents = new Map<string, RawEvent[]>();
-  for (const event of [...events].sort((a, b) => a.ts.localeCompare(b.ts))) {
+  const normalEvents = resolveTogglePairing(events, ALL_TOGGLE_DEFINITIONS).normalEvents;
+  for (const event of normalEvents) {
     const dateKey = jstDateKey(event.ts);
     const entry = groupedEvents.get(dateKey) ?? [];
     entry.push(mapAppEventToRawEvent(event));
@@ -484,6 +502,8 @@ export function parseJsonToTrip(jsonStr: string, tripId: string): Trip {
     days = [];
   }
 
+  days = normalizeReportDays(days);
+
   if (days.length === 0) {
     throw new Error('日報に変換できる `events` / `dayRuns` / `operation_log` がありません');
   }
@@ -499,7 +519,8 @@ export function parseJsonToTrip(jsonStr: string, tripId: string): Trip {
 }
 
 function splitEventsByDay(rawEvents: RawEvent[]): DayRecord[] {
-  const validEvents = rawEvents.map(mapEvent).filter((e): e is TripEvent => e !== null);
+  const mappedEvents = rawEvents.map(mapEvent).filter((e): e is TripEvent => e !== null);
+  const validEvents = resolveTogglePairing(mappedEvents, ALL_TOGGLE_DEFINITIONS).normalEvents;
   if (validEvents.length === 0) return [];
 
   const sorted = [...validEvents].sort((a, b) => a.ts.localeCompare(b.ts));
@@ -585,11 +606,6 @@ function getReportMinDurationMinutes(event: TripEvent): number {
   return Math.min(DAY_TOTAL_MIN, Math.max(0, Math.round(value)));
 }
 
-function getEventSessionId(event: TripEvent, key: string): string | undefined {
-  const value = event.extras?.[key];
-  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
-}
-
 function getMinDurationStartPair(type: TripEventType): ReportMinDurationPair | undefined {
   return REPORT_MIN_DURATION_PAIRS.find(pair => pair.startType === type);
 }
@@ -598,9 +614,20 @@ function getMinDurationEndPair(type: TripEventType): ReportMinDurationPair | und
   return REPORT_MIN_DURATION_PAIRS.find(pair => pair.endType === type);
 }
 
-function buildOpenMinDurationKey(pair: ReportMinDurationPair, event: TripEvent, fallbackIndex: number): string {
-  const sessionId = getEventSessionId(event, pair.sessionKey);
-  return `${pair.startType}:${pair.endType}:${sessionId ?? `event-${fallbackIndex}`}`;
+function findToggleDefinition(
+  startType: TripEventType,
+  endType: TripEventType,
+  sessionKey?: string,
+): TogglePairDefinition {
+  const definition = ALL_TOGGLE_DEFINITIONS.find(candidate => (
+    candidate.start === startType
+    && candidate.end === endType
+    && (!sessionKey || candidate.key === sessionKey)
+  ));
+  if (!definition) {
+    throw new Error(`Toggle definition is missing: ${startType}/${endType}`);
+  }
+  return definition;
 }
 
 function projectRoundedEventBoundaries(
@@ -609,31 +636,25 @@ function projectRoundedEventBoundaries(
   initialBoundary = 0,
   clampToDay = true,
 ): ReportTimelineProjection {
-  const events = [...sourceEvents].sort((a, b) => a.ts.localeCompare(b.ts));
-  const activeMinDurations = new Map<string, { startMin: number; minutes: number }>();
+  const pairing = resolveTogglePairing(sourceEvents, ALL_TOGGLE_DEFINITIONS);
+  const events = pairing.normalEvents;
+  const pairedStartByEnd = new Map(
+    pairing.pairs.map(pair => [pair.end, pair.start] as const),
+  );
+  const activeMinDurations = new Map<TripEvent, { startMin: number; minutes: number }>();
   const projected: ProjectedReportTimelineEvent[] = [];
   let cursor = initialBoundary;
 
-  for (let index = 0; index < events.length; index++) {
-    const event = events[index];
+  for (const event of events) {
     const rawBoundary = clampToDay
       ? roundToQuarterMinutes(minuteOfDayExactJst(dateKey, event.ts))
       : Math.max(0, roundToQuarterOffset(minuteOffsetExactJst(dateKey, event.ts)));
     let boundary = Math.max(rawBoundary, cursor);
     const endPair = getMinDurationEndPair(event.type);
-    let activeMinKey: string | undefined;
+    const pairedStart = endPair ? pairedStartByEnd.get(event) : undefined;
 
-    if (endPair) {
-      const sessionId = getEventSessionId(event, endPair.sessionKey);
-      if (sessionId) {
-        activeMinKey = `${endPair.startType}:${endPair.endType}:${sessionId}`;
-      } else {
-        const prefix = `${endPair.startType}:${endPair.endType}:`;
-        activeMinKey = Array.from(activeMinDurations.keys())
-          .filter(key => key.startsWith(prefix))
-          .pop();
-      }
-      const activeMin = activeMinKey ? activeMinDurations.get(activeMinKey) : undefined;
+    if (pairedStart) {
+      const activeMin = activeMinDurations.get(pairedStart);
       if (activeMin) {
         boundary = Math.max(
           boundary,
@@ -654,14 +675,14 @@ function projectRoundedEventBoundaries(
     if (startPair) {
       const minDuration = getReportMinDurationMinutes(event);
       if (minDuration > 0) {
-        activeMinDurations.set(buildOpenMinDurationKey(startPair, event, index), {
+        activeMinDurations.set(event, {
           startMin: boundary,
           minutes: minDuration,
         });
       }
     }
-    if (activeMinKey) {
-      activeMinDurations.delete(activeMinKey);
+    if (pairedStart) {
+      activeMinDurations.delete(pairedStart);
     }
     cursor = boundary;
   }
@@ -679,11 +700,12 @@ function projectRoundedEventBoundaries(
 }
 
 export function projectReportTimeline(day: DayRecord): ProjectedReportTimelineEvent[] {
-  return projectRoundedEventBoundaries(day.dateKey, day.events).events;
+  const normalizedDay = normalizeReportDays([day])[0] ?? day;
+  return projectRoundedEventBoundaries(normalizedDay.dateKey, normalizedDay.events).events;
 }
 
 export function projectTripReportTimelines(days: DayRecord[]): Map<number, ReportTimelineProjection> {
-  const orderedDays = [...days].sort((a, b) => (
+  const orderedDays = normalizeReportDays(days).sort((a, b) => (
     a.dateKey.localeCompare(b.dateKey) || a.dayIndex - b.dayIndex
   ));
   const projections = new Map<number, ReportTimelineProjection>();
@@ -926,6 +948,35 @@ function sumCategoryMinutes(intervals: RoundedInterval[], category: DayCategory)
     .reduce((sum, interval) => sum + Math.max(0, interval.endMin - interval.startMin), 0);
 }
 
+function getAcceptedPairBounds(
+  start: TripEvent,
+  end: TripEvent,
+  projectedTimestamps: ReadonlyMap<TripEvent, string>,
+): { startMs: number; endMs: number } | null {
+  const rawStartMs = Date.parse(start.ts);
+  const rawEndMs = Date.parse(end.ts);
+  if (!Number.isFinite(rawStartMs) || !Number.isFinite(rawEndMs) || rawEndMs <= rawStartMs) {
+    return null;
+  }
+
+  const minimumMinutes = getReportMinDurationMinutes(start);
+  const rawDurationMs = rawEndMs - rawStartMs;
+  if (minimumMinutes > 0 && rawDurationMs >= minimumMinutes * 60000) {
+    return { startMs: rawStartMs, endMs: rawEndMs };
+  }
+
+  const projectedStartMs = Date.parse(projectedTimestamps.get(start) ?? start.ts);
+  const projectedEndMs = Date.parse(projectedTimestamps.get(end) ?? end.ts);
+  if (
+    !Number.isFinite(projectedStartMs)
+    || !Number.isFinite(projectedEndMs)
+    || projectedEndMs <= projectedStartMs
+  ) {
+    return null;
+  }
+  return { startMs: projectedStartMs, endMs: projectedEndMs };
+}
+
 function buildRoundedPairDetails(
   day: DayRecord,
   startType: TripEventType,
@@ -933,25 +984,22 @@ function buildRoundedPairDetails(
   tripProjection?: ReportTimelineProjection,
 ): Array<{ startTs: string; endTs: string; minutes: number; customer?: string; volume?: number; address?: string }> {
   const events = [...day.events].sort((a, b) => a.ts.localeCompare(b.ts));
-  const starts = events.filter(event => event.type === startType);
-  const ends = events.filter(event => event.type === endType);
-  const effectiveMinutes = new Map(
+  const definition = findToggleDefinition(startType, endType);
+  const pairs = resolveTogglePairing(events, [definition]).pairs;
+  const effectiveTimestamps = new Map(
     (tripProjection ?? projectRoundedEventBoundaries(day.dateKey, events)).events
-      .map(projected => [projected.event, projected.effectiveMinute] as const),
+      .map(projected => [projected.event, projected.effectiveTs] as const),
   );
   const details: Array<{ startTs: string; endTs: string; minutes: number; customer?: string; volume?: number; address?: string }> = [];
 
-  for (let i = 0; i < Math.min(starts.length, ends.length); i++) {
-    const start = starts[i];
-    const end = ends[i];
-    const startMin = effectiveMinutes.get(start)
-      ?? roundToQuarterMinutes(minuteOfDayExactJst(day.dateKey, start.ts));
-    const safeEnd = effectiveMinutes.get(end)
-      ?? roundToQuarterMinutes(minuteOfDayExactJst(day.dateKey, end.ts));
+  for (const pair of pairs) {
+    const { start, end } = pair;
+    const bounds = getAcceptedPairBounds(start, end, effectiveTimestamps);
+    if (!bounds) continue;
     details.push({
-      startTs: utcFromJstMinute(day.dateKey, startMin),
-      endTs: utcFromJstMinute(day.dateKey, safeEnd),
-      minutes: safeEnd - startMin,
+      startTs: new Date(bounds.startMs).toISOString(),
+      endTs: new Date(bounds.endMs).toISOString(),
+      minutes: Math.floor((bounds.endMs - bounds.startMs) / 60000),
       customer: start.customer ?? end.customer,
       volume: start.volume ?? end.volume,
       address: start.address ?? end.address,
@@ -1087,48 +1135,33 @@ function buildTripPairDetailsByDay(
   sessionKey: string,
 ): Map<number, LoadDetail[]> {
   const byDay = new Map<number, LoadDetail[]>();
-  const entries = days
-    .flatMap(day => day.events.map(event => ({ event, dayIndex: day.dayIndex })))
-    .sort((a, b) => a.event.ts.localeCompare(b.event.ts));
-  const starts = entries.filter(entry => entry.event.type === startType);
-  const ends = entries.filter(entry => entry.event.type === endType);
-  const usedEnds = new Set<TripEvent>();
-  const projectedByEvent = new Map(
+  const events = days.flatMap(day => day.events);
+  const definition = findToggleDefinition(startType, endType, sessionKey);
+  const pairs = resolveTogglePairing(events, [definition]).pairs;
+  const projectedTimestamps = new Map(
     days.flatMap(day => (
-      projections.get(day.dayIndex)?.events.map(item => [item.event, item] as const) ?? []
+      projections.get(day.dayIndex)?.events.map(item => [item.event, item.effectiveTs] as const) ?? []
     )),
   );
 
-  for (const startEntry of starts) {
-    const start = startEntry.event;
-    const sessionId = getEventSessionId(start, sessionKey);
-    const endEntry = ends.find(candidate => {
-      if (usedEnds.has(candidate.event)) return false;
-      if (sessionId) return getEventSessionId(candidate.event, sessionKey) === sessionId;
-      return candidate.event.ts >= start.ts;
-    });
-    if (!endEntry) continue;
-    usedEnds.add(endEntry.event);
-
-    const projectedStart = projectedByEvent.get(start);
-    const projectedEnd = projectedByEvent.get(endEntry.event);
-    const startMs = Date.parse(projectedStart?.effectiveTs ?? start.ts);
-    const endMs = Date.parse(projectedEnd?.effectiveTs ?? endEntry.event.ts);
-    if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) continue;
+  for (const pair of pairs) {
+    const { start, end } = pair;
+    const bounds = getAcceptedPairBounds(start, end, projectedTimestamps);
+    if (!bounds) continue;
 
     for (const day of days) {
       const dayStartMs = jstDayStartMs(day.dateKey);
       const dayEndMs = dayStartMs + DAY_TOTAL_MIN * 60000;
-      const overlapStartMs = Math.max(startMs, dayStartMs);
-      const overlapEndMs = Math.min(endMs, dayEndMs);
+      const overlapStartMs = Math.max(bounds.startMs, dayStartMs);
+      const overlapEndMs = Math.min(bounds.endMs, dayEndMs);
       if (overlapEndMs <= overlapStartMs) continue;
       const detail: LoadDetail = {
-        customer: start.customer ?? endEntry.event.customer ?? '',
-        volume: start.volume ?? endEntry.event.volume ?? 0,
+        customer: start.customer ?? end.customer ?? '',
+        volume: start.volume ?? end.volume ?? 0,
         startTs: new Date(overlapStartMs).toISOString(),
         endTs: new Date(overlapEndMs).toISOString(),
-        durationMinutes: Math.round((overlapEndMs - overlapStartMs) / 60000),
-        address: start.address ?? endEntry.event.address,
+        durationMinutes: Math.floor((overlapEndMs - overlapStartMs) / 60000),
+        address: start.address ?? end.address,
       };
       const current = byDay.get(day.dayIndex) ?? [];
       current.push(detail);
@@ -1255,6 +1288,9 @@ export function computeDayMetrics(
   currentTs?: string,
   tripProjection?: ReportTimelineProjection,
 ): DayMetrics {
+  if (!tripProjection) {
+    day = normalizeReportDays([day])[0] ?? day;
+  }
   const alerts: ReportAlert[] = [];
   const intervals = buildRoundedIntervals(day, currentTs, tripProjection);
   const coveredMin = intervals.reduce((sum, interval) => sum + Math.max(0, interval.endMin - interval.startMin), 0);
@@ -1361,21 +1397,23 @@ export function computeTripDayMetrics(
   options?: { currentTs?: string },
 ): DayMetrics[] {
   const currentTs = options?.currentTs;
-  const reportProjections = projectTripReportTimelines(trip.days);
-  const base = trip.days.map(day => (
+  const normalizedDays = normalizeReportDays(trip.days);
+  const normalizedTrip = { ...trip, days: normalizedDays };
+  const reportProjections = projectTripReportTimelines(normalizedDays);
+  const base = normalizedDays.map(day => (
     computeDayMetrics(day, currentTs, reportProjections.get(day.dayIndex))
   ));
-  const continuous = computeContinuousDriveTimeline(trip.days, currentTs).byDay;
-  const ferryByDay = buildTripFerrySegmentsByDay(trip.days, reportProjections);
+  const continuous = computeContinuousDriveTimeline(normalizedDays, currentTs).byDay;
+  const ferryByDay = buildTripFerrySegmentsByDay(normalizedDays, reportProjections);
   const loadsByDay = buildTripPairDetailsByDay(
-    trip.days,
+    normalizedDays,
     reportProjections,
     'load_start',
     'load_end',
     'loadSessionId',
   );
   const unloadsByDay = buildTripPairDetailsByDay(
-    trip.days,
+    normalizedDays,
     reportProjections,
     'unload_start',
     'unload_end',
@@ -1383,10 +1421,10 @@ export function computeTripDayMetrics(
   );
 
   return base.map((metrics, index) => {
-    const day = trip.days[index];
+    const day = normalizedDays[index];
     const ferrySegments = ferryByDay.get(day.dayIndex) ?? metrics.ferrySegments;
     const ferryMinutes = ferrySegments.reduce((sum, segment) => sum + segment.durationMinutes, 0);
-    const ruleProfile = getRuleProfile(day, ferryMinutes, trip);
+    const ruleProfile = getRuleProfile(day, ferryMinutes, normalizedTrip);
     const intervals = buildRoundedIntervals(
       day,
       currentTs,
@@ -1399,8 +1437,8 @@ export function computeTripDayMetrics(
     const restMinutes = restSegments.reduce((sum, segment) => sum + segment.durationMinutes, 0);
     const restEquivalentMinutes = restMinutes + Math.max(0, baseRestMinutes - restMinutes);
     const constraintMinutes = Math.max(0, coveredMin - restEquivalentMinutes);
-    const rollingTwoDayDriveMinutes = getRollingDriveMinutes(trip.days, base, index, 2);
-    const rollingTwoWeekDriveMinutes = getRollingDriveMinutes(trip.days, base, index, 14);
+    const rollingTwoDayDriveMinutes = getRollingDriveMinutes(normalizedDays, base, index, 2);
+    const rollingTwoWeekDriveMinutes = getRollingDriveMinutes(normalizedDays, base, index, 14);
     const rollingTwoWeekWeeklyAverageMinutes = Math.round(rollingTwoWeekDriveMinutes / 2);
     const nextDriveRemaining = Math.max(0, TWO_DAY_DRIVE_LIMIT_MIN - rollingTwoDayDriveMinutes);
     const nextConstraintRemaining = Math.max(0, ruleProfile.constraintLimitMinutes - constraintMinutes);

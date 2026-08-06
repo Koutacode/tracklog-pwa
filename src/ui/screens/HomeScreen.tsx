@@ -31,6 +31,12 @@ import {
   findVoiceCommand,
   listenVoiceCommandJa,
 } from '../../services/voiceControl';
+import {
+  EXPRESSWAY_TOGGLE_DEFINITION,
+  PERSISTED_BASIC_TOGGLE_DEFINITIONS,
+  findOpenToggleSessionId,
+  findOpenToggleStart,
+} from '../../domain/togglePairing';
 
 function fmtDuration(ms: number) {
   const totalSec = Math.max(0, Math.floor(ms / 1000));
@@ -62,40 +68,13 @@ function fmtMinutesShort(minutes: number) {
 }
 
 const LATEST_APK_URL = DEFAULT_APK_DOWNLOAD_URL;
-
-function getOpenToggle(events: any[], startType: string, endType: string, key: string): string | null {
-  const starts = events.filter(e => e.type === startType).sort((a, b) => a.ts.localeCompare(b.ts));
-  const ends = events.filter(e => e.type === endType);
-  for (let i = starts.length - 1; i >= 0; i--) {
-    const sid = (starts[i] as any).extras?.[key] as string | undefined;
-    if (!sid) continue;
-    const hasEnd = ends.some(en => (en as any).extras?.[key] === sid);
-    if (!hasEnd) return sid;
-  }
-  const lastStart = starts[starts.length - 1];
-  if (lastStart) {
-    const hasEndAfter = ends.some(en => en.ts > lastStart.ts);
-    if (!hasEndAfter) return '__legacy__';
-  }
-  return null;
-}
-
-function getOpenToggleStartTs(events: any[], startType: string, endType: string, key: string): string | null {
-  const starts = events.filter(e => e.type === startType).sort((a, b) => a.ts.localeCompare(b.ts));
-  const ends = events.filter(e => e.type === endType);
-  for (let i = starts.length - 1; i >= 0; i--) {
-    const sid = (starts[i] as any).extras?.[key] as string | undefined;
-    if (!sid) continue;
-    const hasEnd = ends.some(en => (en as any).extras?.[key] === sid);
-    if (!hasEnd) return starts[i].ts;
-  }
-  const lastStart = starts[starts.length - 1];
-  if (lastStart) {
-    const hasEndAfter = ends.some(en => en.ts > lastStart.ts);
-    if (!hasEndAfter) return lastStart.ts;
-  }
-  return null;
-}
+const [
+  REST_TOGGLE_DEFINITION,
+  BREAK_TOGGLE_DEFINITION,
+  LOAD_TOGGLE_DEFINITION,
+  UNLOAD_TOGGLE_DEFINITION,
+  FERRY_TOGGLE_DEFINITION,
+] = PERSISTED_BASIC_TOGGLE_DEFINITIONS;
 
 function OperationErrorNotice(props: { message: string; onDismiss: () => void }) {
   return (
@@ -178,25 +157,25 @@ export default function HomeScreen() {
   const apkUrlCopyTimer = useRef<number | null>(null);
   const isNative = Capacitor.isNativePlatform();
 
-  const openRestSessionId = useMemo(() => {
-    const restStarts = events.filter(e => e.type === 'rest_start').sort((a, b) => a.ts.localeCompare(b.ts));
-    const restEnds = events.filter(e => e.type === 'rest_end');
-    for (let i = restStarts.length - 1; i >= 0; i--) {
-      const rs: any = restStarts[i];
-      const id = rs.extras?.restSessionId as string | undefined;
-      if (!id) continue;
-      const hasEnd = restEnds.some(re => (re as any).extras?.restSessionId === id);
-      if (!hasEnd) return id;
-    }
-    return null;
-  }, [events]);
+  const openToggleStarts = useMemo(() => ({
+    rest: findOpenToggleStart(events, REST_TOGGLE_DEFINITION),
+    break: findOpenToggleStart(events, BREAK_TOGGLE_DEFINITION),
+    load: findOpenToggleStart(events, LOAD_TOGGLE_DEFINITION),
+    unload: findOpenToggleStart(events, UNLOAD_TOGGLE_DEFINITION),
+    ferry: findOpenToggleStart(events, FERRY_TOGGLE_DEFINITION),
+    expressway: findOpenToggleStart(events, EXPRESSWAY_TOGGLE_DEFINITION),
+  }), [events]);
+  const openRestSessionId = useMemo(
+    () => findOpenToggleSessionId(events, REST_TOGGLE_DEFINITION),
+    [events],
+  );
 
-  const loadActive = !!getOpenToggle(events, 'load_start', 'load_end', 'loadSessionId');
-  const unloadActive = !!getOpenToggle(events, 'unload_start', 'unload_end', 'unloadSessionId');
-  const breakActive = !!getOpenToggle(events, 'break_start', 'break_end', 'breakSessionId');
-  const restActive = !!openRestSessionId;
-  const expresswayActive = !!getOpenToggle(events, 'expressway_start', 'expressway_end', 'expresswaySessionId');
-  const ferryActive = !!getOpenToggle(events, 'boarding', 'disembark', 'ferrySessionId');
+  const loadActive = openToggleStarts.load !== null;
+  const unloadActive = openToggleStarts.unload !== null;
+  const breakActive = openToggleStarts.break !== null;
+  const restActive = openToggleStarts.rest !== null;
+  const expresswayActive = openToggleStarts.expressway !== null;
+  const ferryActive = openToggleStarts.ferry !== null;
   const operationsDisabled = loading || operationInProgress;
   const expresswayPending = activeOperation === 'expressway-start'
     ? 'start'
@@ -209,7 +188,7 @@ export default function HomeScreen() {
 
     // フェリーは基本状態なので、ほかの基本カテゴリと同時には表示しない。
     if (ferryActive) {
-      const ts = getOpenToggleStartTs(events, 'boarding', 'disembark', 'ferrySessionId');
+      const ts = openToggleStarts.ferry?.ts;
       if (ts) {
         list.push({ name: 'フェリー乗船', startTs: ts, type: 'base' });
       }
@@ -223,7 +202,7 @@ export default function HomeScreen() {
 
     // 2. 高速道路
     if (expresswayActive) {
-      const ts = getOpenToggleStartTs(events, 'expressway_start', 'expressway_end', 'expresswaySessionId');
+      const ts = openToggleStarts.expressway?.ts;
       if (ts) {
         list.push({
           name: '高速道路走行',
@@ -234,7 +213,7 @@ export default function HomeScreen() {
     }
 
     return list;
-  }, [liveDrive, expresswayActive, ferryActive, events]);
+  }, [liveDrive, expresswayActive, ferryActive, openToggleStarts]);
 
   const canStartBasicOperation = !ferryActive && !loadActive && !breakActive && !restActive && !unloadActive;
   const canStartRest = canStartBasicOperation;

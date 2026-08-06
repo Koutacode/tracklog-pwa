@@ -1,5 +1,12 @@
 import { getActiveTripId, getEventsByTripId } from '../db/repositories';
-import type { AppEvent, EventType } from '../domain/types';
+import type { AppEvent } from '../domain/types';
+import {
+  findOpenToggleStart,
+  PERSISTED_BASIC_TOGGLE_DEFINITIONS,
+  PERSISTED_TOGGLE_DEFINITIONS,
+  resolveTogglePairing,
+  type TogglePairDefinition,
+} from '../domain/togglePairing';
 import { getDriverIdentity } from './remoteAuth';
 import { subscribeLocationUpdates } from './routeTracking';
 import type { LocationPayload } from './routeTracking';
@@ -14,29 +21,16 @@ let lastSentAt = 0;
 let inFlight: Promise<void> | null = null;
 let pendingLocation: LocationPayload | null = null;
 
-const SESSION_KEYS_BY_TYPE: Partial<Record<EventType, string>> = {
-  rest_start: 'restSessionId',
-  break_start: 'breakSessionId',
-  load_start: 'loadSessionId',
-  unload_start: 'unloadSessionId',
-  boarding: 'ferrySessionId',
-};
-
-const END_TYPE_BY_START: Partial<Record<EventType, EventType>> = {
-  rest_start: 'rest_end',
-  break_start: 'break_end',
-  load_start: 'load_end',
-  unload_start: 'unload_end',
-  boarding: 'disembark',
-};
-
-const STATUS_BY_START: Partial<Record<EventType, string>> = {
-  rest_start: '休息中',
-  break_start: '休憩中',
-  load_start: '積込中',
-  unload_start: '荷卸中',
-  boarding: 'フェリー中',
-};
+const STATUS_TOGGLE_DEFINITIONS: ReadonlyArray<{
+  definition: TogglePairDefinition;
+  status: string;
+}> = [
+  { definition: PERSISTED_BASIC_TOGGLE_DEFINITIONS[4], status: 'フェリー中' },
+  { definition: PERSISTED_BASIC_TOGGLE_DEFINITIONS[0], status: '休息中' },
+  { definition: PERSISTED_BASIC_TOGGLE_DEFINITIONS[1], status: '休憩中' },
+  { definition: PERSISTED_BASIC_TOGGLE_DEFINITIONS[2], status: '積込中' },
+  { definition: PERSISTED_BASIC_TOGGLE_DEFINITIONS[3], status: '荷卸中' },
+];
 
 function nowIso() {
   return new Date().toISOString();
@@ -50,26 +44,12 @@ function isFreshLocation(location: LocationPayload) {
   return Date.now() - locationTimeMs(location) <= MAX_LOCATION_AGE_MS;
 }
 
-function hasOpenSession(events: AppEvent[], startType: EventType) {
-  const endType = END_TYPE_BY_START[startType];
-  const key = SESSION_KEYS_BY_TYPE[startType];
-  if (!endType || !key) return false;
-
-  const starts = events.filter(e => e.type === startType).sort((a, b) => a.ts.localeCompare(b.ts));
-  const ends = events.filter(e => e.type === endType);
-  for (let i = starts.length - 1; i >= 0; i--) {
-    const sessionId = (starts[i] as any).extras?.[key] as string | undefined;
-    if (!sessionId) continue;
-    if (!ends.some(item => (item as any).extras?.[key] === sessionId)) return true;
-  }
-  return false;
-}
-
 function inferLatestStatus(events: AppEvent[]) {
-  for (const startType of Object.keys(STATUS_BY_START) as EventType[]) {
-    if (hasOpenSession(events, startType)) return STATUS_BY_START[startType] ?? '運転中';
+  const normalEvents = resolveTogglePairing(events, PERSISTED_TOGGLE_DEFINITIONS).normalEvents;
+  for (const { definition, status } of STATUS_TOGGLE_DEFINITIONS) {
+    if (findOpenToggleStart(normalEvents, definition)) return status;
   }
-  return events.length > 0 ? '運転中' : '待機中';
+  return normalEvents.length > 0 ? '運転中' : '待機中';
 }
 
 async function getOperationSnapshot() {

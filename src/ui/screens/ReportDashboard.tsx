@@ -19,6 +19,10 @@ import {
 } from '../../db/reportRepository';
 import { getEventsByTripId } from '../../db/repositories';
 import { buildTripViewModel } from '../../state/selectors';
+import {
+  EXPRESSWAY_TOGGLE_DEFINITIONS,
+  resolveTogglePairing,
+} from '../../domain/togglePairing';
 
 // --- Status colors ---
 const STATUS_COLORS: Record<string, string> = {
@@ -279,6 +283,10 @@ function ReportTab({ trip, trips, requestedTripId, onSelectTrip, onRefreshLiveTr
     () => (trip ? computeTripDayMetrics(trip, { currentTs }) : []),
     [trip, currentTs],
   );
+  const expresswaySessionsByDay = useMemo(
+    () => (trip ? getExpresswaySessions(trip.days) : new Map<number, ExpresswaySession[]>()),
+    [trip],
+  );
 
   if (!trip) {
     return (
@@ -391,7 +399,13 @@ function ReportTab({ trip, trips, requestedTripId, onSelectTrip, onRefreshLiveTr
         ))}
       </div>
 
-      {subTab === 'daily' && <DailyView day={day} metrics={metrics} />}
+      {subTab === 'daily' && (
+        <DailyView
+          day={day}
+          metrics={metrics}
+          expresswaySessions={expresswaySessionsByDay.get(day.dayIndex) ?? []}
+        />
+      )}
       {subTab === 'timeline' && <TimelineView day={day} days={trip.days} />}
     </div>
   );
@@ -400,15 +414,17 @@ function ReportTab({ trip, trips, requestedTripId, onSelectTrip, onRefreshLiveTr
 // =============================================
 // Sub-view: Daily Report (metrics cards)
 // =============================================
-function DailyView({ day, metrics }: { day: DayRecord; metrics: DayMetrics }) {
+function DailyView({ day, metrics, expresswaySessions }: {
+  day: DayRecord;
+  metrics: DayMetrics;
+  expresswaySessions: ExpresswaySession[];
+}) {
   const businessMinutes = getBusinessMinutes(metrics);
   const totalMinutes = metrics.driveMinutes
     + businessMinutes
     + metrics.breakMinutes
     + metrics.ferryMinutes
     + metrics.restMinutes;
-  const expresswaySessions = getExpresswaySessions(day);
-
   return (
     <div className="report-daily">
       {/* Date header */}
@@ -508,7 +524,7 @@ function getBusinessMinutes(metrics: DayMetrics) {
   return metrics.workMinutes + metrics.loadMinutes + metrics.unloadMinutes + metrics.waitMinutes;
 }
 
-type ExpresswaySession = {
+export type ExpresswaySession = {
   startTs: string;
   endTs?: string;
   startIcName?: string;
@@ -529,36 +545,43 @@ function getNumberExtra(event: TripEvent | undefined, key: string): number | und
   return Number.isFinite(n) ? n : undefined;
 }
 
-function getExpresswaySessionId(event: TripEvent | undefined): string | undefined {
-  return getStringExtra(event, 'expresswaySessionId');
-}
+export function getExpresswaySessions(days: readonly DayRecord[]): Map<number, ExpresswaySession[]> {
+  const eventDayIndexes = new Map<TripEvent, number>();
+  const events = days.flatMap(day => day.events.map(event => {
+    eventDayIndexes.set(event, day.dayIndex);
+    return event;
+  }));
+  const pairing = resolveTogglePairing(events, EXPRESSWAY_TOGGLE_DEFINITIONS);
+  const sessionsByDay = new Map<number, ExpresswaySession[]>();
 
-function getExpresswaySessions(day: DayRecord): ExpresswaySession[] {
-  const events = [...day.events].sort((a, b) => a.ts.localeCompare(b.ts));
-  const usedEndIndexes = new Set<number>();
-  const sessions: ExpresswaySession[] = [];
+  const append = (dayIndex: number | undefined, session: ExpresswaySession) => {
+    if (dayIndex == null) return;
+    const sessions = sessionsByDay.get(dayIndex) ?? [];
+    sessions.push(session);
+    sessionsByDay.set(dayIndex, sessions);
+  };
 
-  for (const start of events.filter(event => event.type === 'expressway_start')) {
-    const sessionId = getExpresswaySessionId(start);
-    const endIndex = events.findIndex((candidate, index) => {
-      if (usedEndIndexes.has(index) || candidate.type !== 'expressway_end' || candidate.ts < start.ts) return false;
-      const candidateSessionId = getExpresswaySessionId(candidate);
-      return sessionId ? candidateSessionId === sessionId : true;
-    });
-    const end = endIndex >= 0 ? events[endIndex] : undefined;
-    if (endIndex >= 0) usedEndIndexes.add(endIndex);
-    sessions.push({
-      startTs: start.ts,
-      endTs: end?.ts,
-      startIcName: getStringExtra(start, 'icName'),
-      endIcName: getStringExtra(end, 'icName'),
-      startIcDistanceM: getNumberExtra(start, 'icDistanceM'),
-      endIcDistanceM: getNumberExtra(end, 'icDistanceM'),
+  for (const pair of pairing.pairs) {
+    append(eventDayIndexes.get(pair.start), {
+      startTs: pair.start.ts,
+      endTs: pair.end.ts,
+      startIcName: getStringExtra(pair.start, 'icName'),
+      endIcName: getStringExtra(pair.end, 'icName'),
+      startIcDistanceM: getNumberExtra(pair.start, 'icDistanceM'),
+      endIcDistanceM: getNumberExtra(pair.end, 'icDistanceM'),
     });
   }
 
-  for (const legacy of events.filter(event => event.type === 'expressway')) {
-    sessions.push({
+  for (const open of pairing.openStarts) {
+    append(eventDayIndexes.get(open.start), {
+      startTs: open.start.ts,
+      startIcName: getStringExtra(open.start, 'icName'),
+      startIcDistanceM: getNumberExtra(open.start, 'icDistanceM'),
+    });
+  }
+
+  for (const legacy of pairing.normalEvents.filter(event => event.type === 'expressway')) {
+    append(eventDayIndexes.get(legacy), {
       startTs: legacy.ts,
       startIcName: getStringExtra(legacy, 'icName'),
       startIcDistanceM: getNumberExtra(legacy, 'icDistanceM'),
@@ -566,7 +589,10 @@ function getExpresswaySessions(day: DayRecord): ExpresswaySession[] {
     });
   }
 
-  return sessions.sort((a, b) => a.startTs.localeCompare(b.startTs));
+  for (const sessions of sessionsByDay.values()) {
+    sessions.sort((a, b) => a.startTs.localeCompare(b.startTs));
+  }
+  return sessionsByDay;
 }
 
 function formatIcDistance(distanceM?: number) {

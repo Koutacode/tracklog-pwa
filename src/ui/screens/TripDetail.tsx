@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Capacitor } from '@capacitor/core';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import {
@@ -19,6 +19,11 @@ import {
   buildReportTripFromAppEvents,
   formatMinutes,
 } from '../../domain/reportLogic';
+import {
+  PERSISTED_TOGGLE_DEFINITIONS,
+  resolveTogglePairing,
+  type TogglePairingResult,
+} from '../../domain/togglePairing';
 import { buildTripViewModel, TripViewModel } from '../../state/selectors';
 import { DAY_MS, getJstDateInfo } from '../../domain/jst';
 import { buildAiShareText, splitAiShareText, type AiShareChunk } from '../../services/aiShareText';
@@ -78,15 +83,6 @@ function label(ev: AppEvent) {
       return 'イベント';
   }
 }
-
-const toggleDefs = [
-  { start: 'rest_start', end: 'rest_end', key: 'restSessionId', label: '休息' },
-  { start: 'break_start', end: 'break_end', key: 'breakSessionId', label: '休憩' },
-  { start: 'load_start', end: 'load_end', key: 'loadSessionId', label: '積込' },
-  { start: 'unload_start', end: 'unload_end', key: 'unloadSessionId', label: '荷卸' },
-  { start: 'expressway_start', end: 'expressway_end', key: 'expresswaySessionId', label: '高速道路' },
-  { start: 'boarding', end: 'disembark', key: 'ferrySessionId', label: 'フェリー' },
-];
 
 function fmtRange(s: string, e?: string) {
   const fmt = (ts: string) =>
@@ -322,8 +318,8 @@ function buildDistanceDayGroups(vm: TripViewModel): DistanceDayGroup[] {
   return [...byDay.values()].sort((a, b) => a.dayIndex - b.dayIndex);
 }
 
-function buildGrouped(events: AppEvent[]): GroupedItem[] {
-  const sorted = [...events].sort((a, b) => a.ts.localeCompare(b.ts));
+function buildGrouped(pairing: TogglePairingResult<AppEvent>): GroupedItem[] {
+  const sorted = pairing.normalEvents;
   const tripStart = sorted.find(e => e.type === 'trip_start');
   const startDayStamp = tripStart ? getJstDateInfo(tripStart.ts).dayStamp : null;
   const getDayIndex = (ts: string) => {
@@ -331,67 +327,41 @@ function buildGrouped(events: AppEvent[]): GroupedItem[] {
     const info = getJstDateInfo(ts);
     return getDayIndexByStamp(info.dayStamp, startDayStamp);
   };
-  const used = new Set<string>();
+  const pairByStartId = new Map(pairing.pairs.map(pair => [pair.start.id, pair]));
+  const pairedEndIds = new Set(pairing.pairs.map(pair => pair.end.id));
   const out: GroupedItem[] = [];
 
-  const findStartForEnd = (endEv: AppEvent, def: typeof toggleDefs[number]) => {
-    const keyVal = (endEv as any).extras?.[def.key];
-    const candidates = sorted.filter(e => e.type === def.start);
-    let start = candidates.find(s => ((s as any).extras?.[def.key] ?? '__legacy__') === (keyVal ?? '__legacy__'));
-    if (!start && candidates.length > 0) {
-      start = [...candidates].reverse().find(s => s.ts <= endEv.ts);
-    }
-    return start;
-  };
-
   for (const ev of sorted) {
-    if (used.has(ev.id)) continue;
-    // Pairable types
-    const def = toggleDefs.find(d => d.start === ev.type || d.end === ev.type);
-    if (def) {
-      let start: AppEvent | undefined;
-      let end: AppEvent | undefined;
-      if (ev.type === def.start) {
-        start = ev;
-        const keyVal = (ev as any).extras?.[def.key];
-        end = sorted.find(
-          e => e.type === def.end && ((e as any).extras?.[def.key] ?? '__legacy__') === (keyVal ?? '__legacy__') && e.ts >= ev.ts,
-        );
-      } else {
-        end = ev;
-        start = findStartForEnd(ev, def);
+    if (pairedEndIds.has(ev.id)) continue;
+    const pair = pairByStartId.get(ev.id);
+    if (pair) {
+      const { start, end, definition: def } = pair;
+      const range = fmtRange(start.ts, end.ts);
+      const duration = fmtDurationMs(new Date(end.ts).getTime() - new Date(start.ts).getTime());
+      const addresses = [start.address, end.address].filter((a): a is string => !!a);
+      const places: GroupedItem['places'] = [];
+      if ((start as any).geo) places.push({ label: '開始', ...(start as any).geo, address: start.address });
+      if ((end as any).geo) places.push({ label: '終了', ...(end as any).geo, address: end.address });
+      let detail: string | undefined;
+      if (def.label === '高速道路') {
+        const startIc = getIcResolveStatusLabel(start);
+        const endIc = getIcResolveStatusLabel(end);
+        detail = `IC: ${startIc?.label ?? '不明'} → ${endIc?.label ?? '不明'}`;
       }
-      if (start && end) {
-        used.add(start.id);
-        used.add(end.id);
-        const range = fmtRange(start.ts, end.ts);
-        const duration = fmtDurationMs(new Date(end.ts).getTime() - new Date(start.ts).getTime());
-        const addresses = [start.address, end.address].filter((a): a is string => !!a);
-        const places: GroupedItem['places'] = [];
-        if ((start as any).geo) places.push({ label: '開始', ...(start as any).geo, address: start.address });
-        if ((end as any).geo) places.push({ label: '終了', ...(end as any).geo, address: end.address });
-        let detail: string | undefined;
-        if (def.label === '高速道路') {
-          const startIc = getIcResolveStatusLabel(start);
-          const endIc = getIcResolveStatusLabel(end);
-          detail = `IC: ${startIc?.label ?? '不明'} → ${endIc?.label ?? '不明'}`;
-        }
-        out.push({
-          id: `${start.id}-${end.id}`,
-          ts: start.ts,
-          title: def.label,
-          range,
-          duration,
-          detail,
-          addresses: addresses.length ? Array.from(new Set(addresses)) : undefined,
-          places: places.length ? places : undefined,
-        });
-        continue;
-      }
+      out.push({
+        id: `${start.id}-${end.id}`,
+        ts: start.ts,
+        title: def.label,
+        range,
+        duration,
+        detail,
+        addresses: addresses.length ? Array.from(new Set(addresses)) : undefined,
+        places: places.length ? places : undefined,
+      });
+      continue;
     }
 
     // Single events
-    used.add(ev.id);
     let detail: string | undefined;
     if (ev.type === 'refuel') {
       const liters = (ev as any).extras?.liters;
@@ -468,8 +438,11 @@ type TripReviewCheck = {
   level: 'ok' | 'warn' | 'danger';
 };
 
-function buildTripReviewChecks(vm: TripViewModel, events: AppEvent[]): TripReviewCheck[] {
-  const sorted = [...events].sort((a, b) => a.ts.localeCompare(b.ts));
+function buildTripReviewChecks(
+  vm: TripViewModel,
+  pairing: TogglePairingResult<AppEvent>,
+): TripReviewCheck[] {
+  const sorted = pairing.normalEvents;
   const checks: TripReviewCheck[] = [];
   checks.push({
     key: 'validation',
@@ -487,17 +460,7 @@ function buildTripReviewChecks(vm: TripViewModel, events: AppEvent[]): TripRevie
     level: vm.hasTripEnd ? 'ok' : 'warn',
   });
 
-  const openSessions = toggleDefs.flatMap(def => {
-    const starts = sorted.filter(event => event.type === def.start);
-    const ends = sorted.filter(event => event.type === def.end);
-    return starts.filter(start => {
-      const sid = (start as any).extras?.[def.key] as string | undefined;
-      if (!sid) {
-        return !ends.some(end => end.ts >= start.ts);
-      }
-      return !ends.some(end => (end as any).extras?.[def.key] === sid);
-    }).map(() => def.label);
-  });
+  const openSessions = pairing.openStarts.map(open => open.definition.label);
   checks.push({
     key: 'open-sessions',
     label: '未終了イベント',
@@ -505,6 +468,18 @@ function buildTripReviewChecks(vm: TripViewModel, events: AppEvent[]): TripRevie
       ? `${Array.from(new Set(openSessions)).join(' / ')} が継続中です。意図した状態か確認してください。`
       : '積込・荷卸・休憩・休息・高速・フェリーの開始/終了は閉じています。',
     level: openSessions.length > 0 ? 'warn' : 'ok',
+  });
+
+  const reconnectedPairs = pairing.pairs.filter(pair => pair.match === 'reconnected').length;
+  const excludedEnds = pairing.excludedEnds.length;
+  const hasDerivedCorrections = reconnectedPairs > 0 || excludedEnds > 0;
+  checks.push({
+    key: 'toggle-pairing-correction',
+    label: '開始・終了の補正',
+    detail: hasDerivedCorrections
+      ? `再接続 ${reconnectedPairs}組 / 終了イベント除外 ${excludedEnds}件。元イベントは削除・変更せず、通常表示・日報・AI出力だけを派生的に補正します。`
+      : '再接続 0組 / 終了イベント除外 0件。元イベントを変更せず、表示時に派生判定しています。',
+    level: hasDerivedCorrections ? 'warn' : 'ok',
   });
 
   const geoMissing = sorted.filter(event => !event.geo).length;
@@ -628,6 +603,21 @@ export default function TripDetail() {
   useEffect(() => {
     load();
   }, [tripId]);
+
+  const togglePairing = useMemo(
+    () => resolveTogglePairing(events, PERSISTED_TOGGLE_DEFINITIONS),
+    [events],
+  );
+  const grouped = useMemo(() => buildGrouped(togglePairing), [togglePairing]);
+  const editingEvents = useMemo(() => [...togglePairing.rawEvents].reverse(), [togglePairing]);
+  const excludedEndIds = useMemo(
+    () => new Set(togglePairing.excludedEnds.map(excluded => excluded.end.id)),
+    [togglePairing],
+  );
+  const reviewChecks = useMemo(
+    () => vm ? buildTripReviewChecks(vm, togglePairing) : [],
+    [vm, togglePairing],
+  );
 
   async function handleSaveTime() {
     if (!editing) return;
@@ -862,12 +852,9 @@ export default function TripDetail() {
   if (!tripId) {
     return <div style={{ padding: 16 }}>tripId が不正です</div>;
   }
-  const grouped = buildGrouped(events);
   const tripStartEvent = events.find(e => e.type === 'trip_start');
   const tripStartTs = tripStartEvent?.ts ?? events[0]?.ts;
   const groupedByDay = tripStartTs ? groupItemsByDay(grouped, tripStartTs) : [];
-  const editingEvents = [...events].sort((a, b) => b.ts.localeCompare(a.ts));
-  const reviewChecks = vm ? buildTripReviewChecks(vm, events) : [];
   const distanceDayGroups = vm ? buildDistanceDayGroups(vm) : [];
   const selectedAiChunk = aiCopySession?.chunks[aiCopySession.selectedChunkIndex] ?? null;
   return (
@@ -1117,6 +1104,12 @@ export default function TripDetail() {
                         <div className="trip-edit__summary">
                           <div className="trip-edit__summary-main">
                             <div className="trip-item__title">{label(ev)}</div>
+                            {excludedEndIds.has(ev.id) && (
+                              <div className="trip-edit__status trip-edit__status--warn">
+                                <strong>除外済み（{label(ev)}）</strong>
+                                <span>元イベントは保持し、通常表示・日報・AI出力のみから除外</span>
+                              </div>
+                            )}
                             <div className="trip-item__meta">{fmtLocal(ev.ts)}</div>
                             {numDef && <div className="trip-item__meta">{numDef.label}: {numDef.value ?? '-'}</div>}
                             {icStatus && (

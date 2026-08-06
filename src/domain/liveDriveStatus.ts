@@ -1,4 +1,8 @@
 import type { AppEvent, EventType } from './types';
+import {
+  PERSISTED_TOGGLE_DEFINITIONS,
+  resolveTogglePairing,
+} from './togglePairing';
 
 const CONTINUOUS_DRIVE_LIMIT_MIN = 4 * 60;
 const CONTINUOUS_DRIVE_EMERGENCY_LIMIT_MIN = 4 * 60 + 30;
@@ -98,7 +102,7 @@ function categoryAfterEvent(
 }
 
 export function computeLiveDriveStatus(events: AppEvent[], nowIso = new Date().toISOString()): LiveDriveStatus {
-  const sorted = [...events].sort((a, b) => a.ts.localeCompare(b.ts));
+  const sorted = resolveTogglePairing(events, PERSISTED_TOGGLE_DEFINITIONS).normalEvents;
   const tripStartIndex = sorted.findIndex(event => event.type === 'trip_start');
   if (tripStartIndex < 0) {
     return {

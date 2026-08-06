@@ -22,6 +22,15 @@ import {
   normalizeRoutePointHeading,
   normalizeRoutePointSpeed,
 } from '../domain/routePointTelemetry';
+import {
+  EXPRESSWAY_TOGGLE_DEFINITION,
+  findAcceptedTogglePair,
+  findOpenToggleSessionId,
+  findOpenToggleStart,
+  LEGACY_TOGGLE_SESSION_ID,
+  PERSISTED_BASIC_TOGGLE_DEFINITIONS,
+  resolveTogglePairing,
+} from '../domain/togglePairing';
 import { reverseGeocode } from '../services/geo';
 import { resolveNearestIC } from '../services/icResolver';
 import {
@@ -503,17 +512,11 @@ const SESSION_KEY_BY_TYPE: Partial<Record<EventType, SessionKey>> = {
   disembark: 'ferrySessionId',
 };
 
-const BASIC_TOGGLE_GROUPS = [
-  { start: 'rest_start', end: 'rest_end', key: 'restSessionId', label: '休息' },
-  { start: 'break_start', end: 'break_end', key: 'breakSessionId', label: '休憩' },
-  { start: 'load_start', end: 'load_end', key: 'loadSessionId', label: '積込' },
-  { start: 'unload_start', end: 'unload_end', key: 'unloadSessionId', label: '荷卸' },
-  { start: 'boarding', end: 'disembark', key: 'ferrySessionId', label: 'フェリー' },
-] as const;
+const BASIC_TOGGLE_GROUPS = PERSISTED_BASIC_TOGGLE_DEFINITIONS;
 
 const TOGGLE_GROUPS = [
   ...BASIC_TOGGLE_GROUPS,
-  { start: 'expressway_start', end: 'expressway_end', key: 'expresswaySessionId', label: '高速道路' },
+  EXPRESSWAY_TOGGLE_DEFINITION,
 ] as const;
 
 type ToggleGroup = (typeof TOGGLE_GROUPS)[number];
@@ -537,18 +540,15 @@ function findPairedToggleEvent(
   group: ToggleGroup,
   typeOverride?: EventType,
 ): AppEvent | undefined {
-  const type = typeOverride ?? ev.type;
-  const pairType = type === group.start ? group.end : group.start;
-  const candidates = events.filter(e => e.type === pairType);
-  const sid = (ev as any).extras?.[group.key] as string | undefined;
-  if (sid) {
-    const match = candidates.find(e => (e as any).extras?.[group.key] === sid);
-    if (match) return match;
-  }
-  if (type === group.start) {
-    return candidates.filter(e => e.ts >= ev.ts).sort((a, b) => a.ts.localeCompare(b.ts))[0];
-  }
-  return candidates.filter(e => e.ts <= ev.ts).sort((a, b) => a.ts.localeCompare(b.ts)).slice(-1)[0];
+  const targetType = typeOverride ?? ev.type;
+  const target = targetType === ev.type ? ev : ({ ...ev, type: targetType } as AppEvent);
+  const candidateEvents = target === ev
+    ? events
+    : events.map(candidate => candidate.id === ev.id ? target : candidate);
+  const result = resolveTogglePairing(candidateEvents, [group]);
+  const pair = findAcceptedTogglePair(result, target);
+  if (!pair) return undefined;
+  return pair.start.id === target.id ? pair.end : pair.start;
 }
 
 function applyTypeExtras(
@@ -1086,16 +1086,11 @@ export async function endRest(params: {
     const events = await getTripEventsCached(params.tripId);
     assertTripOpen(events);
     const open = requireOpenToggle(events, BASIC_TOGGLE_GROUPS[0]);
-    if (open !== '__legacy__' && open !== params.restSessionId) {
+    if (open !== LEGACY_TOGGLE_SESSION_ID && open !== params.restSessionId) {
       throw new Error('対応する休息開始が進行中ではありません');
     }
     const dayIndex = params.dayClose ? getNextDayIndexFromTripEvents(events) : undefined;
-    const openFerrySessionId = findOpenToggleSessionId(
-      events,
-      'boarding',
-      'disembark',
-      'ferrySessionId',
-    );
+    const openFerrySessionId = findOpenToggleSessionId(events, BASIC_TOGGLE_GROUPS[4]);
     event = {
       id: uuid(),
       tripId: params.tripId,
@@ -1120,7 +1115,7 @@ export async function endRest(params: {
         address: params.address,
         syncStatus: 'pending',
         extras:
-          openFerrySessionId === '__legacy__'
+          openFerrySessionId === LEGACY_TOGGLE_SESSION_ID
             ? undefined
             : { ferrySessionId: openFerrySessionId },
       });
@@ -1134,10 +1129,16 @@ export async function endRest(params: {
 
 // Helpers for day index and odometer checkpoints
 
-function getNextDayIndexFromTripEvents(events: AppEvent[]): number {
-  const closes = events.filter(
-    e => e.type === 'rest_end' && (e as any).extras?.dayClose === true
-  ) as RestEndEvent[];
+export function getAcceptedRestDayCloses(events: readonly AppEvent[]): RestEndEvent[] {
+  return resolveTogglePairing(events, [BASIC_TOGGLE_GROUPS[0]]).pairs
+    .map(pair => pair.end)
+    .filter((event): event is RestEndEvent => (
+      event.type === 'rest_end' && (event as RestEndEvent).extras?.dayClose === true
+    ));
+}
+
+export function getNextDayIndexFromTripEvents(events: AppEvent[]): number {
+  const closes = getAcceptedRestDayCloses(events);
   const indices = closes
     .map(e => (e as any).extras?.dayIndex)
     .filter((n): n is number => typeof n === 'number');
@@ -1184,28 +1185,6 @@ async function getTripEventsCached(tripId: string) {
   return events;
 }
 
-function findOpenToggleSessionId(
-  events: AppEvent[],
-  startType: string,
-  endType: string,
-  key: string,
-): string | null {
-  const starts = events.filter(e => e.type === startType).sort((a, b) => a.ts.localeCompare(b.ts));
-  const ends = events.filter(e => e.type === endType);
-  for (let i = starts.length - 1; i >= 0; i--) {
-    const sid = (starts[i] as any).extras?.[key] as string | undefined;
-    if (!sid) continue;
-    const hasEnd = ends.some(en => (en as any).extras?.[key] === sid);
-    if (!hasEnd) return sid;
-  }
-  const lastStart = starts[starts.length - 1];
-  if (lastStart) {
-    const hasEndAfter = ends.some(en => en.ts > lastStart.ts);
-    if (!hasEndAfter) return '__legacy__';
-  }
-  return null;
-}
-
 function assertTripOpen(events: AppEvent[]): void {
   if (!events.some(event => event.type === 'trip_start')) {
     throw new Error('運行開始イベントが存在しません');
@@ -1217,7 +1196,7 @@ function assertTripOpen(events: AppEvent[]): void {
 
 function assertCanStartBasicToggle(events: AppEvent[], requested: BasicToggleGroup): void {
   for (const group of BASIC_TOGGLE_GROUPS) {
-    const open = findOpenToggleSessionId(events, group.start, group.end, group.key);
+    const open = findOpenToggleSessionId(events, group);
     if (!open) continue;
     if (group.start === requested.start) {
       throw new Error(`${group.label}がすでに開始されています（終了してください）`);
@@ -1227,7 +1206,7 @@ function assertCanStartBasicToggle(events: AppEvent[], requested: BasicToggleGro
 }
 
 function requireOpenToggle(events: AppEvent[], group: BasicToggleGroup): string {
-  const open = findOpenToggleSessionId(events, group.start, group.end, group.key);
+  const open = findOpenToggleSessionId(events, group);
   if (!open) throw new Error(`${group.label}が開始されていません`);
   return open;
 }
@@ -1277,7 +1256,7 @@ async function endBasicToggleOperation(
       geo: params.geo,
       address: params.address,
       occurredAt: params.occurredAt,
-      extras: open === '__legacy__' ? undefined : { [group.key]: open },
+      extras: open === LEGACY_TOGGLE_SESSION_ID ? undefined : { [group.key]: open },
     });
     await putEventWithRoutePointTx(event);
   });
@@ -1379,7 +1358,7 @@ export async function endBreak(params: {
       geo: params.geo,
       address: params.address,
       occurredAt,
-      extras: open === '__legacy__' ? undefined : { breakSessionId: open },
+      extras: open === LEGACY_TOGGLE_SESSION_ID ? undefined : { breakSessionId: open },
     });
     await putEventWithRoutePointTx(event);
   });
@@ -1430,16 +1409,16 @@ export async function addBoarding(
       events.push(breakTransition.breakEnd, breakTransition.restStart);
     }
 
-    const openBreak = findOpenToggleSessionId(events, 'break_start', 'break_end', 'breakSessionId');
-    const openLoad = findOpenToggleSessionId(events, 'load_start', 'load_end', 'loadSessionId');
-    const openUnload = findOpenToggleSessionId(events, 'unload_start', 'unload_end', 'unloadSessionId');
+    const openBreak = findOpenToggleSessionId(events, BASIC_TOGGLE_GROUPS[1]);
+    const openLoad = findOpenToggleSessionId(events, BASIC_TOGGLE_GROUPS[2]);
+    const openUnload = findOpenToggleSessionId(events, BASIC_TOGGLE_GROUPS[3]);
     if (openBreak || openLoad || openUnload) {
       throw new Error('進行中の休憩・積込・荷卸を終了してからフェリー乗船を記録してください');
     }
 
-    const openFerry = findOpenToggleSessionId(events, 'boarding', 'disembark', 'ferrySessionId');
+    const openFerry = findOpenToggleSessionId(events, BASIC_TOGGLE_GROUPS[4]);
     if (openFerry) throw new Error('フェリー乗船が開始済みです（下船を押してください）');
-    const openRest = findOpenToggleSessionId(events, 'rest_start', 'rest_end', 'restSessionId');
+    const openRest = findOpenToggleSessionId(events, BASIC_TOGGLE_GROUPS[0]);
     autoRestStarted = !openRest;
 
     if (autoRestStarted) {
@@ -1490,15 +1469,8 @@ export async function addDisembark(params: {
   await db.transaction('rw', db.events, db.routePoints, async () => {
     const events = await getTripEventsCached(params.tripId);
     assertTripOpen(events);
+    const boarding = findOpenToggleStart(events, BASIC_TOGGLE_GROUPS[4]);
     const openFerrySessionId = requireOpenToggle(events, BASIC_TOGGLE_GROUPS[4]);
-    const boarding = [...events]
-      .filter(candidate => candidate.type === 'boarding')
-      .reverse()
-      .find(candidate => (
-        openFerrySessionId === '__legacy__'
-          ? true
-          : candidate.extras?.ferrySessionId === openFerrySessionId
-      ));
     const autoRestSessionId = typeof boarding?.extras?.autoRestSessionId === 'string'
       ? boarding.extras.autoRestSessionId.trim()
       : '';
@@ -1510,7 +1482,7 @@ export async function addDisembark(params: {
       address: params.address,
       occurredAt,
       extras:
-        openFerrySessionId === '__legacy__'
+        openFerrySessionId === LEGACY_TOGGLE_SESSION_ID
           ? undefined
           : { ferrySessionId: openFerrySessionId },
     });
@@ -1518,7 +1490,7 @@ export async function addDisembark(params: {
 
     if (
       autoRestSessionId
-      && findOpenToggleSessionId(events, 'rest_start', 'rest_end', 'restSessionId') === autoRestSessionId
+      && findOpenToggleSessionId(events, BASIC_TOGGLE_GROUPS[0]) === autoRestSessionId
     ) {
       await putEventWithRoutePointTx({
         id: uuid(),
@@ -1587,7 +1559,7 @@ export async function startExpressway(params: {
     const events = await db.events.where('tripId').equals(params.tripId).toArray();
     events.sort((a, b) => a.ts.localeCompare(b.ts));
     assertTripOpen(events);
-    const open = findOpenToggleSessionId(events, 'expressway_start', 'expressway_end', 'expresswaySessionId');
+    const open = findOpenToggleSessionId(events, EXPRESSWAY_TOGGLE_DEFINITION);
     if (open) throw new Error('高速道路が開始済みです（終了を押してください）');
     await putEventWithRoutePointTx(e);
     await clearPendingExpresswayEndPrompt(params.tripId);
@@ -1610,7 +1582,7 @@ export async function endExpressway(params: {
     const events = await db.events.where('tripId').equals(params.tripId).toArray();
     events.sort((a, b) => a.ts.localeCompare(b.ts));
     assertTripOpen(events);
-    const open = findOpenToggleSessionId(events, 'expressway_start', 'expressway_end', 'expresswaySessionId');
+    const open = findOpenToggleSessionId(events, EXPRESSWAY_TOGGLE_DEFINITION);
     if (!open) throw new Error('高速道路が開始されていません');
     const e = baseEvent({
       tripId: params.tripId,
@@ -1619,7 +1591,7 @@ export async function endExpressway(params: {
       address: params.address,
       occurredAt: params.occurredAt,
       extras:
-        open === '__legacy__'
+        open === LEGACY_TOGGLE_SESSION_ID
           ? {
               icResolveStatus: 'pending',
               icResolveRetryCount: 0,
@@ -2419,9 +2391,7 @@ export async function refreshEventAddressFromGeo(eventId: string): Promise<strin
 
 async function rebalanceDayCloseIndices(tripId: string) {
   const events = await getEventsByTripId(tripId);
-  const dayCloses = events.filter(
-    e => e.type === 'rest_end' && (e as RestEndEvent).extras?.dayClose
-  ) as RestEndEvent[];
+  const dayCloses = getAcceptedRestDayCloses(events);
   const sorted = [...dayCloses].sort((a, b) => a.ts.localeCompare(b.ts));
   await Promise.all(
     sorted.map((e, idx) => {

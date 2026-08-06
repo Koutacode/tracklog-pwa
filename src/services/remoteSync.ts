@@ -13,6 +13,13 @@ import {
 } from '../db/repositories';
 import { listReportTrips } from '../db/reportRepository';
 import type { AppEvent, EventType, RoutePoint } from '../domain/types';
+import {
+  findOpenToggleStart,
+  PERSISTED_BASIC_TOGGLE_DEFINITIONS,
+  PERSISTED_TOGGLE_DEFINITIONS,
+  resolveTogglePairing,
+  type TogglePairDefinition,
+} from '../domain/togglePairing';
 import type {
   DriverIdentity,
   RemoteCloudMaintenanceResult,
@@ -665,27 +672,25 @@ function getLatestPoint(routePoint: RoutePoint | null, events: AppEvent[]) {
   };
 }
 
-function hasOpenSession(events: AppEvent[], startType: string, endType: string, key: string) {
-  const starts = events.filter(e => e.type === startType).sort((a, b) => a.ts.localeCompare(b.ts));
-  const ends = events.filter(e => e.type === endType);
-  for (let i = starts.length - 1; i >= 0; i--) {
-    const sessionId = (starts[i] as any).extras?.[key] as string | undefined;
-    if (!sessionId) continue;
-    const closed = ends.some(item => (item as any).extras?.[key] === sessionId);
-    if (!closed) return true;
-  }
-  return false;
-}
+const STATUS_TOGGLE_DEFINITIONS: ReadonlyArray<{
+  definition: TogglePairDefinition;
+  status: string;
+}> = [
+  { definition: PERSISTED_BASIC_TOGGLE_DEFINITIONS[4], status: 'フェリー中' },
+  { definition: PERSISTED_BASIC_TOGGLE_DEFINITIONS[0], status: '休息中' },
+  { definition: PERSISTED_BASIC_TOGGLE_DEFINITIONS[1], status: '休憩中' },
+  { definition: PERSISTED_BASIC_TOGGLE_DEFINITIONS[2], status: '積込中' },
+  { definition: PERSISTED_BASIC_TOGGLE_DEFINITIONS[3], status: '荷卸中' },
+];
 
 function inferLatestStatus(events: AppEvent[]) {
-  if (hasOpenSession(events, 'boarding', 'disembark', 'ferrySessionId')) return 'フェリー中';
-  if (hasOpenSession(events, 'rest_start', 'rest_end', 'restSessionId')) return '休息中';
-  if (hasOpenSession(events, 'break_start', 'break_end', 'breakSessionId')) return '休憩中';
-  if (hasOpenSession(events, 'load_start', 'load_end', 'loadSessionId')) return '積込中';
-  if (hasOpenSession(events, 'unload_start', 'unload_end', 'unloadSessionId')) return '荷卸中';
-  const end = events.find(item => item.type === 'trip_end');
+  const normalEvents = resolveTogglePairing(events, PERSISTED_TOGGLE_DEFINITIONS).normalEvents;
+  for (const { definition, status } of STATUS_TOGGLE_DEFINITIONS) {
+    if (findOpenToggleStart(normalEvents, definition)) return status;
+  }
+  const end = normalEvents.find(item => item.type === 'trip_end');
   if (end) return '運行終了';
-  return events.length > 0 ? '運転中' : '待機中';
+  return normalEvents.length > 0 ? '運転中' : '待機中';
 }
 
 function normalizeTripEvent(deviceId: string, event: AppEvent): RemoteTripEvent {

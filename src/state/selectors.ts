@@ -3,7 +3,6 @@ import type {
   TripStartEvent,
   TripEndEvent,
   RestStartEvent,
-  RestEndEvent,
   Segment,
   DayRun,
   TimelineItem,
@@ -15,6 +14,10 @@ import {
   isRestStartOdoCheckpoint,
 } from '../domain/metrics';
 import { DAY_MS, getJstDateInfo } from '../domain/jst';
+import {
+  PERSISTED_TOGGLE_DEFINITIONS,
+  resolveTogglePairing,
+} from '../domain/togglePairing';
 
 export type TripViewModel = {
   tripId: string;
@@ -36,7 +39,8 @@ export type TripViewModel = {
  * validation checks.
  */
 export function buildTripViewModel(tripId: string, events: AppEvent[]): TripViewModel {
-  const sorted = events.filter(e => e.tripId === tripId).sort((a, b) => a.ts.localeCompare(b.ts));
+  const rawEvents = events.filter(e => e.tripId === tripId);
+  const sorted = resolveTogglePairing(rawEvents, PERSISTED_TOGGLE_DEFINITIONS).normalEvents;
   const tripStart = sorted.find(e => e.type === 'trip_start') as TripStartEvent | undefined;
   if (!tripStart) {
     return {
@@ -52,17 +56,9 @@ export function buildTripViewModel(tripId: string, events: AppEvent[]): TripView
   const tripEnd = [...sorted].reverse().find(e => e.type === 'trip_end') as TripEndEvent | undefined;
   const restStarts = sorted.filter(e => e.type === 'rest_start') as RestStartEvent[];
   const odoRestStarts = restStarts.filter(isRestStartOdoCheckpoint);
-  const restEnds = sorted.filter(e => e.type === 'rest_end') as RestEndEvent[];
   const odoStart = tripStart.extras.odoKm;
   const odoEnd = tripEnd?.extras.odoKm;
   const errors: string[] = [];
-  // Ensure each rest_end has matching rest_start
-  const rsIds = new Set(restStarts.map(r => r.extras.restSessionId));
-  for (const re of restEnds) {
-    if (!rsIds.has(re.extras.restSessionId)) {
-      errors.push(`rest_end の restSessionId が rest_start と対応しません: ${re.extras.restSessionId}`);
-    }
-  }
   // Segments
   const segments = computeSegments({
     odoStart,
@@ -117,7 +113,8 @@ export function buildTripViewModel(tripId: string, events: AppEvent[]): TripView
  * buildTimeline maps events into a human-friendly chronological description.
  */
 export function buildTimeline(events: AppEvent[]): TimelineItem[] {
-  const sorted = [...events].sort((a, b) => a.ts.localeCompare(b.ts));
+  const pairing = resolveTogglePairing(events, PERSISTED_TOGGLE_DEFINITIONS);
+  const sorted = pairing.normalEvents;
   const tripStart = sorted.find(e => e.type === 'trip_start') as TripStartEvent | undefined;
   const tripStartDayStamp = tripStart ? getJstDateInfo(tripStart.ts).dayStamp : null;
   const fmtRange = (s: string, e?: string) => {
@@ -191,44 +188,32 @@ export function buildTimeline(events: AppEvent[]): TimelineItem[] {
     }
   };
 
-  const toggleDefs = [
-    { start: 'rest_start', end: 'rest_end', key: 'restSessionId', label: '休息' },
-    { start: 'break_start', end: 'break_end', key: 'breakSessionId', label: '休憩' },
-    { start: 'load_start', end: 'load_end', key: 'loadSessionId', label: '積込' },
-    { start: 'unload_start', end: 'unload_end', key: 'unloadSessionId', label: '荷卸' },
-    { start: 'expressway_start', end: 'expressway_end', key: 'expresswaySessionId', label: '高速道路' },
-    { start: 'boarding', end: 'disembark', key: 'ferrySessionId', label: 'フェリー' },
-  ];
-  const toggleMap = new Map<string, { start: AppEvent; def: any }>();
   const timeline: TimelineItem[] = [];
+  const toggleEventTypes = new Set(
+    PERSISTED_TOGGLE_DEFINITIONS.flatMap(definition => [definition.start, definition.end]),
+  );
+
+  for (const pair of pairing.pairs) {
+    const { definition, start, end } = pair;
+    const loc = formatGeo(start) || formatGeo(end);
+    let detail = `${fmtRange(start.ts, end.ts)}（${fmtDuration(start.ts, end.ts)}）`;
+    if (definition.channel === 'expressway') {
+      const fromLabel = getIcLabel(start);
+      const toLabel = getIcLabel(end);
+      detail = `高速開始IC: ${fromLabel} / 高速終了IC: ${toLabel} / ${detail}`;
+    }
+    if (loc) detail += ` / ${loc}`;
+    timeline.push({ ts: start.ts, title: definition.label, detail });
+  }
+
+  for (const { definition, start } of pairing.openStarts) {
+    const loc = formatGeo(start);
+    const detail = `${fmtRange(start.ts, undefined)}（進行中）${loc ? ' / ' + loc : ''}`;
+    timeline.push({ ts: start.ts, title: definition.label, detail });
+  }
 
   for (const e of sorted) {
-    const def = toggleDefs.find(d => d.start === e.type || d.end === e.type);
-    if (def) {
-      const key = (e as any).extras?.[def.key];
-      if (def.start === e.type && key) {
-        toggleMap.set(`${def.key}-${key}`, { start: e, def });
-        continue;
-      }
-      if (def.end === e.type && key) {
-        const entry = toggleMap.get(`${def.key}-${key}`);
-        if (entry) {
-          const start = entry.start;
-          const loc = formatGeo(start) || formatGeo(e);
-          let detail = `${fmtRange(start.ts, e.ts)}（${fmtDuration(start.ts, e.ts)}）`;
-          if (def.label === '高速道路') {
-            const fromLabel = getIcLabel(start);
-            const toLabel = getIcLabel(e);
-            detail = `高速開始IC: ${fromLabel} / 高速終了IC: ${toLabel} / ${detail}`;
-          }
-          if (loc) detail += ` / ${loc}`;
-          timeline.push({ ts: start.ts, title: def.label, detail });
-          toggleMap.delete(`${def.key}-${key}`);
-          continue;
-        }
-      }
-    }
-
+    if (toggleEventTypes.has(e.type)) continue;
     let detail: string | undefined;
     if (e.type === 'refuel') {
       const liters = (e as any).extras?.liters;
@@ -258,12 +243,6 @@ export function buildTimeline(events: AppEvent[]): TimelineItem[] {
     const loc = formatGeo(e);
     const mergedDetail = detail ? (loc ? `${detail} / ${loc}` : detail) : loc;
     timeline.push({ ts: e.ts, title: label(e), detail: mergedDetail });
-  }
-
-  for (const { start, def } of toggleMap.values()) {
-    const loc = formatGeo(start);
-    const detail = `${fmtRange(start.ts, undefined)}（進行中）${loc ? ' / ' + loc : ''}`;
-    timeline.push({ ts: start.ts, title: def.label, detail });
   }
 
   timeline.sort((a, b) => a.ts.localeCompare(b.ts));

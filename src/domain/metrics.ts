@@ -1,5 +1,9 @@
 import type { AppEvent, RestStartEvent, Segment, DayRun } from './types';
 import { DAY_MS, getJstDateInfo } from './jst';
+import {
+  findOpenToggleStart,
+  PERSISTED_BASIC_TOGGLE_DEFINITIONS,
+} from './togglePairing';
 
 export const BREAK_TO_REST_THRESHOLD_MS = 3 * 60 * 60 * 1000;
 export const AUTO_REST_REASON_BREAK_THRESHOLD = 'break_3h_threshold';
@@ -22,20 +26,8 @@ export function isRestStartOdoCheckpoint(event: RestStartEvent): event is RestSt
   return Number.isFinite(event.extras.odoKm);
 }
 
-function isBreakClosed(start: AppEvent, ends: AppEvent[]): boolean {
-  const breakSessionId = (start.extras as Record<string, unknown> | undefined)?.breakSessionId;
-  if (typeof breakSessionId === 'string' && breakSessionId) {
-    return ends.some(end => end.extras?.breakSessionId === breakSessionId);
-  }
-  return ends.some(end => end.ts >= start.ts);
-}
-
 function findOpenBreakStart(events: readonly AppEvent[]): AppEvent | null {
-  const breakEnds = events.filter(event => event.type === 'break_end');
-  const breakStarts = events
-    .filter(event => event.type === 'break_start')
-    .sort((a, b) => a.ts.localeCompare(b.ts) || a.id.localeCompare(b.id));
-  return [...breakStarts].reverse().find(start => !isBreakClosed(start, breakEnds)) ?? null;
+  return findOpenToggleStart(events, PERSISTED_BASIC_TOGGLE_DEFINITIONS[1]);
 }
 
 export function getOpenBreakToRestThresholdTs(events: readonly AppEvent[]): string | null {

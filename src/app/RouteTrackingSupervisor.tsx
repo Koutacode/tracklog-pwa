@@ -16,6 +16,11 @@ import {
 import type { AppEvent } from '../domain/types';
 import { getOpenBreakToRestThresholdTs } from '../domain/metrics';
 import {
+  EXPRESSWAY_TOGGLE_DEFINITION,
+  PERSISTED_BASIC_TOGGLE_DEFINITIONS,
+  findOpenToggleStart,
+} from '../domain/togglePairing';
+import {
   startResidentLocationUpdates,
   startRouteTracking,
   stopResidentLocationUpdates,
@@ -60,43 +65,19 @@ async function persistNativeResidentLocationQueue() {
   });
 }
 
-function hasOpenRest(events: AppEvent[]) {
-  const starts = events.filter(e => e.type === 'rest_start').sort((a, b) => a.ts.localeCompare(b.ts));
-  if (starts.length === 0) return false;
-  const ends = events.filter(e => e.type === 'rest_end');
-  for (let i = starts.length - 1; i >= 0; i--) {
-    const sid = (starts[i] as any).extras?.restSessionId as string | undefined;
-    if (!sid) continue;
-    const hasEnd = ends.some(en => (en as any).extras?.restSessionId === sid);
-    if (!hasEnd) return true;
-  }
-  return false;
-}
+const [REST_TOGGLE_DEFINITION, , , , FERRY_TOGGLE_DEFINITION] =
+  PERSISTED_BASIC_TOGGLE_DEFINITIONS;
 
 function hasOpenExpressway(events: AppEvent[]) {
-  const starts = events.filter(e => e.type === 'expressway_start').sort((a, b) => a.ts.localeCompare(b.ts));
-  if (starts.length === 0) return false;
-  const ends = events.filter(e => e.type === 'expressway_end');
-  for (let i = starts.length - 1; i >= 0; i--) {
-    const sid = (starts[i] as any).extras?.expresswaySessionId as string | undefined;
-    if (!sid) continue;
-    const hasEnd = ends.some(en => (en as any).extras?.expresswaySessionId === sid);
-    if (!hasEnd) return true;
-  }
-  return false;
+  return findOpenToggleStart(events, EXPRESSWAY_TOGGLE_DEFINITION) !== null;
+}
+
+function hasOpenRest(events: AppEvent[]) {
+  return findOpenToggleStart(events, REST_TOGGLE_DEFINITION) !== null;
 }
 
 function hasOpenFerry(events: AppEvent[]) {
-  const starts = events.filter(e => e.type === 'boarding').sort((a, b) => a.ts.localeCompare(b.ts));
-  if (starts.length === 0) return false;
-  const ends = events.filter(e => e.type === 'disembark');
-  for (let i = starts.length - 1; i >= 0; i--) {
-    const sid = (starts[i] as any).extras?.ferrySessionId as string | undefined;
-    if (!sid) continue;
-    const hasEnd = ends.some(en => (en as any).extras?.ferrySessionId === sid);
-    if (!hasEnd) return true;
-  }
-  return false;
+  return findOpenToggleStart(events, FERRY_TOGGLE_DEFINITION) !== null;
 }
 
 export default function RouteTrackingSupervisor() {

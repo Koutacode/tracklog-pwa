@@ -1,5 +1,6 @@
 import { computeDayMetrics, computeTripDayMetrics } from './reportLogic';
 import {
+  buildRegulationTimeline,
   computeContinuousDriveTimeline,
   type ContinuousDriveTimelineResult,
 } from './regulationTimeline';
@@ -190,6 +191,61 @@ function testFinalizedAndInProgressDayTotals() {
   assertEqual(reportTotal(inProgress), 12 * 60, 'in-progress day should remain provisional through currentTs');
 }
 
+function testLateStaleLoadEndDoesNotEndRest() {
+  const restStartedAt = '2026-07-27T11:00:21.341Z';
+  const day: DayRecord = {
+    ...makeDay('2026-07-27', []),
+    events: [
+      { type: 'trip_start', ts: '2026-07-27T00:00:00.000Z' },
+      { type: 'load_start', ts: '2026-07-27T04:21:01.054Z', extras: { loadSessionId: 'load-a' } },
+      { type: 'load_end', ts: '2026-07-27T07:23:33.195Z', extras: { loadSessionId: 'load-b' } },
+      { type: 'load_start', ts: '2026-07-27T08:05:34.046Z', extras: { loadSessionId: 'load-c' } },
+      { type: 'load_end', ts: '2026-07-27T09:22:22.273Z', extras: { loadSessionId: 'load-c' } },
+      { type: 'rest_start', ts: restStartedAt, extras: { restSessionId: 'rest-1' } },
+      { type: 'load_end', ts: '2026-07-27T11:00:40.498Z', extras: { loadSessionId: 'load-a' } },
+    ],
+  };
+
+  const intervals = buildRegulationTimeline([day], '2026-07-27T12:00:00.000Z');
+  const finalInterval = intervals[intervals.length - 1];
+  const loadIntervals = intervals.filter(interval => interval.category === 'load');
+
+  assertEqual(loadIntervals.length, 2, 'only the two accepted load pairs should create intervals');
+  assertEqual(finalInterval?.category, 'rest', 'late stale load_end must not switch rest to drive');
+  assertEqual(finalInterval?.startTs, restStartedAt, 'rest interval must keep its real start timestamp');
+  assertEqual(finalInterval?.endTs, '2026-07-27T12:00:00.000Z', 'rest should continue through currentTs');
+}
+
+function testCrossMidnightPairingKeepsRestActive() {
+  const firstDay: DayRecord = {
+    ...makeDay('2026-07-27', [], { dayIndex: 1, isFirstDay: true }),
+    events: [
+      { type: 'trip_start', ts: '2026-07-27T14:50:00.000Z' },
+      { type: 'load_start', ts: '2026-07-27T14:55:00.000Z', extras: { loadSessionId: 'load-a' } },
+    ],
+  };
+  const secondDay: DayRecord = {
+    ...makeDay('2026-07-28', [], { dayIndex: 2, isFirstDay: false }),
+    events: [
+      { type: 'load_end', ts: '2026-07-27T15:05:00.000Z', extras: { loadSessionId: 'load-b' } },
+      { type: 'rest_start', ts: '2026-07-27T15:10:00.000Z', extras: { restSessionId: 'rest-1' } },
+      { type: 'load_end', ts: '2026-07-27T15:11:00.000Z', extras: { loadSessionId: 'load-a' } },
+    ],
+  };
+
+  const intervals = buildRegulationTimeline(
+    [firstDay, secondDay],
+    '2026-07-27T16:00:00.000Z',
+  );
+  const loadInterval = intervals.find(interval => interval.category === 'load');
+  const finalInterval = intervals[intervals.length - 1];
+
+  assertEqual(loadInterval?.startTs, '2026-07-27T14:55:00.000Z', 'cross-midnight load start');
+  assertEqual(loadInterval?.endTs, '2026-07-27T15:05:00.000Z', 'cross-midnight load end');
+  assertEqual(finalInterval?.category, 'rest', 'cross-midnight stale end must not end rest');
+  assertEqual(finalInterval?.startTs, '2026-07-27T15:10:00.000Z', 'cross-midnight rest start');
+}
+
 const tests: Array<[string, () => void]> = [
   ['10+10+10 reset', testTenPlusTenPlusTenResets],
   ['14+16 reset', testFourteenPlusSixteenResets],
@@ -197,6 +253,8 @@ const tests: Array<[string, () => void]> = [
   ['one-minute report marker isolation', testOneMinuteMarkerAffectsOnlyReport],
   ['raw continuous drive timestamps', testContinuousDriveUsesRawTimestamps],
   ['finalized and provisional day totals', testFinalizedAndInProgressDayTotals],
+  ['late stale load_end keeps regulation rest active', testLateStaleLoadEndDoesNotEndRest],
+  ['cross-midnight pairing keeps regulation rest active', testCrossMidnightPairingKeepsRestActive],
 ];
 
 export function runRegulationTimelineTests() {

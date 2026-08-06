@@ -1,5 +1,41 @@
 # TrackLog Changelog
 
+## 2026-08-07 v0.1.47
+
+### 開始・終了イベントの誤結合と休息状態の復旧
+
+- 積込・荷卸・休憩・休息・フェリー・高速道路などの開始／終了を、セッションIDの完全一致だけに依存せず、時系列の因果関係に基づくFIFOの共通判定へ統一
+- すでに終了済みの操作へ遅れて届いた終了イベントと、対応する開始がない孤立終了イベントを、元データを削除せず通常履歴・日報・AI用データ・現在状態から除外するよう変更
+- 運行詳細の通常一覧は採用済みペアだけを表示し、編集一覧では元イベントを保持したまま `除外済み` と理由を確認できるようにした
+- Workで確認された実データを回帰テスト化し、積込の実時間 `182分 / 76分`、日報投影 `270分`、その後の休息継続を固定
+- DBの開始／終了ガード、ホーム画面、バックグラウンド位置送信、同期状態、法令タイムラインを同じ判定へ揃えた
+
+### 高速IC・日跨ぎ・同時刻遷移の補強
+
+- 高速道路区間を全日イベントから解決し、日跨ぎや開始／終了ID不一致でも、開始日の区間へ終了時刻と終了IC名を表示するよう修正
+- 除外済みの休息終了が日締め番号を進めないよう、採用済み休息ペアだけで `dayIndex` を計算・再採番するよう変更
+- 同一時刻の自動遷移を、別操作の終了 → 同一操作の0分ペア（開始→終了）→ 別操作の開始の順に安定化し、`休憩終了 → 休息開始` が入力順にかかわらず休息状態になるよう修正
+- Androidを `versionName=0.1.47` / `versionCode=45` に更新
+
+### 検証
+
+- Supabase Edge Functionsの `deno check`
+- `npm run typecheck`
+- `npm run test:logic`
+- `npm run test:sync`（12件）
+- `npm run check:csp`
+- `npm run build`
+- `npm run check:offline`
+- `npm run cap:sync:android`
+- `android\\gradlew.bat testDebugUnitTest assembleDebug`
+
+### APK
+
+- Package: `com.tracklog.assist`
+- Version: `versionCode=45` / `versionName=0.1.47`
+- Local artifact: `output/tracklog-assist-debug.apk`
+- Release: `https://github.com/Koutacode/tracklog-pwa/releases/tag/v0.1.47`
+
 ## 2026-07-17 v0.1.44
 
 ### 高速IC再取得の優先順位修正
