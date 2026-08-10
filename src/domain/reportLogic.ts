@@ -977,11 +977,31 @@ function getAcceptedPairBounds(
   return { startMs: projectedStartMs, endMs: projectedEndMs };
 }
 
+function getQuarterHourPairBounds(
+  start: TripEvent,
+  end: TripEvent,
+  projectedTimestamps: ReadonlyMap<TripEvent, string>,
+): { startMs: number; endMs: number } | null {
+  if (!getAcceptedPairBounds(start, end, projectedTimestamps)) return null;
+
+  const projectedStartMs = Date.parse(projectedTimestamps.get(start) ?? '');
+  const projectedEndMs = Date.parse(projectedTimestamps.get(end) ?? '');
+  if (
+    !Number.isFinite(projectedStartMs)
+    || !Number.isFinite(projectedEndMs)
+    || projectedEndMs <= projectedStartMs
+  ) {
+    return null;
+  }
+  return { startMs: projectedStartMs, endMs: projectedEndMs };
+}
+
 function buildRoundedPairDetails(
   day: DayRecord,
   startType: TripEventType,
   endType: TripEventType,
   tripProjection?: ReportTimelineProjection,
+  useQuarterHourBounds = false,
 ): Array<{ startTs: string; endTs: string; minutes: number; customer?: string; volume?: number; address?: string }> {
   const events = [...day.events].sort((a, b) => a.ts.localeCompare(b.ts));
   const definition = findToggleDefinition(startType, endType);
@@ -994,7 +1014,9 @@ function buildRoundedPairDetails(
 
   for (const pair of pairs) {
     const { start, end } = pair;
-    const bounds = getAcceptedPairBounds(start, end, effectiveTimestamps);
+    const bounds = useQuarterHourBounds
+      ? getQuarterHourPairBounds(start, end, effectiveTimestamps)
+      : getAcceptedPairBounds(start, end, effectiveTimestamps);
     if (!bounds) continue;
     details.push({
       startTs: new Date(bounds.startMs).toISOString(),
@@ -1133,6 +1155,7 @@ function buildTripPairDetailsByDay(
   startType: TripEventType,
   endType: TripEventType,
   sessionKey: string,
+  useQuarterHourBounds = false,
 ): Map<number, LoadDetail[]> {
   const byDay = new Map<number, LoadDetail[]>();
   const events = days.flatMap(day => day.events);
@@ -1146,7 +1169,9 @@ function buildTripPairDetailsByDay(
 
   for (const pair of pairs) {
     const { start, end } = pair;
-    const bounds = getAcceptedPairBounds(start, end, projectedTimestamps);
+    const bounds = useQuarterHourBounds
+      ? getQuarterHourPairBounds(start, end, projectedTimestamps)
+      : getAcceptedPairBounds(start, end, projectedTimestamps);
     if (!bounds) continue;
 
     for (const day of days) {
@@ -1182,6 +1207,7 @@ function buildTripFerrySegmentsByDay(
     'boarding',
     'disembark',
     'ferrySessionId',
+    true,
   );
   return new Map(
     Array.from(details.entries()).map(([dayIndex, items]) => [
@@ -1302,7 +1328,7 @@ export function computeDayMetrics(
   const waitMin = sumCategoryMinutes(intervals, 'wait');
   const loadMin = sumCategoryMinutes(intervals, 'load');
   const unloadMin = sumCategoryMinutes(intervals, 'unload');
-  const ferrySegments = buildRoundedPairDetails(day, 'boarding', 'disembark', tripProjection).map(segment => ({
+  const ferrySegments = buildRoundedPairDetails(day, 'boarding', 'disembark', tripProjection, true).map(segment => ({
     startTs: segment.startTs,
     endTs: segment.endTs,
     durationMinutes: segment.minutes,

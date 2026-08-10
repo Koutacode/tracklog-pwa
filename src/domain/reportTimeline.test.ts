@@ -270,6 +270,55 @@ function testAcceptedPairsDriveUnloadAndFerryDetails() {
   assertEqual(metrics[1].ferrySegments[0]?.durationMinutes, 30, 'cross-day ferry ends on second day');
 }
 
+function testFerryUsesQuarterHourGridInDailyTotals() {
+  const dateKey = '2026-08-06';
+  const ferrySessionId = '55e00995-24a4-4545-bfb5-6bed66bb6cd1';
+  const day = makeDay(dateKey, [
+    { type: 'rest_end', time: '00:00' },
+    {
+      type: 'rest_start',
+      time: '13:23',
+      extras: { restSessionId: 'rest-before-ferry', reportMinDurationMinutes: 15 },
+    },
+    {
+      type: 'boarding',
+      time: '14:11',
+      extras: { ferrySessionId, reportMinDurationMinutes: 15 },
+    },
+    { type: 'rest_end', time: '18:06', extras: { restSessionId: 'rest-before-ferry' } },
+    { type: 'disembark', time: '18:06', extras: { ferrySessionId } },
+    {
+      type: 'rest_start',
+      time: '22:49',
+      extras: { restSessionId: 'rest-after-ferry', reportMinDurationMinutes: 15 },
+    },
+  ]);
+  day.isFirstDay = false;
+  const trip: Trip = {
+    id: 'trip-2026-08-06-ferry-rounding',
+    createdAt: day.events[0].ts,
+    label: 'ferry rounding regression',
+    days: [day],
+    jobs: [],
+    rawJson: '{}',
+  };
+
+  const metrics = computeTripDayMetrics(trip)[0];
+  const totalMinutes = metrics.driveMinutes
+    + metrics.workMinutes
+    + metrics.loadMinutes
+    + metrics.unloadMinutes
+    + metrics.waitMinutes
+    + metrics.breakMinutes
+    + metrics.ferryMinutes
+    + metrics.restMinutes;
+
+  assertEqual(metrics.ferryMinutes, 225, '14:11-18:06 ferry rounds to 14:15-18:00');
+  assertEqual(formatRoundedJstTime(metrics.ferrySegments[0]?.startTs ?? ''), '14:15', 'rounded ferry start');
+  assertEqual(formatRoundedJstTime(metrics.ferrySegments[0]?.endTs ?? ''), '18:00', 'rounded ferry end');
+  assertEqual(totalMinutes, 24 * 60, 'full-day report remains exactly 24 hours');
+}
+
 function testNotionLateLoadEndIsExcludedFromReports() {
   const loadA = '3ba22f48-load-a';
   const loadB = 'bcb3886a-load-b';
@@ -386,6 +435,7 @@ const tests: Array<[string, () => void]> = [
   ['simultaneous automatic break-to-rest ordering', testSimultaneousAutoBreakToRestIsOrderIndependent],
   ['cross-midnight minimum', testShortLoadAcrossMidnightKeepsMinimum],
   ['accepted unload and ferry pair details', testAcceptedPairsDriveUnloadAndFerryDetails],
+  ['quarter-hour ferry totals', testFerryUsesQuarterHourGridInDailyTotals],
   ['Notion stale load end regression', testNotionLateLoadEndIsExcludedFromReports],
   ['cross-day expressway sessions', testExpresswaySessionsReconnectAcrossDays],
 ];
