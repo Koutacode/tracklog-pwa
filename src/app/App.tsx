@@ -106,6 +106,7 @@ function AppShell() {
           <Route path="/messages" element={<RequireDriverProfile><MessageInboxScreen /></RequireDriverProfile>} />
           <Route path="/driver-login" element={<DriverLoginScreen />} />
           <Route path="/login" element={<LoginScreen />} />
+          <Route path="/admin/login" element={<Navigate to="/login" replace />} />
           <Route path="/auth/driver/callback" element={<AuthCallbackScreen role="driver" />} />
           <Route path="/auth/admin/callback" element={<AuthCallbackScreen role="admin" />} />
           <Route path="/admin" element={<AdminDashboard />} />
