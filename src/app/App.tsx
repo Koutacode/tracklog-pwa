@@ -1,5 +1,5 @@
 import { Suspense, lazy, useEffect } from 'react';
-import { BrowserRouter, Routes, Route, Navigate, useLocation, useNavigate } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate, Link, useLocation, useNavigate } from 'react-router-dom';
 import AdminAuthBridge from './AdminAuthBridge';
 import AuthCallbackScreen from './AuthCallbackScreen';
 import IcResolverJob from './IcResolverJob';
@@ -36,6 +36,22 @@ const routerBase = import.meta.env.BASE_URL;
 
 function canUseDriverHome(identity: DriverIdentity) {
   return identity.configured && identity.authInitialized && identity.profileComplete && identity.approvalStatus === 'approved';
+}
+
+function NotFoundScreen() {
+  return (
+    <div className="screen-shell">
+      <div className="screen-card screen-card--narrow">
+        <div className="screen-card__eyebrow">TrackLog</div>
+        <h1 className="screen-card__title">ページが見つかりません</h1>
+        <p className="settings-note">URLを確認するか、目的の画面へ戻ってください。</p>
+        <div className="screen-card__actions">
+          <Link to="/" className="pill-link">ホームへ</Link>
+          <Link to="/login" className="pill-link">管理者ログイン</Link>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function AppShell() {
@@ -112,6 +128,7 @@ function AppShell() {
           <Route path="/admin" element={<AdminDashboard />} />
           <Route path="/admin/devices/:deviceId" element={<AdminDeviceDetail />} />
           <Route path="/admin/trips/:tripId" element={<AdminTripDetail />} />
+          <Route path="*" element={<NotFoundScreen />} />
         </Routes>
       </Suspense>
       <div
