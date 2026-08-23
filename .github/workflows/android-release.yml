@@ -202,17 +202,19 @@ jobs:
             echo "::error::Android apksigner was not found."
             exit 1
           fi
-          if ! signer_output="$("$APKSIGNER" verify --print-certs tracklog-assist-debug.apk)"; then
+          if ! signer_output="$("$APKSIGNER" verify --print-certs tracklog-assist-debug.apk 2>&1)"; then
             echo "::error::The release APK signature could not be verified."
+            printf '%s\n' "$signer_output"
             exit 1
           fi
           mapfile -t signer_digests < <(
             printf '%s\n' "$signer_output" |
-              sed -n 's/^Signer #[0-9][0-9]* certificate SHA-256 digest: //p' |
+              grep -Eio '[0-9a-f]{64}' |
               tr '[:upper:]' '[:lower:]'
           )
           if [ "${#signer_digests[@]}" -ne 1 ]; then
             echo "::error::Expected exactly one APK signer, found ${#signer_digests[@]}."
+            printf '%s\n' "$signer_output"
             exit 1
           fi
           actual_signer_sha256="${signer_digests[0]}"
