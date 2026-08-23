@@ -24,6 +24,7 @@ const PUSH_TOKEN_REFRESH_INTERVAL_MS = 12 * 60 * 60 * 1000;
 const PUSH_CHANNEL_ID = 'tracklog_admin_messages';
 
 let nativeListenersReady = false;
+let nativeListenersInFlight: Promise<void> | null = null;
 let webListenersReady = false;
 let firebaseForegroundListenerReady = false;
 let nativeRegistrationStarted = false;
@@ -153,25 +154,39 @@ async function handlePushReceived() {
 
 async function ensureNativePushListeners() {
   if (nativeListenersReady) return;
-  await PushNotifications.addListener('registration', (token: Token) => {
-    void savePushToken(token.value, 'android').catch(error => {
-      console.warn('[pushRegistration] native token registration failed', error);
-    });
+  if (nativeListenersInFlight) return nativeListenersInFlight;
+  const setup = Promise.all([
+    PushNotifications.addListener('registration', (token: Token) => {
+      void savePushToken(token.value, 'android').catch(() => {
+        console.warn('[pushRegistration] native token registration failed');
+      });
+    }),
+    PushNotifications.addListener('registrationError', () => {
+      console.warn('[pushRegistration] native registration error');
+    }),
+    PushNotifications.addListener('pushNotificationReceived', (_notification: PushNotificationSchema) => {
+      void handlePushReceived().catch(() => {
+        console.warn('[pushRegistration] native push receive handling failed');
+      });
+    }),
+    PushNotifications.addListener('pushNotificationActionPerformed', (event: ActionPerformed) => {
+      void handlePushTap(getPushData(event.notification)).catch(() => {
+        console.warn('[pushRegistration] native push tap handling failed');
+      });
+    }),
+  ]).then(() => {
+    nativeListenersReady = true;
+  }).finally(() => {
+    if (nativeListenersInFlight === setup) nativeListenersInFlight = null;
   });
-  await PushNotifications.addListener('registrationError', error => {
-    console.warn('[pushRegistration] native registration error', error);
-  });
-  await PushNotifications.addListener('pushNotificationReceived', (_notification: PushNotificationSchema) => {
-    void handlePushReceived().catch(error => {
-      console.warn('[pushRegistration] native push receive handling failed', error);
-    });
-  });
-  await PushNotifications.addListener('pushNotificationActionPerformed', (event: ActionPerformed) => {
-    void handlePushTap(getPushData(event.notification)).catch(error => {
-      console.warn('[pushRegistration] native push tap handling failed', error);
-    });
-  });
-  nativeListenersReady = true;
+  nativeListenersInFlight = setup;
+  return setup;
+}
+
+/** Register retained push action delivery before auth-dependent token setup. */
+export async function initNativeAdminMessagePushActions() {
+  if (!Capacitor.isNativePlatform()) return;
+  await ensureNativePushListeners();
 }
 
 async function ensureNativePushRegistration() {

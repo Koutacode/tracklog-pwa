@@ -2,6 +2,7 @@ import { APP_VERSION, BUILD_DATE } from '../app/version';
 import {
   LATEST_RELEASE_API,
   pickPreferredApkAsset,
+  RELEASE_APK_NAME,
   resolveApkDownloadUrl,
 } from '../app/releaseInfo';
 
@@ -79,6 +80,12 @@ export async function checkLatestAndroidRelease(): Promise<AndroidReleaseCheck> 
   const tag = typeof data?.tag_name === 'string' ? data.tag_name : '';
   const latestVersion = tag.replace(/^v/i, '').trim();
   if (!latestVersion) throw new Error('GitHub Releaseのバージョンを確認できませんでした');
+  if (!apkAsset) {
+    throw new Error(`最新リリース ${tag} に配布用APK（${RELEASE_APK_NAME}）がありません`);
+  }
+  if (typeof apkAsset.browser_download_url !== 'string' || !apkAsset.browser_download_url.trim()) {
+    throw new Error(`最新リリース ${tag} の配布用APK（${RELEASE_APK_NAME}）がダウンロード可能な状態ではありません`);
+  }
 
   return {
     kind: 'android',
@@ -88,7 +95,7 @@ export async function checkLatestAndroidRelease(): Promise<AndroidReleaseCheck> 
     publishedAt: typeof data?.published_at === 'string' ? data.published_at : null,
     assetUpdatedAt: apkAsset?.updated_at ?? apkAsset?.created_at ?? null,
     htmlUrl: typeof data?.html_url === 'string' ? data.html_url : null,
-    downloadUrl: resolveApkDownloadUrl(apkAsset),
+    downloadUrl: resolveApkDownloadUrl(),
     updateAvailable: isNewerVersion(latestVersion),
     checkedAt: new Date().toISOString(),
   };

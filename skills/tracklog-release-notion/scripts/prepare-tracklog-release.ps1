@@ -23,6 +23,21 @@ function Invoke-CheckedCommand {
   }
 }
 
+function Get-NormalizedPath {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Path,
+    [Parameter(Mandatory = $true)]
+    [string]$BasePath
+  )
+
+  if ([System.IO.Path]::IsPathRooted($Path)) {
+    return [System.IO.Path]::GetFullPath($Path)
+  }
+
+  return [System.IO.Path]::GetFullPath((Join-Path $BasePath $Path))
+}
+
 $projectRoot = Resolve-Path (Join-Path $PSScriptRoot "..\..\..")
 $packageJsonPath = Join-Path $projectRoot "package.json"
 $defaultReleaseOwner = "Koutacode"
@@ -46,22 +61,34 @@ $releaseAssetName = if ($releaseConfig -and $releaseConfig.apkAssetName) { [stri
 $localApkPath = if ($releaseConfig -and $releaseConfig.localApkPath) { [string]$releaseConfig.localApkPath } else { $defaultLocalApkPath }
 
 $androidDir = Join-Path $projectRoot "android"
-$debugApk = Join-Path $GradleBuildRoot "app\outputs\apk\debug\app-debug.apk"
-$outputApk = Join-Path $projectRoot $localApkPath
+$resolvedGradleBuildRoot = Get-NormalizedPath -Path $GradleBuildRoot -BasePath $projectRoot
+$resolvedAppBuildDir = if ([System.IO.Path]::IsPathRooted($AppBuildDir)) {
+  [System.IO.Path]::GetFullPath($AppBuildDir)
+} else {
+  Get-NormalizedPath -Path $AppBuildDir -BasePath $resolvedGradleBuildRoot
+}
+$debugApk = Join-Path $resolvedAppBuildDir "outputs\apk\debug\app-debug.apk"
+$outputApk = Get-NormalizedPath -Path $localApkPath -BasePath $projectRoot
 $outputDir = Split-Path -Parent $outputApk
+$outputSha256 = "$outputApk.sha256"
 
-if ($Build) {
-  Write-Host ""
-  Write-Host "== npm run build =="
+$runBuildPipeline = $Build -or $SyncAndroid -or $AssembleDebug
+$runAndroidSync = $SyncAndroid -or $AssembleDebug
+
+if ($runBuildPipeline) {
   Push-Location $projectRoot
   try {
-    Invoke-CheckedCommand { & npm.cmd run build } "npm run build"
+    foreach ($scriptName in @("typecheck", "test:logic", "test:sync", "check:csp", "build", "check:offline")) {
+      Write-Host ""
+      Write-Host "== npm run $scriptName =="
+      Invoke-CheckedCommand { & npm.cmd run $scriptName } "npm run $scriptName"
+    }
   } finally {
     Pop-Location
   }
 }
 
-if ($SyncAndroid) {
+if ($runAndroidSync) {
   Write-Host ""
   Write-Host "== npx cap sync android =="
   Push-Location $projectRoot
@@ -75,20 +102,30 @@ if ($SyncAndroid) {
 
 if ($AssembleDebug) {
   Write-Host ""
-  Write-Host "== gradlew assembleDebug =="
+  Write-Host "== gradlew :app:testDebugUnitTest :app:assembleDebugAndroidTest :app:assembleDebug =="
   Push-Location $androidDir
   try {
-    Invoke-CheckedCommand { .\gradlew.bat "-PtracklogExternalBuildRoot=$GradleBuildRoot" --no-daemon testDebugUnitTest assembleDebug } "gradlew testDebugUnitTest assembleDebug"
+    Invoke-CheckedCommand {
+      .\gradlew.bat `
+        "-PtracklogExternalBuildRoot=$resolvedGradleBuildRoot" `
+        "-PtracklogAppBuildDir=$resolvedAppBuildDir" `
+        --no-daemon `
+        :app:testDebugUnitTest `
+        :app:assembleDebugAndroidTest `
+        :app:assembleDebug
+    } "gradlew :app:testDebugUnitTest :app:assembleDebugAndroidTest :app:assembleDebug"
   } finally {
     Pop-Location
   }
 }
 
-if (Test-Path $debugApk) {
+if ($AssembleDebug -and (Test-Path $debugApk)) {
   if (!(Test-Path $outputDir)) {
     New-Item -ItemType Directory -Path $outputDir | Out-Null
   }
   Copy-Item -Force $debugApk $outputApk
+} elseif ($AssembleDebug) {
+  throw "Assembled APK was not found at $debugApk"
 }
 
 Push-Location $projectRoot
@@ -126,12 +163,22 @@ if ($apkExists) {
   }
 }
 
+if ($AssembleDebug -and $apkExists) {
+  $shaLine = "{0}  {1}{2}" -f $shaText.ToLowerInvariant(), [System.IO.Path]::GetFileName($outputApk), [Environment]::NewLine
+  [System.IO.File]::WriteAllText(
+    $outputSha256,
+    $shaLine,
+    (New-Object System.Text.UTF8Encoding($false))
+  )
+}
+
 $reportLines = @(
   "## TrackLog Update ($today)",
   "- Branch: ``$branch``",
   "- Commit: ``$shortCommit`` (``$commit``)",
   "- Subject: $subject",
   "- APK: $apkInfoText",
+  "- Android build directory: ``$resolvedAppBuildDir``",
   "- Release asset name: $releaseAssetName",
   "- SHA-256: $shaText",
   "- Release URL: $releaseUrl",

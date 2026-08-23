@@ -1,5 +1,6 @@
 import { Capacitor, registerPlugin } from '@capacitor/core';
 import { LocalNotifications } from '@capacitor/local-notifications';
+import { requestRouteTrackingSync } from '../app/routeTrackingSignal';
 import { BackgroundGeolocation } from './backgroundGeolocationPlugin';
 
 type NativeSetupPlugin = {
@@ -227,10 +228,17 @@ function clearLocationPermissionCache() {
 export async function requestLocationPermission(): Promise<SimplePermissionState> {
   if (!isNative()) {
     const current = await checkLocationPermissionStatus();
-    if (current === 'granted' || current === 'denied') return current;
+    if (current === 'granted' || current === 'denied') {
+      requestRouteTrackingSync();
+      return current;
+    }
     const probed = await probeGeoPermissionByFix();
     clearLocationPermissionCache();
     locationStatusCache = { value: probed, at: Date.now() };
+    // The settings button is an explicit user gesture. Re-query in the route
+    // supervisor after the browser has resolved that gesture; interval and
+    // visibility syncs never receive this re-arm signal.
+    requestRouteTrackingSync();
     return probed;
   }
   let watcherId: string | null = null;

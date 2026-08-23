@@ -1,5 +1,7 @@
 import {
+  createAuthCodeVerifierStorage,
   createMirroredAuthStorage,
+  getAuthCodeVerifierStorageKey,
   type AuthStorageAdapter,
 } from './supabase';
 
@@ -23,6 +25,16 @@ function assertEqual<T>(actual: T, expected: T, message: string) {
   if (actual !== expected) {
     throw new Error(`${message}: expected ${String(expected)}, received ${String(actual)}`);
   }
+}
+
+function assertThrows(run: () => unknown, message: string) {
+  let threw = false;
+  try {
+    run();
+  } catch {
+    threw = true;
+  }
+  assertEqual(threw, true, message);
 }
 
 function jwt(sub: string, iat: number, exp: number) {
@@ -101,13 +113,40 @@ async function run() {
     'logout tombstone prevents stale session restoration',
   );
 
+  const adminVerifierAdapter = new MemoryStorage();
+  const driverVerifierLocal = new MemoryStorage();
+  const driverVerifierIndexed = new MemoryStorage();
+  const driverVerifierAdapter = createMirroredAuthStorage(driverVerifierLocal, driverVerifierIndexed);
+  const verifierStorage = createAuthCodeVerifierStorage(adminVerifierAdapter, driverVerifierAdapter);
+  const adminVerifierKey = getAuthCodeVerifierStorageKey('admin');
+  const driverVerifierKey = getAuthCodeVerifierStorageKey('driver');
+  adminVerifierAdapter.setItem(adminVerifierKey, 'admin-verifier-snapshot');
+  await driverVerifierAdapter.setItem(driverVerifierKey, 'driver-verifier-snapshot');
+  assertEqual(await verifierStorage.snapshot('admin'), 'admin-verifier-snapshot', 'admin verifier uses the admin auth adapter');
+  assertEqual(await verifierStorage.snapshot('driver'), 'driver-verifier-snapshot', 'driver verifier uses the mirrored driver adapter');
+  adminVerifierAdapter.removeItem(adminVerifierKey);
+  await driverVerifierAdapter.removeItem(driverVerifierKey);
+  await verifierStorage.restore('admin', 'admin-verifier-snapshot');
+  await verifierStorage.restore('driver', 'driver-verifier-snapshot');
+  assertEqual(adminVerifierAdapter.getItem(adminVerifierKey), 'admin-verifier-snapshot', 'admin verifier is restorable after exchange removes it');
+  assertEqual(driverVerifierLocal.getItem(driverVerifierKey), 'driver-verifier-snapshot', 'driver verifier is restored to localStorage');
+  assertEqual(driverVerifierIndexed.getItem(driverVerifierKey), 'driver-verifier-snapshot', 'driver verifier is restored to IndexedDB mirror');
+  await verifierStorage.clear('admin');
+  await verifierStorage.clear('driver');
+  assertEqual(adminVerifierAdapter.getItem(adminVerifierKey), null, 'admin restart clears only its verifier key');
+  assertEqual(driverVerifierLocal.getItem(driverVerifierKey), null, 'driver restart clears its local verifier key');
+  assertEqual(driverVerifierIndexed.getItem(driverVerifierKey), null, 'driver restart clears its mirrored verifier key');
+
   Object.assign(globalThis, {
     __APP_VERSION__: 'test',
     __BUILD_DATE__: 'test',
   });
   const {
+    buildAuthRedirectUrl,
     deriveDriverIdentityFromPersistence,
     isPermanentDriverAuthFailure,
+    normalizeNativeAuthNextPath,
+    parseAuthCallbackUrl,
   } = await import('./remoteAuth');
   const profile = {
     configured: true,
@@ -157,7 +196,70 @@ async function run() {
     'network failure remains retryable',
   );
 
-  console.log('remoteAuthPersistence: 20 tests passed');
+  const queryNext = parseAuthCallbackUrl('com.tracklog.assist://auth?code=abc&access_token=atk&refresh_token=rtk&next=%2Fadmin');
+  assertEqual(queryNext.nextPath, '/admin', 'native callback parses next from query');
+  assertEqual(queryNext.callbackRole, 'admin', 'native callback derives admin only from an allowed route');
+  assertEqual(queryNext.code, 'abc', 'native callback preserves query code');
+  const hashNext = parseAuthCallbackUrl('com.tracklog.assist://auth#access_token=atk&refresh_token=rtk&next=%2Fadmin');
+  assertEqual(hashNext.nextPath, '/admin', 'native callback parses next from hash');
+  assertEqual(hashNext.code, null, 'native callback handles hash-only callback');
+  const noNext = parseAuthCallbackUrl('com.tracklog.assist://auth?code=abc&access_token=atk&refresh_token=rtk');
+  assertEqual(noNext.nextPath, '/settings', 'native callback defaults to settings when next is missing');
+  assertEqual(noNext.callbackRole, null, 'missing next does not silently select a client role');
+  const encoded = parseAuthCallbackUrl('com.tracklog.assist://auth?code=abc&next=%2Fadmin%3Fmode%3Dtest');
+  assertEqual(encoded.nextPath, '/admin?mode=test', 'next query values are URI-decoded');
+
+  assertEqual(normalizeNativeAuthNextPath('/settings')?.role, 'driver', 'settings is an allowed driver route');
+  assertEqual(normalizeNativeAuthNextPath('/')?.role, 'driver', 'home is an allowed driver route');
+  assertEqual(normalizeNativeAuthNextPath('/administrator'), null, 'admin prefix lookalike is rejected');
+  assertEqual(normalizeNativeAuthNextPath('//evil.example/path'), null, 'protocol-relative next is rejected');
+  assertEqual(normalizeNativeAuthNextPath('/settings/../admin'), null, 'traversal next is rejected');
+  assertEqual(normalizeNativeAuthNextPath('%252F%252Fevil.example'), null, 'double-encoded external next is rejected');
+
+  const nativeAdminRedirect = buildAuthRedirectUrl({
+    role: 'admin',
+    native: true,
+    currentOrigin: 'https://tracklog.example',
+    attemptId: 'attempt_admin_1',
+  });
+  const parsedNativeRedirect = new URL(nativeAdminRedirect);
+  assertEqual(parsedNativeRedirect.protocol, 'com.tracklog.assist:', 'native redirect uses the known app scheme');
+  assertEqual(parsedNativeRedirect.host, 'auth', 'native redirect uses the known auth host');
+  assertEqual(parsedNativeRedirect.searchParams.get('next'), '/admin', 'native redirect uses the admin allowlist route');
+  assertEqual(parsedNativeRedirect.searchParams.get('attempt'), 'attempt_admin_1', 'native redirect binds the attempt id');
+  assertThrows(() => buildAuthRedirectUrl({
+    role: 'admin',
+    native: true,
+    currentOrigin: 'https://tracklog.example',
+    override: 'https://evil.example/auth/admin/callback',
+  }), 'foreign native redirect override is rejected');
+  assertThrows(() => buildAuthRedirectUrl({
+    role: 'admin',
+    native: true,
+    currentOrigin: 'https://tracklog.example',
+    override: 'com.tracklog.assist://auth?next=%2Fsettings',
+  }), 'cross-role native redirect override is rejected');
+
+  assertEqual(buildAuthRedirectUrl({
+    role: 'driver',
+    native: false,
+    currentOrigin: 'https://tracklog.example',
+    override: 'https://tracklog.example/auth/driver/callback?ignored=true',
+  }), 'https://tracklog.example/auth/driver/callback', 'same-origin exact web callback is normalized');
+  assertThrows(() => buildAuthRedirectUrl({
+    role: 'driver',
+    native: false,
+    currentOrigin: 'https://tracklog.example',
+    override: 'https://evil.example/auth/driver/callback',
+  }), 'foreign web redirect override is rejected');
+  assertThrows(() => buildAuthRedirectUrl({
+    role: 'driver',
+    native: false,
+    currentOrigin: 'https://tracklog.example',
+    override: 'https://tracklog.example/auth/admin/callback',
+  }), 'cross-role web redirect override is rejected');
+
+  console.log('remoteAuthPersistence: 54 tests passed');
 }
 
 void run().catch(error => {

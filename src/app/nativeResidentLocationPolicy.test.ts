@@ -3,6 +3,7 @@ import type { NativeResidentLocationPoint } from '../services/nativeResidentLoca
 import {
   canUseNativeResidentLocation,
   drainNativeResidentRoutePointQueue,
+  orderNativeResidentRoutePoints,
   uniqueNativeResidentRoutePoints,
 } from './nativeResidentLocationPolicy';
 
@@ -100,9 +101,52 @@ assertEqual(unique.length, 2, 'duplicate and invalid native points are excluded'
 assertEqual(unique[0].id, 'point-1', 'native UUID is preserved for idempotent storage');
 assertEqual(unique[1].id, 'point-4', 'valid nullable sensor values are retained');
 
+const monotonicOrdered = orderNativeResidentRoutePoints(uniqueNativeResidentRoutePoints([
+  point({
+    id: 'same-session-later',
+    ts: '2026-07-10T04:59:00.000Z',
+    monotonicSessionId: 'boot-a',
+    elapsedRealtimeMs: 300,
+  }),
+  point({
+    id: 'same-session-earlier',
+    ts: '2026-07-10T05:00:00.000Z',
+    monotonicSessionId: 'boot-a',
+    elapsedRealtimeMs: 200,
+  }),
+  point({
+    id: 'next-boot-first',
+    ts: '2026-07-10T03:00:00.000Z',
+    monotonicSessionId: 'boot-b',
+    elapsedRealtimeMs: 100,
+  }),
+  point({
+    id: 'old-boot-noncontiguous',
+    ts: '2026-07-10T02:00:00.000Z',
+    monotonicSessionId: 'boot-a',
+    elapsedRealtimeMs: 400,
+  }),
+]));
+assertEqual(
+  monotonicOrdered.map(item => item.id).join(','),
+  'same-session-earlier,same-session-later,next-boot-first,old-boot-noncontiguous',
+  'elapsedRealtime orders one boot run while cross-session spool FIFO remains stable',
+);
+assertEqual(
+  monotonicOrdered[0].monotonicSessionId,
+  'boot-a',
+  'normalization preserves boot session metadata for detection',
+);
+assertEqual(
+  monotonicOrdered[0].elapsedRealtimeMs,
+  200,
+  'normalization preserves elapsedRealtime metadata for detection',
+);
+
 async function runAsyncTests() {
   let peekCalls = 0;
   const storedIds: string[] = [];
+  const processedIds: string[] = [];
   const acknowledgedBatches: string[] = [];
   const drained = await drainNativeResidentRoutePointQueue({
     enabled: true,
@@ -122,13 +166,57 @@ async function runAsyncTests() {
     addRoutePoint: async routePoint => {
       storedIds.push(routePoint.id);
     },
+    onPersistedPoint: async routePoint => {
+      assertEqual(
+        storedIds.includes(routePoint.id),
+        true,
+        'detection hook runs only after the point is durable',
+      );
+      processedIds.push(routePoint.id);
+    },
   });
   assertEqual(drained.persisted, 3, 'resume drain persists each UUID once across batches');
   assertEqual(storedIds.join(','), 'point-1,point-2,point-3', 'resume drain preserves UUID order');
   assertEqual(
+    processedIds.join(','),
+    'point-1,point-2,point-3',
+    'each durable native point is forwarded to policy in queue order',
+  );
+  assertEqual(
     acknowledgedBatches.join('|'),
     'point-1,point-2|point-3',
     'native points are acknowledged only after each Dexie batch is persisted',
+  );
+
+  const crossBootStoredIds: string[] = [];
+  await drainNativeResidentRoutePointQueue({
+    enabled: true,
+    peek: async () => ({
+      points: [
+        point({
+          id: 'previous-boot',
+          ts: '2026-07-10T06:00:00.000Z',
+          monotonicSessionId: 'boot-previous',
+          elapsedRealtimeMs: 900,
+        }),
+        point({
+          id: 'next-boot',
+          ts: '2026-07-10T01:00:00.000Z',
+          monotonicSessionId: 'boot-next',
+          elapsedRealtimeMs: 10,
+        }),
+      ],
+      remaining: 0,
+    }),
+    acknowledge: async () => ({ remaining: 0 }),
+    addRoutePoint: async routePoint => {
+      crossBootStoredIds.push(routePoint.id);
+    },
+  });
+  assertEqual(
+    crossBootStoredIds.join(','),
+    'previous-boot,next-boot',
+    'wall-clock reversal across boots does not reorder native spool FIFO',
   );
 
   let acknowledgedAfterFailure = false;
@@ -151,6 +239,29 @@ async function runAsyncTests() {
   assertEqual(failed, true, 'Dexie failures are surfaced for retry');
   assertEqual(acknowledgedAfterFailure, false, 'failed Dexie writes leave the native queue intact');
 
+  let acknowledgedAfterPolicyFailure = false;
+  try {
+    await drainNativeResidentRoutePointQueue({
+      enabled: true,
+      peek: async () => ({ points: [point()], remaining: 0 }),
+      acknowledge: async () => {
+        acknowledgedAfterPolicyFailure = true;
+        return { remaining: 0 };
+      },
+      addRoutePoint: async () => undefined,
+      onPersistedPoint: async () => {
+        throw new Error('policy interrupted');
+      },
+    });
+  } catch {
+    // Native queue must remain available for the idempotent replay.
+  }
+  assertEqual(
+    acknowledgedAfterPolicyFailure,
+    false,
+    'interrupted policy processing leaves the native point available for replay',
+  );
+
   let pwaPeekCalled = false;
   await drainNativeResidentRoutePointQueue({
     enabled: false,
@@ -163,7 +274,7 @@ async function runAsyncTests() {
   });
   assertEqual(pwaPeekCalled, false, 'PWA does not invoke the native queue bridge');
 
-  console.log('nativeResidentLocationPolicy: 14 tests passed');
+  console.log('nativeResidentLocationPolicy: 22 tests passed');
 }
 
 void runAsyncTests().catch(error => {

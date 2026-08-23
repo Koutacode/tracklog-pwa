@@ -1,4 +1,5 @@
 import type { DayRecord, TripEventType } from './reportTypes';
+import { projectAutomaticBreakAsRest } from './metrics';
 import {
   ALL_TOGGLE_DEFINITIONS,
   resolveTogglePairing,
@@ -142,12 +143,13 @@ export function buildRegulationTimeline(
   const currentMs = currentTs == null ? null : Date.parse(currentTs);
   const hasValidCurrentTs = currentMs != null && Number.isFinite(currentMs);
   let eventOrder = 0;
-  const rawEvents = days
-    .flatMap(day => day.events.map(event => ({
+  const projectedEvents = projectAutomaticBreakAsRest(days.flatMap(day => day.events));
+  const rawEvents = projectedEvents
+    .map(event => ({
       event,
       timestampMs: Date.parse(event.ts),
       order: eventOrder++,
-    })))
+    }))
     .filter(item => Number.isFinite(item.timestampMs))
     .filter(item => !hasValidCurrentTs || item.timestampMs <= currentMs)
     .sort((a, b) => a.timestampMs - b.timestampMs || a.order - b.order);
@@ -190,7 +192,37 @@ export function computeContinuousDriveTimeline(
   currentTs?: string,
 ): ContinuousDriveTimelineResult {
   const intervals = buildRegulationTimeline(days, currentTs);
-  const dayIndexByDateKey = new Map(days.map(day => [day.dateKey, day.dayIndex]));
+  const daysByDateKey = new Map<string, typeof days[number][]>();
+  for (const day of days) {
+    const candidates = daysByDateKey.get(day.dateKey) ?? [];
+    candidates.push(day);
+    daysByDateKey.set(day.dateKey, candidates);
+  }
+  const resolveDayIndex = (timestampMs: number): number | undefined => {
+    const candidates = daysByDateKey.get(jstDateKeyFromMs(timestampMs));
+    if (candidates?.length === 1) return candidates[0].dayIndex;
+
+    // Imported/recovered reports can contain multiple operational records for
+    // one calendar date. Attribute an interval to the record containing the
+    // latest causal event at or before the interval boundary instead of
+    // collapsing every interval into the final same-date record. If a single
+    // source record spans midnight without a next-date record, use the same
+    // causal lookup across all records so the post-midnight interval is not
+    // dropped from compliance metrics.
+    const candidatePool = candidates?.length ? candidates : days;
+    let resolved = candidates?.[0]?.dayIndex;
+    let latestEventMs = Number.NEGATIVE_INFINITY;
+    for (const candidate of candidatePool) {
+      for (const event of candidate.events) {
+        const eventMs = Date.parse(event.ts);
+        if (Number.isFinite(eventMs) && eventMs <= timestampMs && eventMs > latestEventMs) {
+          latestEventMs = eventMs;
+          resolved = candidate.dayIndex;
+        }
+      }
+    }
+    return resolved;
+  };
   const byDay = new Map<number, ContinuousDriveDayState>(
     days.map(day => [day.dayIndex, {
       longestContinuousDriveMinutes: 0,
@@ -212,7 +244,7 @@ export function computeContinuousDriveTimeline(
       while (cursorMs < endMs) {
         const chunkEndMs = Math.min(endMs, jstDayEndMs(cursorMs));
         driveSinceResetMs += chunkEndMs - cursorMs;
-        const dayIndex = dayIndexByDateKey.get(jstDateKeyFromMs(cursorMs));
+        const dayIndex = resolveDayIndex(cursorMs);
         const dayState = dayIndex == null ? undefined : byDay.get(dayIndex);
         if (dayState) {
           dayState.longestContinuousDriveMinutes = Math.max(

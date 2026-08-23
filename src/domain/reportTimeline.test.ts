@@ -6,6 +6,7 @@ import {
   formatReportMinute,
   formatRoundedJstTime,
   projectReportTimeline,
+  projectReportTripForView,
   projectTripReportTimelines,
 } from './reportLogic';
 import { computeContinuousDriveTimeline } from './regulationTimeline';
@@ -16,6 +17,7 @@ import { getExpresswaySessions } from '../ui/screens/ReportDashboard';
 type EventInput = {
   type: TripEventType;
   time: string;
+  address?: string;
   extras?: Record<string, unknown>;
 };
 
@@ -27,6 +29,7 @@ function makeDay(dateKey: string, inputs: EventInput[]): DayRecord {
   const events: TripEvent[] = inputs.map(input => ({
     type: input.type,
     ts: timestamp(dateKey, input.time),
+    address: input.address,
     extras: input.extras,
   }));
   return {
@@ -158,15 +161,19 @@ function testSimultaneousAutoBreakToRestIsOrderIndependent() {
   const dateKey = '2026-07-13';
   const breakEnd: EventInput = {
     type: 'break_end',
-    time: '11:00',
-    extras: { breakSessionId: 'auto-break' },
+    time: '13:00',
+    extras: {
+      breakSessionId: 'auto-break',
+      autoReason: 'break_3h_threshold',
+      generatedFrom: 'break-start',
+    },
   };
   const restStart: EventInput = {
     type: 'rest_start',
-    time: '11:00',
+    time: '13:00',
     extras: {
       restSessionId: 'auto-rest',
-      autoReason: 'break_threshold_180m',
+      autoReason: 'break_3h_threshold',
       generatedFrom: 'break-start',
     },
   };
@@ -189,13 +196,302 @@ function testSimultaneousAutoBreakToRestIsOrderIndependent() {
       ...transition,
     ]);
     const projection = projectReportTimeline(day);
-    const finalTypes = projection.slice(-2).map(item => item.event.type).join(',');
-    const metrics = computeDayMetrics(day, timestamp(dateKey, '12:00'));
+    const projectedTypes = projection.map(item => item.event.type).join(',');
+    const metrics = computeDayMetrics(day, timestamp(dateKey, '14:00'));
 
-    assertEqual(finalTypes, 'break_end,rest_start', `${order}: projected transition order`);
-    assertEqual(metrics.breakMinutes, 60, `${order}: break ends at the shared timestamp`);
-    assertEqual(metrics.restMinutes, 60, `${order}: final report state remains rest`);
+    assertEqual(projectedTypes, 'trip_start,rest_start', `${order}: converted break evidence is hidden`);
+    assertEqual(
+      projection[1]?.effectiveMinute,
+      10 * 60,
+      `${order}: rest is projected from the original break start`,
+    );
+    assertEqual(metrics.breakMinutes, 0, `${order}: no 15-minute minimum break remains`);
+    assertEqual(metrics.restMinutes, 240, `${order}: the full four-hour interval is rest`);
   }
+}
+
+function testAutomaticBreakToRestMovesAcrossMidnightWithoutMutatingSnapshot() {
+  const generatedFrom = 'break-start-cross-midnight';
+  const firstDay = makeDay('2026-08-16', [
+    { type: 'trip_start', time: '20:00' },
+    {
+      type: 'break_start',
+      time: '22:00',
+      address: '神奈川県横浜市 休憩地点',
+      extras: {
+        breakSessionId: 'break-cross-midnight',
+        reportMinDurationMinutes: 15,
+      },
+    },
+  ]);
+  const secondDay = makeDay('2026-08-17', [
+    {
+      type: 'break_end',
+      time: '01:00',
+      extras: {
+        breakSessionId: 'break-cross-midnight',
+        autoReason: 'break_3h_threshold',
+        generatedFrom,
+      },
+    },
+    {
+      type: 'rest_start',
+      time: '01:00',
+      extras: {
+        restSessionId: 'rest-cross-midnight',
+        autoReason: 'break_3h_threshold',
+        generatedFrom,
+      },
+    },
+    { type: 'trip_end', time: '02:00' },
+  ]);
+  secondDay.dayIndex = 2;
+  secondDay.isFirstDay = false;
+  const trip: Trip = {
+    id: 'trip-auto-rest-cross-midnight',
+    createdAt: firstDay.events[0].ts,
+    label: 'cross-midnight automatic rest',
+    days: [firstDay, secondDay],
+    jobs: [],
+    rawJson: '{}',
+  };
+  const snapshot = JSON.stringify(trip);
+
+  const projectedTrip = projectReportTripForView(trip);
+  assertEqual(
+    projectedTrip.days[0].events.map(event => event.type).join(','),
+    'trip_start,rest_start',
+    'the generated rest is moved to the break-start day',
+  );
+  assertEqual(
+    projectedTrip.days[1].events.map(event => event.type).join(','),
+    'trip_end',
+    'the threshold-day break transition is removed',
+  );
+  assertEqual(
+    projectedTrip.days[0].events[1]?.ts,
+    timestamp('2026-08-16', '22:00'),
+    'cross-midnight rest starts at the original break timestamp',
+  );
+  assertEqual(
+    projectedTrip.days[0].events[1]?.address,
+    '神奈川県横浜市 休憩地点',
+    'projected rest inherits the original break location',
+  );
+  assertEqual(
+    projectedTrip.days[0].restPlace,
+    '神奈川県横浜市 休憩地点',
+    'daily rest place uses the original break location',
+  );
+  assertEqual(JSON.stringify(trip), snapshot, 'saved report snapshot remains unchanged');
+
+  const timeline = computeContinuousDriveTimeline(projectedTrip.days, timestamp('2026-08-17', '02:00'));
+  const restInterval = timeline.intervals.find(interval => interval.category === 'rest');
+  assertEqual(restInterval?.durationMinutes, 240, 'rest spans 22:00 through 02:00 across midnight');
+}
+
+function testAutomaticBreakProjectionRequiresMatchingSessionEvidence() {
+  const dateKey = '2026-08-18';
+  const day = makeDay(dateKey, [
+    { type: 'trip_start', time: '08:00' },
+    {
+      type: 'break_start',
+      time: '10:00',
+      extras: { breakSessionId: 'unrelated-break', reportMinDurationMinutes: 15 },
+    },
+    {
+      type: 'break_end',
+      time: '13:00',
+      extras: {
+        breakSessionId: 'missing-break',
+        autoReason: 'break_3h_threshold',
+        generatedFrom: 'missing-break-start-id',
+      },
+    },
+    {
+      type: 'rest_start',
+      time: '13:00',
+      extras: {
+        restSessionId: 'generated-rest',
+        autoReason: 'break_3h_threshold',
+        generatedFrom: 'missing-break-start-id',
+      },
+    },
+  ]);
+  const trip: Trip = {
+    id: 'trip-mismatched-break-evidence',
+    createdAt: day.events[0].ts,
+    label: 'mismatched break evidence',
+    days: [day],
+    jobs: [],
+    rawJson: '{}',
+  };
+
+  const projected = projectReportTripForView(trip);
+  assertEqual(
+    projected.days[0].events.map(event => event.type).join(','),
+    'trip_start,break_start,break_end,rest_start',
+    'an unrelated ID-less break must not be reclassified',
+  );
+  assertEqual(
+    projected.days[0].events.find(event => event.type === 'rest_start')?.ts,
+    timestamp(dateKey, '13:00'),
+    'unverified generated rest keeps its persisted threshold timestamp',
+  );
+}
+
+function testDerivedDayRunsUseTheProjectedAutomaticRest() {
+  const dateKey = '2026-08-18';
+  const breakStartId = 'break-start-derived-day-run';
+  const breakSessionId = 'break-session-derived-day-run';
+  const breakStart = {
+    ...makeAppEvent(
+      breakStartId,
+      'break_start',
+      timestamp(dateKey, '10:00'),
+      { breakSessionId, reportMinDurationMinutes: 15 },
+    ),
+    address: '東京都港区 休憩地点',
+  };
+  const events: AppEvent[] = [
+    makeAppEvent('trip-start-derived-day-run', 'trip_start', timestamp(dateKey, '08:00')),
+    breakStart,
+    makeAppEvent(
+      'break-end-derived-day-run',
+      'break_end',
+      timestamp(dateKey, '13:00'),
+      {
+        breakSessionId,
+        autoReason: 'break_3h_threshold',
+        generatedFrom: breakStartId,
+      },
+    ),
+    {
+      ...makeAppEvent(
+        'rest-start-derived-day-run',
+        'rest_start',
+        timestamp(dateKey, '13:00'),
+        {
+          restSessionId: 'rest-session-derived-day-run',
+          autoReason: 'break_3h_threshold',
+          generatedFrom: breakStartId,
+        },
+      ),
+      address: '',
+    },
+  ];
+  const snapshot = JSON.stringify(events);
+
+  const dayRuns = buildImportableDayRunsFromAppEvents(events, [{ dateKey, km: 0 }]);
+  assertEqual(
+    dayRuns[0].events.map(event => event.type).join(','),
+    'trip_start,rest_start',
+    'new report and AI snapshots use the corrected product view',
+  );
+  assertEqual(
+    dayRuns[0].events[1]?.ts,
+    timestamp(dateKey, '10:00'),
+    'derived rest begins at the original break start',
+  );
+  assertEqual(
+    dayRuns[0].events[1]?.address,
+    '東京都港区 休憩地点',
+    'derived rest keeps the original break place',
+  );
+  assertEqual(JSON.stringify(events), snapshot, 'derived snapshots do not mutate canonical events');
+}
+
+function testReportProjectionPreservesExactDayMembership() {
+  const sameDateKey = '2026-08-19';
+  const firstRecord = makeDay(sameDateKey, [{ type: 'trip_start', time: '08:00' }]);
+  const secondRecord = makeDay(sameDateKey, [{ type: 'trip_end', time: '09:00' }]);
+  secondRecord.dayIndex = 2;
+  secondRecord.isFirstDay = false;
+  const sameDateTrip: Trip = {
+    id: 'trip-two-records-same-date',
+    createdAt: firstRecord.events[0].ts,
+    label: 'two records on same date',
+    days: [firstRecord, secondRecord],
+    jobs: [],
+    rawJson: '{}',
+  };
+
+  const sameDateProjection = projectReportTripForView(sameDateTrip);
+  assertEqual(
+    sameDateProjection.days[0].events.map(event => event.type).join(','),
+    'trip_start',
+    'first same-date record keeps only its own events',
+  );
+  assertEqual(
+    sameDateProjection.days[1].events.map(event => event.type).join(','),
+    'trip_end',
+    'second same-date record keeps only its own events',
+  );
+
+  const firstComplianceRecord = makeDay(sameDateKey, [
+    { type: 'trip_start', time: '08:00' },
+    {
+      type: 'rest_start',
+      time: '12:00',
+      extras: { restSessionId: 'same-date-rest' },
+    },
+  ]);
+  const secondComplianceRecord = makeDay(sameDateKey, [
+    {
+      type: 'rest_end',
+      time: '13:00',
+      extras: { restSessionId: 'same-date-rest' },
+    },
+    { type: 'trip_end', time: '15:00' },
+  ]);
+  secondComplianceRecord.dayIndex = 2;
+  secondComplianceRecord.isFirstDay = false;
+  const sameDateCompliance = computeContinuousDriveTimeline([
+    firstComplianceRecord,
+    secondComplianceRecord,
+  ]);
+  assertEqual(
+    sameDateCompliance.byDay.get(1)?.longestContinuousDriveMinutes,
+    240,
+    'same-date first record keeps its four-hour continuous-drive value',
+  );
+  assertEqual(
+    sameDateCompliance.byDay.get(2)?.longestContinuousDriveMinutes,
+    120,
+    'same-date second record keeps its own post-rest drive value',
+  );
+
+  const overnightRecord = makeDay('2026-08-20', [
+    { type: 'trip_start', time: '22:00' },
+    { type: 'trip_end', time: '23:00' },
+  ]);
+  overnightRecord.events[1].ts = timestamp('2026-08-21', '02:00');
+  const overnightTrip: Trip = {
+    id: 'trip-single-overnight-record',
+    createdAt: overnightRecord.events[0].ts,
+    label: 'single overnight record',
+    days: [overnightRecord],
+    jobs: [],
+    rawJson: '{}',
+  };
+
+  const overnightProjection = projectReportTripForView(overnightTrip);
+  assertEqual(
+    overnightProjection.days[0].events.map(event => event.type).join(','),
+    'trip_start,trip_end',
+    'an event remains in its source record even when no timestamp-date record exists',
+  );
+  assertEqual(
+    overnightProjection.days[0].events[1]?.ts,
+    timestamp('2026-08-21', '02:00'),
+    'overnight event timestamp is preserved',
+  );
+  assertEqual(
+    computeContinuousDriveTimeline(overnightProjection.days)
+      .byDay.get(overnightRecord.dayIndex)?.longestContinuousDriveMinutes,
+    240,
+    'a single source record keeps its full cross-midnight compliance interval',
+  );
 }
 
 function testShortLoadAcrossMidnightKeepsMinimum() {
@@ -433,6 +729,10 @@ const tests: Array<[string, () => void]> = [
   ['legacy marker-free events', testLegacyEventsKeepQuarterHourProjection],
   ['raw regulation timestamps', testRegulationTimelineKeepsRawTimestamps],
   ['simultaneous automatic break-to-rest ordering', testSimultaneousAutoBreakToRestIsOrderIndependent],
+  ['cross-midnight automatic break-to-rest projection', testAutomaticBreakToRestMovesAcrossMidnightWithoutMutatingSnapshot],
+  ['automatic break-to-rest evidence matching', testAutomaticBreakProjectionRequiresMatchingSessionEvidence],
+  ['derived day-run automatic rest projection', testDerivedDayRunsUseTheProjectedAutomaticRest],
+  ['report source-day membership', testReportProjectionPreservesExactDayMembership],
   ['cross-midnight minimum', testShortLoadAcrossMidnightKeepsMinimum],
   ['accepted unload and ferry pair details', testAcceptedPairsDriveUnloadAndFerryDetails],
   ['quarter-hour ferry totals', testFerryUsesQuarterHourGridInDailyTotals],

@@ -29,8 +29,15 @@ const EDGE_FUNCTION_NAME = 'tracklog-ic-resolver';
 const DEFAULT_RADIUS_M = 8000;
 const MIN_RADIUS_M = 250;
 const MAX_RADIUS_M = 12000;
+export const MAX_PRIMARY_IC_DISTANCE_M = 1200;
+export const MAX_CORROBORATED_IC_DISTANCE_M = 2000;
 const SESSION_REFRESH_MARGIN_MS = 60_000;
 let sessionRefreshInFlight: Promise<Session> | null = null;
+
+export type IcResolverHttpFailureCategory =
+  | 'authorization-recoverable'
+  | 'temporary'
+  | 'permanent';
 
 function isAndroidNative() {
   return Capacitor.isNativePlatform() && Capacitor.getPlatform() === 'android';
@@ -39,17 +46,33 @@ function isAndroidNative() {
 class IcResolverError extends Error {
   readonly retryable: boolean;
   readonly status: number | null;
+  readonly category: IcResolverHttpFailureCategory;
 
-  constructor(message: string, retryable: boolean, status: number | null = null) {
+  constructor(
+    message: string,
+    retryable: boolean,
+    status: number | null = null,
+    category?: IcResolverHttpFailureCategory,
+  ) {
     super(message);
     this.name = 'IcResolverError';
     this.retryable = retryable;
     this.status = status;
+    this.category = category ?? (retryable ? classifyIcResolverHttpStatus(status) : 'permanent');
   }
 }
 
 export function isRetryableIcResolverError(error: unknown): boolean {
   return error instanceof IcResolverError && error.retryable;
+}
+
+export function getRetryableIcResolverErrorCategory(
+  error: unknown,
+): Exclude<IcResolverHttpFailureCategory, 'permanent'> | null {
+  if (!(error instanceof IcResolverError) || !error.retryable || error.category === 'permanent') {
+    return null;
+  }
+  return error.category;
 }
 
 function unresolvedSignal(): ExpresswaySignal {
@@ -92,6 +115,21 @@ function parseIcResult(value: unknown): IcResult | null {
   };
 }
 
+export function acceptIcCandidate(
+  result: IcResult | null,
+  evidence?: Pick<ExpresswaySignal, 'onExpresswayRoad' | 'nearEtcGate'>,
+): IcResult | null {
+  if (!result) return null;
+  if (result.distanceM <= MAX_PRIMARY_IC_DISTANCE_M) return result;
+  if (result.distanceM > MAX_CORROBORATED_IC_DISTANCE_M) return null;
+  // The current Edge response does not expose candidate source or runner-up
+  // separation. In the ambiguous middle band, require two independent road
+  // signals instead of guessing from distance alone.
+  return evidence?.nearEtcGate === true && evidence.onExpresswayRoad === true
+    ? result
+    : null;
+}
+
 function parseSignal(value: unknown): ExpresswaySignal {
   if (!value || typeof value !== 'object') {
     throw new Error('IC解決サーバーの応答が不正です');
@@ -100,13 +138,16 @@ function parseSignal(value: unknown): ExpresswaySignal {
   if (row.resolved !== true || row.provider !== 'overpass') {
     throw new Error('IC解決サーバーの応答が不正です');
   }
+  const nearestIc = parseIcResult(row.nearestIc);
+  const onExpresswayRoad = row.onExpresswayRoad === true;
+  const nearEtcGate = row.nearEtcGate === true;
   return {
     resolved: true,
     provider: 'overpass',
-    onExpresswayRoad: row.onExpresswayRoad === true,
+    onExpresswayRoad,
     nearIc: row.nearIc === true,
-    nearEtcGate: row.nearEtcGate === true,
-    nearestIc: parseIcResult(row.nearestIc),
+    nearEtcGate,
+    nearestIc: acceptIcCandidate(nearestIc, { onExpresswayRoad, nearEtcGate }),
   };
 }
 
@@ -132,17 +173,27 @@ async function getFunctionErrorDetails(error: unknown): Promise<{
   }
 }
 
+export function classifyIcResolverHttpStatus(status: number | null): IcResolverHttpFailureCategory {
+  if (status === 401 || status === 403) return 'authorization-recoverable';
+  if (status == null) return 'temporary';
+  if (status === 408 || status === 425 || status === 429 || status >= 500) return 'temporary';
+  return 'permanent';
+}
+
 function isRetryableHttpStatus(status: number | null) {
-  if (status == null) return true;
-  return status === 401 || status === 408 || status === 425 || status === 429 || status >= 500;
+  return classifyIcResolverHttpStatus(status) !== 'permanent';
 }
 
 function authErrorMessage(error: unknown, fallback: string) {
   return error instanceof Error && error.message.trim() ? error.message.trim() : fallback;
 }
 
+function recoverableAuthorizationError(message: string) {
+  return new IcResolverError(message, true, null, 'authorization-recoverable');
+}
+
 async function refreshResolverSession(current: Session): Promise<Session> {
-  if (!driverAuthSupabase) throw new IcResolverError('Supabase が未設定です', true);
+  if (!driverAuthSupabase) throw recoverableAuthorizationError('Supabase が未設定です');
   if (sessionRefreshInFlight) return sessionRefreshInFlight;
 
   sessionRefreshInFlight = (async () => {
@@ -157,15 +208,15 @@ async function refreshResolverSession(current: Session): Promise<Session> {
           });
       const { data, error } = result;
       if (error) {
-        throw new IcResolverError(authErrorMessage(error, 'ログイン状態を更新できませんでした'), true);
+        throw recoverableAuthorizationError(authErrorMessage(error, 'ログイン状態を更新できませんでした'));
       }
       if (!data.session?.access_token) {
-        throw new IcResolverError('ログイン状態を更新できませんでした', true);
+        throw recoverableAuthorizationError('ログイン状態を更新できませんでした');
       }
       return data.session;
     } catch (error) {
       if (error instanceof IcResolverError) throw error;
-      throw new IcResolverError(authErrorMessage(error, 'ログイン状態を更新できませんでした'), true);
+      throw recoverableAuthorizationError(authErrorMessage(error, 'ログイン状態を更新できませんでした'));
     }
   })();
 
@@ -177,20 +228,20 @@ async function refreshResolverSession(current: Session): Promise<Session> {
 }
 
 async function getResolverSession(): Promise<Session> {
-  if (!driverAuthSupabase) throw new IcResolverError('Supabase が未設定です', true);
+  if (!driverAuthSupabase) throw recoverableAuthorizationError('Supabase が未設定です');
   let result;
   try {
     await restoreNativeResidentLocationSession();
     result = await driverAuthSupabase.auth.getSession();
   } catch (error) {
-    throw new IcResolverError(authErrorMessage(error, 'ログイン状態を確認できませんでした'), true);
+    throw recoverableAuthorizationError(authErrorMessage(error, 'ログイン状態を確認できませんでした'));
   }
   const { data, error } = result;
   if (error) {
-    throw new IcResolverError(authErrorMessage(error, 'ログイン状態を確認できませんでした'), true);
+    throw recoverableAuthorizationError(authErrorMessage(error, 'ログイン状態を確認できませんでした'));
   }
   const session = data.session;
-  if (!session?.access_token) throw new IcResolverError('ログインが必要です', true);
+  if (!session?.access_token) throw recoverableAuthorizationError('ログインが必要です');
   const expiresAtMs = (session.expires_at ?? 0) * 1000;
   if (expiresAtMs <= Date.now() + SESSION_REFRESH_MARGIN_MS) {
     return refreshResolverSession(session);

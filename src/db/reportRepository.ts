@@ -1,6 +1,7 @@
 import { db } from './db';
 import { requestRemoteSync } from '../app/remoteSyncSignal';
 import type { Trip } from '../domain/reportTypes';
+import { projectReportTripForView } from '../domain/reportLogic';
 
 export async function saveReportTrip(trip: Trip): Promise<void> {
   await db.transaction('rw', db.reportTrips, db.deletedReportTombstones, async () => {
@@ -17,11 +18,13 @@ export async function saveReportTrip(trip: Trip): Promise<void> {
 }
 
 export async function getReportTrip(id: string): Promise<Trip | undefined> {
-  return db.reportTrips.get(id);
+  const trip = await db.reportTrips.get(id);
+  return trip ? projectReportTripForView(trip) : undefined;
 }
 
 export async function listReportTrips(): Promise<Trip[]> {
-  return db.reportTrips.orderBy('createdAt').reverse().toArray();
+  const trips = await db.reportTrips.orderBy('createdAt').reverse().toArray();
+  return trips.map(projectReportTripForView);
 }
 
 export async function deleteReportTrip(id: string): Promise<void> {

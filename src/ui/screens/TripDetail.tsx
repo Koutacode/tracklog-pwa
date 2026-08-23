@@ -24,6 +24,7 @@ import {
   resolveTogglePairing,
   type TogglePairingResult,
 } from '../../domain/togglePairing';
+import { projectAutomaticBreakAsRest } from '../../domain/metrics';
 import { buildTripViewModel, TripViewModel } from '../../state/selectors';
 import { DAY_MS, getJstDateInfo } from '../../domain/jst';
 import { buildAiShareText, splitAiShareText, type AiShareChunk } from '../../services/aiShareText';
@@ -608,7 +609,14 @@ export default function TripDetail() {
     () => resolveTogglePairing(events, PERSISTED_TOGGLE_DEFINITIONS),
     [events],
   );
-  const grouped = useMemo(() => buildGrouped(togglePairing), [togglePairing]);
+  const displayPairing = useMemo(
+    () => resolveTogglePairing(
+      projectAutomaticBreakAsRest(events),
+      PERSISTED_TOGGLE_DEFINITIONS,
+    ),
+    [events],
+  );
+  const grouped = useMemo(() => buildGrouped(displayPairing), [displayPairing]);
   const editingEvents = useMemo(() => [...togglePairing.rawEvents].reverse(), [togglePairing]);
   const excludedEndIds = useMemo(
     () => new Set(togglePairing.excludedEnds.map(excluded => excluded.end.id)),

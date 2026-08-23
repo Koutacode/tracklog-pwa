@@ -11,6 +11,7 @@ import android.os.PowerManager;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.util.Locale;
 
 import androidx.core.content.ContextCompat;
 
@@ -30,6 +31,17 @@ final class ResidentLocationState {
     static final String KEY_LAST_UPLOAD_ATTEMPT_AT = "last_upload_attempt_at";
     static final String KEY_LAST_UPLOAD_SUCCESS_AT = "last_upload_success_at";
     static final String KEY_BLOCKED_AUTHORIZATION_FINGERPRINT = "blocked_authorization_fingerprint";
+    static final String KEY_REFRESH_FAILURE_COUNT = "refresh_failure_count";
+    static final String KEY_REFRESH_RETRY_AFTER_AT = "refresh_retry_after_at";
+    static final String KEY_LAST_ACCEPTED_LOCATION_AT = "last_accepted_location_at";
+    private static final String KEY_LOCATION_REJECT_PREFIX = "location_reject_count_";
+    private static final String KEY_LOCATION_QUALITY_METRICS_VERSION = "location_quality_metrics_version";
+    private static final String KEY_LOCATION_QUALITY_SESSION_STARTED_AT = "location_quality_session_started_at";
+    private static final String KEY_LOCATION_QUALITY_UPDATED_AT = "location_quality_updated_at";
+    private static final String KEY_LAST_QUEUE_WRITE_AT = "last_queue_write_at";
+    private static final String KEY_QUEUE_WRITE_FAILURE_COUNT = "queue_write_failure_count";
+    private static final String KEY_LAST_QUEUE_WRITE_FAILURE_AT = "last_queue_write_failure_at";
+    private static final int LOCATION_QUALITY_METRICS_VERSION = 1;
 
     private ResidentLocationState() {}
 
@@ -66,6 +78,24 @@ final class ResidentLocationState {
                 .commit();
     }
 
+    static void applyTrackingIntent(
+            Context context,
+            String activeTripId,
+            long routePauseAtMs
+    ) {
+        String normalizedTripId = normalizeTripId(activeTripId);
+        boolean enabled = isEligibleState(
+                isApproved(context),
+                isSetupComplete(context),
+                getAuthorization(context).isConfigured()
+        );
+        preferences(context).edit()
+                .putBoolean(KEY_ENABLED, enabled)
+                .putString(KEY_ACTIVE_TRIP_ID, normalizedTripId)
+                .putLong(KEY_ROUTE_PAUSE_AT_MS, Math.max(0L, routePauseAtMs))
+                .commit();
+    }
+
     static boolean installAuthorization(Context context, Authorization authorization) {
         if (authorization == null || !authorization.isConfigured()) return false;
         boolean enabled = isEligibleState(
@@ -76,6 +106,7 @@ final class ResidentLocationState {
         SharedPreferences.Editor editor = preferences(context).edit()
                 .putBoolean(KEY_ENABLED, enabled)
                 .remove(KEY_BLOCKED_AUTHORIZATION_FINGERPRINT);
+        clearRefreshBackoff(editor);
         writeAuthorization(editor, authorization);
         return editor.commit();
     }
@@ -128,7 +159,10 @@ final class ResidentLocationState {
     }
 
     static boolean isEligibleState(boolean approved, boolean setupComplete, boolean authorizationConfigured) {
-        return approved && setupComplete && authorizationConfigured;
+        // Enrollment/tracking intent is durable independently from network authorization. This
+        // keeps local route recording and the native motion policy alive while an expired token is
+        // waiting for refresh. Upload and road probes still enforce authorization separately.
+        return approved && setupComplete;
     }
 
     static RoutineReconcilePolicy routineReconcilePolicy(
@@ -189,6 +223,7 @@ final class ResidentLocationState {
         if (!updated.isConfigured()) return false;
         SharedPreferences.Editor editor = preferences(context).edit();
         writeAuthorization(editor, updated);
+        clearRefreshBackoff(editor);
         String blockedFingerprint = preferences(context)
                 .getString(KEY_BLOCKED_AUTHORIZATION_FINGERPRINT, "");
         if (!shouldRemainAuthorizationBlocked(blockedFingerprint, updated.fingerprint())) {
@@ -211,6 +246,141 @@ final class ResidentLocationState {
 
     static void markUploadSuccess(Context context, long timestampMs) {
         preferences(context).edit().putLong(KEY_LAST_UPLOAD_SUCCESS_AT, timestampMs).commit();
+    }
+
+    static void markLocationAccepted(Context context, long timestampMs) {
+        ensureLocationQualityMetrics(context);
+        preferences(context).edit()
+                .putLong(KEY_LAST_ACCEPTED_LOCATION_AT, Math.max(0L, timestampMs))
+                .putLong(KEY_LOCATION_QUALITY_UPDATED_AT, Math.max(0L, timestampMs))
+                .apply();
+    }
+
+    static void markLocationRejected(
+            Context context,
+            ResidentLocationQualityPolicy.Rejection rejection
+    ) {
+        if (rejection == null || rejection == ResidentLocationQualityPolicy.Rejection.NONE) return;
+        ensureLocationQualityMetrics(context);
+        SharedPreferences current = preferences(context);
+        String key = locationRejectPreferenceKey(rejection);
+        int count = Math.max(0, current.getInt(key, 0));
+        current.edit()
+                .putInt(key, count == Integer.MAX_VALUE ? count : count + 1)
+                .putLong(KEY_LOCATION_QUALITY_UPDATED_AT, System.currentTimeMillis())
+                .apply();
+    }
+
+    static void resetLocationQualitySession(Context context, long timestampMs) {
+        SharedPreferences.Editor editor = preferences(context).edit()
+                .putInt(KEY_LOCATION_QUALITY_METRICS_VERSION, LOCATION_QUALITY_METRICS_VERSION)
+                .putLong(KEY_LOCATION_QUALITY_SESSION_STARTED_AT, Math.max(0L, timestampMs))
+                .putLong(KEY_LOCATION_QUALITY_UPDATED_AT, Math.max(0L, timestampMs))
+                .putInt(KEY_QUEUE_WRITE_FAILURE_COUNT, 0)
+                .remove(KEY_LAST_QUEUE_WRITE_FAILURE_AT);
+        for (ResidentLocationQualityPolicy.Rejection rejection
+                : ResidentLocationQualityPolicy.Rejection.values()) {
+            if (rejection != ResidentLocationQualityPolicy.Rejection.NONE) {
+                editor.remove(locationRejectPreferenceKey(rejection));
+            }
+        }
+        editor.commit();
+    }
+
+    static long getLastAcceptedLocationAt(Context context) {
+        return Math.max(0L, preferences(context).getLong(KEY_LAST_ACCEPTED_LOCATION_AT, 0L));
+    }
+
+    static int getLocationRejectCount(
+            Context context,
+            ResidentLocationQualityPolicy.Rejection rejection
+    ) {
+        if (rejection == null || rejection == ResidentLocationQualityPolicy.Rejection.NONE) return 0;
+        if (!hasCurrentLocationQualityMetrics(context)) return 0;
+        return Math.max(0, preferences(context).getInt(locationRejectPreferenceKey(rejection), 0));
+    }
+
+    static long getLocationQualitySessionStartedAt(Context context) {
+        if (!hasCurrentLocationQualityMetrics(context)) return 0L;
+        return Math.max(0L, preferences(context).getLong(KEY_LOCATION_QUALITY_SESSION_STARTED_AT, 0L));
+    }
+
+    static long getLocationQualityUpdatedAt(Context context) {
+        if (!hasCurrentLocationQualityMetrics(context)) return 0L;
+        return Math.max(0L, preferences(context).getLong(KEY_LOCATION_QUALITY_UPDATED_AT, 0L));
+    }
+
+    static void markQueueWriteSuccess(Context context, long timestampMs) {
+        preferences(context).edit()
+                .putLong(KEY_LAST_QUEUE_WRITE_AT, Math.max(0L, timestampMs))
+                .apply();
+    }
+
+    static void markQueueWriteFailure(Context context, long timestampMs) {
+        SharedPreferences current = preferences(context);
+        int count = Math.max(0, current.getInt(KEY_QUEUE_WRITE_FAILURE_COUNT, 0));
+        current.edit()
+                .putInt(KEY_QUEUE_WRITE_FAILURE_COUNT, count == Integer.MAX_VALUE ? count : count + 1)
+                .putLong(KEY_LAST_QUEUE_WRITE_FAILURE_AT, Math.max(0L, timestampMs))
+                .apply();
+    }
+
+    static long getLastQueueWriteAt(Context context) {
+        return Math.max(0L, preferences(context).getLong(KEY_LAST_QUEUE_WRITE_AT, 0L));
+    }
+
+    static int getQueueWriteFailureCount(Context context) {
+        if (!hasCurrentLocationQualityMetrics(context)) return 0;
+        return Math.max(0, preferences(context).getInt(KEY_QUEUE_WRITE_FAILURE_COUNT, 0));
+    }
+
+    static long getLastQueueWriteFailureAt(Context context) {
+        if (!hasCurrentLocationQualityMetrics(context)) return 0L;
+        return Math.max(0L, preferences(context).getLong(KEY_LAST_QUEUE_WRITE_FAILURE_AT, 0L));
+    }
+
+    static String locationRejectPreferenceKey(ResidentLocationQualityPolicy.Rejection rejection) {
+        return KEY_LOCATION_REJECT_PREFIX + locationRejectMetricName(rejection);
+    }
+
+    static String locationRejectMetricName(ResidentLocationQualityPolicy.Rejection rejection) {
+        return rejection.name().toLowerCase(Locale.US);
+    }
+
+    private static void ensureLocationQualityMetrics(Context context) {
+        if (!hasCurrentLocationQualityMetrics(context)) {
+            resetLocationQualitySession(context, System.currentTimeMillis());
+        }
+    }
+
+    private static boolean hasCurrentLocationQualityMetrics(Context context) {
+        return preferences(context).getInt(KEY_LOCATION_QUALITY_METRICS_VERSION, 0)
+                == LOCATION_QUALITY_METRICS_VERSION;
+    }
+
+    static long getRefreshRetryAfterAt(Context context) {
+        return Math.max(0L, preferences(context).getLong(KEY_REFRESH_RETRY_AFTER_AT, 0L));
+    }
+
+    static long markRefreshFailure(Context context, long timestampMs) {
+        SharedPreferences current = preferences(context);
+        int failureCount = Math.max(0, current.getInt(KEY_REFRESH_FAILURE_COUNT, 0));
+        int nextFailureCount = Math.min(failureCount + 1, 5);
+        long retryAfterMs = ResidentLocationUploadPolicy.refreshRetryAfterMs(
+                timestampMs,
+                nextFailureCount
+        );
+        current.edit()
+                .putInt(KEY_REFRESH_FAILURE_COUNT, nextFailureCount)
+                .putLong(KEY_REFRESH_RETRY_AFTER_AT, retryAfterMs)
+                .commit();
+        return retryAfterMs;
+    }
+
+    static void resetRefreshBackoff(Context context) {
+        SharedPreferences.Editor editor = preferences(context).edit();
+        clearRefreshBackoff(editor);
+        editor.commit();
     }
 
     static boolean clearAuthorizationAndDisableIfCurrent(
@@ -286,6 +456,12 @@ final class ResidentLocationState {
                 .remove(KEY_AUTHORIZATION_UPDATED_AT)
                 .remove(KEY_LAST_UPLOAD_ATTEMPT_AT)
                 .remove(KEY_LAST_UPLOAD_SUCCESS_AT);
+        clearRefreshBackoff(editor);
+    }
+
+    private static void clearRefreshBackoff(SharedPreferences.Editor editor) {
+        editor.remove(KEY_REFRESH_FAILURE_COUNT)
+                .remove(KEY_REFRESH_RETRY_AFTER_AT);
     }
 
     static Readiness getReadiness(Context context) {
@@ -361,8 +537,6 @@ final class ResidentLocationState {
             return foregroundLocation
                     && backgroundLocation
                     && notifications
-                    && batteryOptimization
-                    && exactAlarm
                     && locationEnabled;
         }
     }

@@ -3,10 +3,16 @@ import { Link } from 'react-router-dom';
 import type { RemoteDeviceProfile } from '../../domain/remoteTypes';
 import { deleteAdminDevice, listAdminDevices, sendAdminMessage, setAdminDeviceApproval } from '../../services/remoteAdmin';
 import { getAdminSession, signOutAdmin } from '../../services/remoteAuth';
-import { shareText } from '../../services/nativeShare';
-import { DEFAULT_APK_DOWNLOAD_URL, PWA_URL } from '../../app/releaseInfo';
+import { shareLatestAndroidApk } from '../../services/appDistribution';
 import AdminMap from '../components/AdminMap';
 import AdminAccessDenied from '../components/AdminAccessDenied';
+import {
+  filterAdminDevices,
+  getAdminDeviceApprovalStatus as getApprovalStatus,
+  getAdminDeviceSeenStatus as getSeenStatus,
+  type AdminDeviceSeenStatus,
+  type AdminDeviceStatusFilter,
+} from './adminDeviceFilter';
 
 function fmtDateTime(ts?: string | null) {
   if (!ts) return '-';
@@ -21,21 +27,6 @@ function getLocationTimestamp(profile: RemoteDeviceProfile) {
 function formatAccuracy(value?: number | null) {
   if (typeof value !== 'number' || !Number.isFinite(value)) return null;
   return `精度 約${Math.round(value)}m`;
-}
-
-type DeviceSeenStatus = {
-  kind: 'active' | 'recent' | 'stale';
-  label: string;
-};
-
-function getSeenStatus(lastSeenAt?: string | null): DeviceSeenStatus {
-  if (!lastSeenAt) return { kind: 'stale', label: '未確認' };
-  const seenAt = new Date(lastSeenAt).getTime();
-  if (!Number.isFinite(seenAt)) return { kind: 'stale', label: '未確認' };
-  const elapsedMinutes = (Date.now() - seenAt) / 60000;
-  if (elapsedMinutes <= 15) return { kind: 'active', label: '稼働中' };
-  if (elapsedMinutes <= 120) return { kind: 'recent', label: '最近同期' };
-  return { kind: 'stale', label: '要確認' };
 }
 
 function getDisplayName(profile: RemoteDeviceProfile) {
@@ -66,18 +57,140 @@ function formatProfileValue(value: string | null | undefined) {
   return value && value.trim() ? value.trim() : '-';
 }
 
-function getApprovalStatus(profile: RemoteDeviceProfile) {
-  if (profile.approval_status === 'approved' || profile.approval_status === 'rejected') {
-    return profile.approval_status;
-  }
-  return 'pending';
-}
-
 function getApprovalLabel(profile: RemoteDeviceProfile) {
   const status = getApprovalStatus(profile);
   if (status === 'approved') return '承認済み';
   if (status === 'rejected') return '拒否済み';
   return '承認待ち';
+}
+
+type AdminDeviceCardProps = {
+  device: RemoteDeviceProfile;
+  seenStatus: AdminDeviceSeenStatus;
+  approving: boolean;
+  deleting: boolean;
+  onSetApproval: (device: RemoteDeviceProfile, decision: 'approved' | 'rejected') => void;
+  onDelete: (device: RemoteDeviceProfile) => void;
+};
+
+function AdminDeviceCard({
+  device,
+  seenStatus,
+  approving,
+  deleting,
+  onSetApproval,
+  onDelete,
+}: AdminDeviceCardProps) {
+  const approvalStatus = getApprovalStatus(device);
+  const displayName = getDisplayName(device);
+  const hasLocation = device.latest_lat != null && device.latest_lng != null;
+  const locationAt = getLocationTimestamp(device);
+  const titleId = `admin-device-card-${device.device_id}`;
+
+  return (
+    <article className="admin-device-card" aria-labelledby={titleId}>
+      <div className="admin-device-card__header">
+        <div>
+          <Link id={titleId} to={`/admin/devices/${encodeURIComponent(device.device_id)}`}>
+            {displayName}
+          </Link>
+          <span className="admin-device-card__vehicle">車番: {formatProfileValue(device.vehicle_label)}</span>
+        </div>
+        <span className={`admin-status-badge admin-status-badge--${seenStatus.kind}`}>
+          {seenStatus.label}
+        </span>
+      </div>
+
+      <div className="admin-device-card__priority">
+        <div>
+          <span>承認</span>
+          <strong>
+            <span className={`approval-badge approval-badge--${approvalStatus}`}>
+              {getApprovalLabel(device)}
+            </span>
+          </strong>
+        </div>
+        <div>
+          <span>最終同期</span>
+          <strong>{fmtDateTime(device.last_seen_at)}</strong>
+        </div>
+        <div>
+          <span>位置情報</span>
+          <strong>{hasLocation ? '位置あり' : '位置なし'}</strong>
+          <small>{hasLocation ? `更新 ${fmtDateTime(locationAt)}` : '未取得'}</small>
+        </div>
+        <div>
+          <span>現在状態</span>
+          <strong>{device.latest_status ?? '-'}</strong>
+        </div>
+      </div>
+
+      <details className="admin-device-card__details">
+        <summary>連絡先・ID・位置の詳細</summary>
+        <dl>
+          <div>
+            <dt>端末ID</dt>
+            <dd>{device.device_id}</dd>
+          </div>
+          <div>
+            <dt>メール</dt>
+            <dd>{formatProfileValue(device.driver_email)}</dd>
+          </div>
+          <div>
+            <dt>電話</dt>
+            <dd>{formatProfileValue(device.driver_phone)}</dd>
+          </div>
+          <div>
+            <dt>運行ID</dt>
+            <dd>{device.latest_trip_id ?? '-'}</dd>
+          </div>
+          <div>
+            <dt>最新位置</dt>
+            <dd>
+              {hasLocation
+                ? `${device.latest_lat?.toFixed(4)}, ${device.latest_lng?.toFixed(4)}`
+                : '-'}
+              {formatAccuracy(device.latest_accuracy) ? ` / ${formatAccuracy(device.latest_accuracy)}` : ''}
+            </dd>
+          </div>
+        </dl>
+      </details>
+
+      <div className="admin-device-card__actions" aria-label={`${displayName} の操作`}>
+        <Link className="pill-link" to={`/admin/devices/${encodeURIComponent(device.device_id)}`}>
+          詳細
+        </Link>
+        {approvalStatus !== 'approved' && (
+          <button
+            type="button"
+            className="pill-link pill-link--approve"
+            disabled={approving}
+            onClick={() => onSetApproval(device, 'approved')}
+          >
+            許可
+          </button>
+        )}
+        {approvalStatus !== 'rejected' && (
+          <button
+            type="button"
+            className="pill-link pill-link--danger"
+            disabled={approving}
+            onClick={() => onSetApproval(device, 'rejected')}
+          >
+            拒否
+          </button>
+        )}
+        <button
+          type="button"
+          className="pill-link pill-link--danger"
+          disabled={deleting}
+          onClick={() => onDelete(device)}
+        >
+          {deleting ? '消去中' : '消去'}
+        </button>
+      </div>
+    </article>
+  );
 }
 
 export default function AdminDashboard() {
@@ -95,6 +208,9 @@ export default function AdminDashboard() {
   const [adminMessageTargetDeviceId, setAdminMessageTargetDeviceId] = useState('');
   const [adminMessageRequestLocation, setAdminMessageRequestLocation] = useState(true);
   const [sendingAdminMessage, setSendingAdminMessage] = useState(false);
+  const [deviceSearchQuery, setDeviceSearchQuery] = useState('');
+  const [deviceStatusFilter, setDeviceStatusFilter] = useState<AdminDeviceStatusFilter>('all');
+  const [apkSharing, setApkSharing] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -153,10 +269,26 @@ export default function AdminDashboard() {
     };
   }, [authenticated, isAdmin]);
 
+  const statusSnapshotAt = useMemo(() => Date.now(), [devices]);
+
   const deviceStatus = useMemo(
-    () => new Map(devices.map(device => [device.device_id, getSeenStatus(device.last_seen_at)])),
-    [devices],
+    () => new Map(devices.map(device => [
+      device.device_id,
+      getSeenStatus(device.last_seen_at, statusSnapshotAt),
+    ])),
+    [devices, statusSnapshotAt],
   );
+
+  const filteredDevices = useMemo(
+    () => filterAdminDevices(devices, {
+      query: deviceSearchQuery,
+      status: deviceStatusFilter,
+      nowMs: statusSnapshotAt,
+    }),
+    [deviceSearchQuery, deviceStatusFilter, devices, statusSnapshotAt],
+  );
+
+  const hasActiveDeviceFilter = deviceSearchQuery.trim().length > 0 || deviceStatusFilter !== 'all';
 
   const statusCounts = useMemo(
     () =>
@@ -317,6 +449,27 @@ export default function AdminDashboard() {
     }
   }
 
+  async function handleShareLatestApk() {
+    setApkSharing(true);
+    setError(null);
+    setNotice('最新APKの公開状況を確認しています…');
+    try {
+      const result = await shareLatestAndroidApk();
+      if (result.delivery === 'clipboard') {
+        setNotice(`公開版 v${result.release.latestVersion} のダウンロードURLをコピーしました`);
+      } else if (result.delivery === 'cancelled') {
+        setNotice('共有をキャンセルしました');
+      } else {
+        setNotice(`公開版 v${result.release.latestVersion} の共有画面を開きました`);
+      }
+    } catch (err: any) {
+      setNotice(null);
+      setError(err?.message ?? '最新版APKを確認できないため共有を停止しました。通信状態を確認してください。');
+    } finally {
+      setApkSharing(false);
+    }
+  }
+
   if (!ready) {
     return <div className="screen-shell"><div className="screen-card">読み込み中…</div></div>;
   }
@@ -343,30 +496,18 @@ export default function AdminDashboard() {
             </button>
             <button
               className="pill-link"
-              onClick={async () => {
-                const text = `【TrackLog 配布用アプリ】\nAndroidはこちらのAPKをインストールしてください。\n${DEFAULT_APK_DOWNLOAD_URL}\n\niPhoneはSafariでこちらを開いてホーム画面に追加してください。\n${PWA_URL}`;
-                try {
-                  const shared = await shareText({ title: 'TrackLog アプリを共有', text });
-                  if (!shared && navigator.share) {
-                    await navigator.share({ title: 'TrackLog アプリ', text });
-                  } else if (!shared) {
-                    await navigator.clipboard.writeText(text);
-                    setNotice('クリップボードにURLをコピーしました');
-                  }
-                } catch (e) {
-                  console.error(e);
-                  await navigator.clipboard.writeText(text);
-                  setNotice('クリップボードにURLをコピーしました');
-                }
-              }}
+              disabled={apkSharing}
+              type="button"
+              onClick={() => void handleShareLatestApk()}
             >
-              アプリURLを共有
+              {apkSharing ? '最新版を確認中…' : 'Android APKを共有'}
             </button>
             <Link to="/" className="pill-link">
               ホーム
             </Link>
             <button
               className="pill-link"
+              type="button"
               onClick={async () => {
                 await signOutAdmin();
                 window.location.href = '/login';
@@ -377,8 +518,8 @@ export default function AdminDashboard() {
           </div>
         </div>
         <div className="settings-note">端末一覧は15秒ごとに自動更新します。最終再取得: {fmtDateTime(lastLoadedAt)}</div>
-        {error && <div className="settings-toast">{error}</div>}
-        {notice && <div className="settings-toast settings-toast--success">{notice}</div>}
+        {error && <div className="settings-toast" role="alert">{error}</div>}
+        {notice && <div className="settings-toast settings-toast--success" role="status">{notice}</div>}
         <section className="approval-admin-panel">
           <div className="approval-admin-panel__header">
             <div>
@@ -502,95 +643,172 @@ export default function AdminDashboard() {
           </div>
           <AdminMap markers={mapMarkers} height={420} />
         </section>
-        <div className="admin-table-wrap">
-          <table className="admin-table">
-            <thead>
-              <tr>
-                <th>端末名</th>
-                <th>端末ID</th>
-                <th>メール</th>
-                <th>電話</th>
-                <th>承認</th>
-                <th>現在状態</th>
-                <th>最新位置</th>
-                <th>最終同期</th>
-                <th>運行ID</th>
-                <th>操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              {devices.map(device => (
-                <tr key={device.device_id}>
-                  <td>
-                    <Link to={`/admin/devices/${encodeURIComponent(device.device_id)}`}>{getDisplayName(device)}</Link>
-                  </td>
-                  <td>{device.device_id.slice(0, 8)}</td>
-                  <td>{formatProfileValue(device.driver_email)}</td>
-                  <td>{formatProfileValue(device.driver_phone)}</td>
-                  <td>
-                    <span className={`approval-badge approval-badge--${getApprovalStatus(device)}`}>
-                      {getApprovalLabel(device)}
-                    </span>
-                    {device.approval_decided_at && (
-                      <div className="admin-table__subtext">{fmtDateTime(device.approval_decided_at)}</div>
-                    )}
-                  </td>
-                  <td>
-                    <span className={`admin-status-badge admin-status-badge--${deviceStatus.get(device.device_id)?.kind ?? 'stale'}`}>
-                      {deviceStatus.get(device.device_id)?.label ?? '要確認'}
-                    </span>
-                    <div className="admin-table__subtext">{device.latest_status ?? '-'}</div>
-                  </td>
-                  <td>
-                    {device.latest_lat != null && device.latest_lng != null
-                      ? (
-                        <>
-                          <span>{device.latest_lat.toFixed(4)}, {device.latest_lng.toFixed(4)}</span>
-                          <div className="admin-table__subtext">
-                            {fmtDateTime(getLocationTimestamp(device))}
-                            {formatAccuracy(device.latest_accuracy) ? ` / ${formatAccuracy(device.latest_accuracy)}` : ''}
-                          </div>
-                        </>
-                      )
-                      : '-'}
-                  </td>
-                  <td>{fmtDateTime(device.last_seen_at)}</td>
-                  <td>{device.latest_trip_id ? device.latest_trip_id.slice(0, 8) : '-'}</td>
-                  <td className="admin-action-cell">
-                    {getApprovalStatus(device) !== 'approved' && (
-                      <button
-                        type="button"
-                        className="pill-link pill-link--approve admin-delete-button"
-                        disabled={approvingDeviceId === device.device_id}
-                        onClick={() => void handleSetApproval(device, 'approved')}
-                      >
-                        許可
-                      </button>
-                    )}
-                    {getApprovalStatus(device) !== 'rejected' && (
-                      <button
-                        type="button"
-                        className="pill-link pill-link--danger admin-delete-button"
-                        disabled={approvingDeviceId === device.device_id}
-                        onClick={() => void handleSetApproval(device, 'rejected')}
-                      >
-                        拒否
-                      </button>
-                    )}
-                    <button
-                      type="button"
-                      className="pill-link pill-link--danger admin-delete-button"
-                      disabled={deletingDeviceId === device.device_id}
-                      onClick={() => void handleDeleteDevice(device)}
-                    >
-                      {deletingDeviceId === device.device_id ? '消去中' : '消去'}
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <section className="admin-device-browser" aria-labelledby="admin-device-browser-title">
+          <div className="admin-device-browser__heading">
+            <div>
+              <h2 className="settings-panel__title" id="admin-device-browser-title">端末を探す</h2>
+              <p>検索内容はこの画面内でのみ処理されます。</p>
+            </div>
+            <output className="admin-device-browser__count" aria-live="polite">
+              {filteredDevices.length} / {devices.length}台
+            </output>
+          </div>
+          <div className="admin-device-filters">
+            <label className="settings-field" htmlFor="admin-device-search">
+              <span>検索</span>
+              <input
+                id="admin-device-search"
+                type="search"
+                value={deviceSearchQuery}
+                onChange={event => setDeviceSearchQuery(event.target.value)}
+                placeholder="端末名・車番・メール・電話・端末ID"
+                autoComplete="off"
+                spellCheck={false}
+              />
+            </label>
+            <label className="settings-field" htmlFor="admin-device-status-filter">
+              <span>状態</span>
+              <select
+                id="admin-device-status-filter"
+                value={deviceStatusFilter}
+                onChange={event => setDeviceStatusFilter(event.target.value as AdminDeviceStatusFilter)}
+              >
+                <option value="all">すべて</option>
+                <option value="active">稼働中</option>
+                <option value="recent">最近同期</option>
+                <option value="stale">要確認</option>
+                <option value="pending">承認待ち</option>
+              </select>
+            </label>
+          </div>
+
+          {filteredDevices.length === 0 ? (
+            <div className="admin-device-empty" role="status">
+              <strong>
+                {devices.length === 0
+                  ? '登録済みの端末はありません。'
+                  : '条件に一致する端末はありません。'}
+              </strong>
+              {hasActiveDeviceFilter && (
+                <button
+                  type="button"
+                  className="pill-link"
+                  onClick={() => {
+                    setDeviceSearchQuery('');
+                    setDeviceStatusFilter('all');
+                  }}
+                >
+                  絞り込みを解除
+                </button>
+              )}
+            </div>
+          ) : (
+            <>
+              <div className="admin-table-wrap admin-device-list--desktop">
+                <table className="admin-table" aria-label="端末一覧">
+                  <thead>
+                    <tr>
+                      <th>端末名</th>
+                      <th>端末ID</th>
+                      <th>メール</th>
+                      <th>電話</th>
+                      <th>承認</th>
+                      <th>現在状態</th>
+                      <th>最新位置</th>
+                      <th>最終同期</th>
+                      <th>運行ID</th>
+                      <th>操作</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {filteredDevices.map(device => (
+                      <tr key={device.device_id}>
+                        <td>
+                          <Link to={`/admin/devices/${encodeURIComponent(device.device_id)}`}>{getDisplayName(device)}</Link>
+                        </td>
+                        <td>{device.device_id.slice(0, 8)}</td>
+                        <td>{formatProfileValue(device.driver_email)}</td>
+                        <td>{formatProfileValue(device.driver_phone)}</td>
+                        <td>
+                          <span className={`approval-badge approval-badge--${getApprovalStatus(device)}`}>
+                            {getApprovalLabel(device)}
+                          </span>
+                          {device.approval_decided_at && (
+                            <div className="admin-table__subtext">{fmtDateTime(device.approval_decided_at)}</div>
+                          )}
+                        </td>
+                        <td>
+                          <span className={`admin-status-badge admin-status-badge--${deviceStatus.get(device.device_id)?.kind ?? 'stale'}`}>
+                            {deviceStatus.get(device.device_id)?.label ?? '要確認'}
+                          </span>
+                          <div className="admin-table__subtext">{device.latest_status ?? '-'}</div>
+                        </td>
+                        <td>
+                          {device.latest_lat != null && device.latest_lng != null
+                            ? (
+                              <>
+                                <span>{device.latest_lat.toFixed(4)}, {device.latest_lng.toFixed(4)}</span>
+                                <div className="admin-table__subtext">
+                                  {fmtDateTime(getLocationTimestamp(device))}
+                                  {formatAccuracy(device.latest_accuracy) ? ` / ${formatAccuracy(device.latest_accuracy)}` : ''}
+                                </div>
+                              </>
+                            )
+                            : '-'}
+                        </td>
+                        <td>{fmtDateTime(device.last_seen_at)}</td>
+                        <td>{device.latest_trip_id ? device.latest_trip_id.slice(0, 8) : '-'}</td>
+                        <td className="admin-action-cell">
+                          {getApprovalStatus(device) !== 'approved' && (
+                            <button
+                              type="button"
+                              className="pill-link pill-link--approve admin-delete-button"
+                              disabled={approvingDeviceId === device.device_id}
+                              onClick={() => void handleSetApproval(device, 'approved')}
+                            >
+                              許可
+                            </button>
+                          )}
+                          {getApprovalStatus(device) !== 'rejected' && (
+                            <button
+                              type="button"
+                              className="pill-link pill-link--danger admin-delete-button"
+                              disabled={approvingDeviceId === device.device_id}
+                              onClick={() => void handleSetApproval(device, 'rejected')}
+                            >
+                              拒否
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            className="pill-link pill-link--danger admin-delete-button"
+                            disabled={deletingDeviceId === device.device_id}
+                            onClick={() => void handleDeleteDevice(device)}
+                          >
+                            {deletingDeviceId === device.device_id ? '消去中' : '消去'}
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <div className="admin-device-cards" aria-label="端末一覧">
+                {filteredDevices.map(device => (
+                  <AdminDeviceCard
+                    key={device.device_id}
+                    device={device}
+                    seenStatus={deviceStatus.get(device.device_id) ?? getSeenStatus(device.last_seen_at, statusSnapshotAt)}
+                    approving={approvingDeviceId === device.device_id}
+                    deleting={deletingDeviceId === device.device_id}
+                    onSetApproval={handleSetApproval}
+                    onDelete={handleDeleteDevice}
+                  />
+                ))}
+              </div>
+            </>
+          )}
+        </section>
       </div>
     </div>
   );

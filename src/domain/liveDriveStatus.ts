@@ -1,4 +1,5 @@
 import type { AppEvent, EventType } from './types';
+import { projectAutomaticBreakAsRest } from './metrics';
 import {
   PERSISTED_TOGGLE_DEFINITIONS,
   resolveTogglePairing,
@@ -102,7 +103,8 @@ function categoryAfterEvent(
 }
 
 export function computeLiveDriveStatus(events: AppEvent[], nowIso = new Date().toISOString()): LiveDriveStatus {
-  const sorted = resolveTogglePairing(events, PERSISTED_TOGGLE_DEFINITIONS).normalEvents;
+  const projectedEvents = projectAutomaticBreakAsRest(events);
+  const sorted = resolveTogglePairing(projectedEvents, PERSISTED_TOGGLE_DEFINITIONS).normalEvents;
   const tripStartIndex = sorted.findIndex(event => event.type === 'trip_start');
   if (tripStartIndex < 0) {
     return {

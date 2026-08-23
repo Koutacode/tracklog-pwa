@@ -11,18 +11,93 @@ import {
   type WebAuthCallbackRole,
 } from './authCallbackRouting';
 
-type CallbackOutcome = {
+export type CallbackOutcome = {
   nextPath: string;
 };
 
-const callbackTasks = new Map<string, Promise<CallbackOutcome>>();
+type WebAuthCallbackTaskRegistry = {
+  get(
+    role: WebAuthCallbackRole,
+    callbackUrl: string,
+    taskFactory: () => Promise<CallbackOutcome>,
+  ): Promise<CallbackOutcome>;
+};
+
+function callbackFingerprint(role: WebAuthCallbackRole, callbackUrl: string) {
+  let hash = 2166136261;
+  const value = `${role}:${callbackUrl}`;
+  for (let index = 0; index < value.length; index++) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+export function createWebAuthCallbackTaskRegistry(maxCompleted = 32): WebAuthCallbackTaskRegistry {
+  const tasks = new Map<string, Promise<CallbackOutcome>>();
+  const completed = new Map<string, CallbackOutcome>();
+  const completedLimit = Math.max(1, Math.floor(maxCompleted));
+
+  return {
+    get(role, callbackUrl, taskFactory) {
+      const key = callbackFingerprint(role, callbackUrl);
+      const completedResult = completed.get(key);
+      if (completedResult) return Promise.resolve(completedResult);
+      const existing = tasks.get(key);
+      if (existing) return existing;
+
+      const task = Promise.resolve().then(taskFactory);
+      tasks.set(key, task);
+      void task.then(
+        result => {
+          if (tasks.get(key) === task) tasks.delete(key);
+          if (completed.size >= completedLimit) {
+            const oldestKey = completed.keys().next().value;
+            if (typeof oldestKey === 'string') completed.delete(oldestKey);
+          }
+          completed.set(key, result);
+        },
+        () => {
+          if (tasks.get(key) === task) tasks.delete(key);
+        },
+      );
+      return task;
+    },
+  };
+}
+
+const callbackTasks = createWebAuthCallbackTaskRegistry();
+
+export function isRetryableWebAuthCallbackFailure(callbackUrl: string, error: unknown) {
+  if (
+    typeof error !== 'object' ||
+    error == null ||
+    (error as { webAuthCodeRetryable?: unknown }).webAuthCodeRetryable !== true
+  ) {
+    return false;
+  }
+  try {
+    const parsed = new URL(callbackUrl);
+    const query = parsed.searchParams;
+    const hash = new URLSearchParams(parsed.hash.startsWith('#') ? parsed.hash.slice(1) : parsed.hash);
+    const hasCode = !!(query.get('code') ?? hash.get('code'));
+    const hasProviderError = !!(
+      query.get('error') || query.get('error_code') || hash.get('error') || hash.get('error_code')
+    );
+    const hasBearerTokens = !!(
+      query.get('access_token') ||
+      query.get('refresh_token') ||
+      hash.get('access_token') ||
+      hash.get('refresh_token')
+    );
+    return hasCode && !hasProviderError && !hasBearerTokens;
+  } catch {
+    return false;
+  }
+}
 
 function getCallbackTask(role: WebAuthCallbackRole, callbackUrl: string) {
-  const key = `${role}:${callbackUrl}`;
-  const existing = callbackTasks.get(key);
-  if (existing) return existing;
-
-  const task = (async (): Promise<CallbackOutcome> => {
+  return callbackTasks.get(role, callbackUrl, async (): Promise<CallbackOutcome> => {
     const parsed = new URL(callbackUrl);
     if (getWebAuthCallbackRole(parsed.pathname) !== role) {
       throw new Error('認証URLの種類が一致しません。');
@@ -45,22 +120,18 @@ function getCallbackTask(role: WebAuthCallbackRole, callbackUrl: string) {
       console.error('Driver auth sync failed', error);
     });
     return { nextPath: getDriverPostAuthPath(result.identity) };
-  })();
-
-  callbackTasks.set(key, task);
-  void task.catch(() => {
-    callbackTasks.delete(key);
   });
-  return task;
 }
 
 export default function AuthCallbackScreen({ role }: { role: WebAuthCallbackRole }) {
   const navigate = useNavigate();
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [errorState, setErrorState] = useState<{ message: string; retryable: boolean } | null>(null);
+  const [retryGeneration, setRetryGeneration] = useState(0);
 
   useEffect(() => {
     let active = true;
     const callbackUrl = window.location.href;
+    setErrorState(null);
 
     void getCallbackTask(role, callbackUrl)
       .then(({ nextPath }) => {
@@ -69,16 +140,33 @@ export default function AuthCallbackScreen({ role }: { role: WebAuthCallbackRole
       })
       .catch(error => {
         if (!active) return;
-        window.history.replaceState(window.history.state, '', window.location.pathname);
-        setErrorMessage(error instanceof Error ? error.message : '認証処理に失敗しました。');
+        const retryable = isRetryableWebAuthCallbackFailure(callbackUrl, error);
+        if (!retryable) {
+          window.history.replaceState(window.history.state, '', window.location.pathname);
+        }
+        setErrorState({
+          retryable,
+          message: retryable
+            ? '通信の問題でログインを完了できませんでした。接続を確認して、もう一度お試しください。'
+            : error instanceof Error ? error.message : '認証処理に失敗しました。',
+        });
       });
 
     return () => {
       active = false;
     };
-  }, [navigate, role]);
+  }, [navigate, retryGeneration, role]);
 
-  if (errorMessage) {
+  useEffect(() => {
+    if (!errorState?.retryable) return;
+    const retryWhenOnline = () => {
+      setRetryGeneration(value => value + 1);
+    };
+    window.addEventListener('online', retryWhenOnline, { once: true });
+    return () => window.removeEventListener('online', retryWhenOnline);
+  }, [errorState?.retryable]);
+
+  if (errorState) {
     const retryPath = role === 'admin' ? '/login' : '/driver-login';
     return (
       <div className="screen-shell">
@@ -89,7 +177,18 @@ export default function AuthCallbackScreen({ role }: { role: WebAuthCallbackRole
               <h1 className="screen-card__title">ログインを完了できませんでした</h1>
             </div>
           </div>
-          <div className="settings-toast" role="alert">{errorMessage}</div>
+          <div className="settings-toast" role="alert" aria-live="assertive">
+            {errorState.message}
+          </div>
+          {errorState.retryable && (
+            <button
+              type="button"
+              className="trip-btn trip-btn--primary"
+              onClick={() => setRetryGeneration(value => value + 1)}
+            >
+              もう一度試す
+            </button>
+          )}
           <Link className="trip-btn trip-btn--primary" to={retryPath}>
             ログイン画面へ戻る
           </Link>

@@ -18,6 +18,15 @@ public final class ResidentLocationPlugin extends Plugin {
         boolean setupComplete = Boolean.TRUE.equals(call.getBoolean("setupComplete", false));
         String activeTripId = call.getString("activeTripId", "");
         long routePauseAtMs = Math.max(0L, call.getLong("routePauseAtMs", 0L));
+        boolean expresswayOpen = Boolean.TRUE.equals(call.getBoolean("expresswayOpen", false));
+        JSObject rawExpresswayConfig = call.getObject("expresswayConfig", new JSObject());
+        ResidentExpresswayDetectionPolicy.Config expresswayConfig =
+                new ResidentExpresswayDetectionPolicy.Config(
+                        rawExpresswayConfig.optDouble("speedKmh", 78d),
+                        rawExpresswayConfig.optLong("durationSec", 6L),
+                        rawExpresswayConfig.optDouble("endSpeedKmh", 34d),
+                        rawExpresswayConfig.optLong("endDurationSec", 24L)
+                );
         Context appContext = getContext().getApplicationContext();
         getBridge().execute(() -> {
             boolean startRequested = false;
@@ -30,8 +39,52 @@ public final class ResidentLocationPlugin extends Plugin {
                             activeTripId,
                             routePauseAtMs
                     );
+                    ResidentExpresswayStore.reconcile(
+                            appContext,
+                            activeTripId,
+                            expresswayOpen,
+                            expresswayConfig
+                    );
+                    reconcileExpresswayNotification(appContext);
                     startRequested = ResidentLocationService.startIfEligible(appContext);
                 }
+            }
+            call.resolve(buildStatus(startRequested));
+        });
+    }
+
+    @PluginMethod
+    public void applyTrackingState(PluginCall call) {
+        String activeTripId = call.getString("activeTripId", "");
+        long routePauseAtMs = Math.max(0L, call.getLong("routePauseAtMs", 0L));
+        boolean expresswayOpen = Boolean.TRUE.equals(call.getBoolean("expresswayOpen", false));
+        JSObject rawExpresswayConfig = call.getObject("expresswayConfig", new JSObject());
+        ResidentExpresswayDetectionPolicy.Config expresswayConfig =
+                new ResidentExpresswayDetectionPolicy.Config(
+                        rawExpresswayConfig.optDouble("speedKmh", 78d),
+                        rawExpresswayConfig.optLong("durationSec", 6L),
+                        rawExpresswayConfig.optDouble("endSpeedKmh", 34d),
+                        rawExpresswayConfig.optLong("endDurationSec", 24L)
+                );
+        Context appContext = getContext().getApplicationContext();
+        getBridge().execute(() -> {
+            boolean startRequested;
+            synchronized (ResidentLocationUploader.AUTHORIZATION_REFRESH_LOCK) {
+                // Do not mutate enrollment or authorization from a route-transition fast path.
+                // A stale transition can therefore never re-approve an explicitly stopped device.
+                ResidentLocationState.applyTrackingIntent(
+                        appContext,
+                        activeTripId,
+                        routePauseAtMs
+                );
+                ResidentExpresswayStore.reconcile(
+                        appContext,
+                        activeTripId,
+                        expresswayOpen,
+                        expresswayConfig
+                );
+                reconcileExpresswayNotification(appContext);
+                startRequested = ResidentLocationService.startIfEligible(appContext);
             }
             call.resolve(buildStatus(startRequested));
         });
@@ -87,6 +140,9 @@ public final class ResidentLocationPlugin extends Plugin {
         long requestEpoch = ResidentLocationUploader.beginAuthorizationMutation();
         boolean clearAuthorization = Boolean.TRUE.equals(call.getBoolean("clearAuthorization", false));
         boolean clearActiveTrip = Boolean.TRUE.equals(call.getBoolean("clearActiveTrip", false));
+        boolean clearExpresswayData = Boolean.TRUE.equals(
+                call.getBoolean("clearExpresswayData", false)
+        );
         Context appContext = getContext().getApplicationContext();
         getBridge().execute(() -> {
             synchronized (ResidentLocationUploader.AUTHORIZATION_REFRESH_LOCK) {
@@ -96,6 +152,12 @@ public final class ResidentLocationPlugin extends Plugin {
                             clearAuthorization,
                             clearActiveTrip
                     );
+                    if (clearExpresswayData) {
+                        ResidentExpresswayStore.clearPrivateData(appContext);
+                    } else if (clearActiveTrip) {
+                        ResidentExpresswayStore.deactivate(appContext);
+                    }
+                    ResidentExpresswayNotification.cancel(appContext);
                     if (ResidentLocationUploader.markAuthorizationMutationApplied(requestEpoch)) {
                         ResidentLocationService.stop(appContext);
                     }
@@ -191,6 +253,71 @@ public final class ResidentLocationPlugin extends Plugin {
         });
     }
 
+    @PluginMethod
+    public void peekExpresswayEvents(PluginCall call) {
+        int limit = call.getInt("limit", 100);
+        Context appContext = getContext().getApplicationContext();
+        getBridge().execute(() -> {
+            try {
+                int before = ResidentExpresswayStore.pendingEventCount(appContext);
+                JSArray events = new JSArray(ResidentExpresswayStore.peek(appContext, limit).toString());
+                JSObject response = new JSObject();
+                response.put("events", events);
+                response.put("remaining", Math.max(0, before - events.length()));
+                call.resolve(response);
+            } catch (Exception exception) {
+                call.reject("高速道路イベントを読み出せませんでした。", exception);
+            }
+        });
+    }
+
+    @PluginMethod
+    public void acknowledgeExpresswayEvents(PluginCall call) {
+        JSArray ids = call.getArray("ids", new JSArray());
+        Context appContext = getContext().getApplicationContext();
+        getBridge().execute(() -> {
+            try {
+                JSObject response = new JSObject();
+                response.put("remaining", ResidentExpresswayStore.acknowledge(appContext, ids));
+                call.resolve(response);
+            } catch (Exception exception) {
+                call.reject("高速道路イベントを確認済みにできませんでした。", exception);
+            }
+        });
+    }
+
+    @PluginMethod
+    public void resolveExpresswayPrompt(PluginCall call) {
+        String promptId = call.getString("promptId", "");
+        String action = call.getString("action", "");
+        if (!"end".equals(action) && !"keep".equals(action)) {
+            call.reject("高速道路の確認操作が不正です。");
+            return;
+        }
+        Context appContext = getContext().getApplicationContext();
+        getBridge().execute(() -> {
+            ResidentExpresswayStore.DecisionResult decision =
+                    ResidentExpresswayStore.recordDecision(
+                            appContext,
+                            promptId,
+                            "end".equals(action),
+                            System.currentTimeMillis()
+                    );
+            if (!decision.stored) {
+                call.reject("この高速道路の確認はすでに更新されています。");
+                return;
+            }
+            // The notification is closed only after the native durable decision exists.
+            ResidentExpresswayNotification.cancel(appContext);
+            ResidentLocationService.startIfEligible(appContext);
+            JSObject response = new JSObject();
+            response.put("stored", true);
+            response.put("eventId", decision.eventId);
+            response.put("generation", decision.generation);
+            call.resolve(response);
+        });
+    }
+
     private JSObject buildStatus(boolean startRequested) {
         ResidentLocationState.Readiness readiness = ResidentLocationState.getReadiness(getContext());
         JSObject result = new JSObject();
@@ -204,9 +331,68 @@ public final class ResidentLocationPlugin extends Plugin {
         result.put("activeTripId", ResidentLocationState.getActiveTripId(getContext()));
         result.put("routePauseAtMs", ResidentLocationState.getRoutePauseAtMs(getContext()));
         result.put("queuedPointCount", ResidentLocationQueue.count(getContext()));
+        ResidentLocationQueue.StorageDiagnostics queueDiagnostics =
+                ResidentLocationQueue.storageDiagnostics(getContext());
+        result.put("queuedStorageBytes", queueDiagnostics.queuedBytes);
+        result.put("queueSegmentCount", queueDiagnostics.segmentCount);
+        result.put("quarantinedStorageBytes", queueDiagnostics.quarantinedBytes);
+        result.put("quarantineSegmentCount", queueDiagnostics.quarantineSegmentCount);
+        result.put("queueStorageHealthy", queueDiagnostics.healthy);
         result.put("authorizationConfigured", ResidentLocationState.getAuthorization(getContext()).isConfigured());
         result.put("authorizationBlocked", ResidentLocationState.isAuthorizationBlocked(getContext()));
         result.put("lastUploadAt", ResidentLocationState.getLastUploadSuccessAt(getContext()));
+        result.put("lastAcceptedLocationAt", ResidentLocationState.getLastAcceptedLocationAt(getContext()));
+        result.put(
+                "locationQualitySessionStartedAt",
+                ResidentLocationState.getLocationQualitySessionStartedAt(getContext())
+        );
+        result.put(
+                "locationQualityUpdatedAt",
+                ResidentLocationState.getLocationQualityUpdatedAt(getContext())
+        );
+
+        JSObject rejectCounts = new JSObject();
+        for (ResidentLocationQualityPolicy.Rejection rejection
+                : ResidentLocationQualityPolicy.Rejection.values()) {
+            if (rejection == ResidentLocationQualityPolicy.Rejection.NONE) continue;
+            rejectCounts.put(
+                    ResidentLocationState.locationRejectMetricName(rejection),
+                    ResidentLocationState.getLocationRejectCount(getContext(), rejection)
+            );
+        }
+        result.put("locationRejectCounts", rejectCounts);
+        result.put("lastQueueWriteAt", ResidentLocationState.getLastQueueWriteAt(getContext()));
+        result.put("queueWriteFailureCount", ResidentLocationState.getQueueWriteFailureCount(getContext()));
+        result.put(
+                "lastQueueWriteFailureAt",
+                ResidentLocationState.getLastQueueWriteFailureAt(getContext())
+        );
+
+        ResidentExpresswayStore.Snapshot expressway = ResidentExpresswayStore.snapshot(getContext());
+        result.put("expresswayPendingEventCount", expressway.events.size());
+        result.put(
+                "expresswayStorageHealthy",
+                expressway.storageHealthy
+                        && expressway.events.size() < ResidentExpresswayStore.MAX_EVENT_COUNT
+        );
+        result.put("expresswayOpen", expressway.open);
+        result.put("expresswayPromptPending", !expressway.promptId.isEmpty());
+        result.put("expresswayProbePending", expressway.pendingProbe != null);
+        result.put(
+                "expresswayProbeAttemptCount",
+                expressway.pendingProbe == null ? 0 : expressway.pendingProbe.attemptCount
+        );
+        result.put(
+                "expresswayProbeLastFailureCategory",
+                expressway.pendingProbe == null
+                        ? ""
+                        : expressway.pendingProbe.lastFailureCategory
+        );
+        result.put(
+                "expresswayProbeFailureUpdatedAt",
+                expressway.pendingProbe == null ? 0L : expressway.pendingProbe.failureUpdatedAtMs
+        );
+        result.put("expresswayGeneration", expressway.revision);
 
         JSObject settings = new JSObject();
         settings.put("foregroundLocation", readiness.foregroundLocation);
@@ -217,6 +403,15 @@ public final class ResidentLocationPlugin extends Plugin {
         settings.put("locationEnabled", readiness.locationEnabled);
         result.put("settings", settings);
         return result;
+    }
+
+    private static void reconcileExpresswayNotification(Context context) {
+        ResidentExpresswayStore.Snapshot snapshot = ResidentExpresswayStore.snapshot(context);
+        if (!snapshot.promptId.isEmpty()) {
+            ResidentExpresswayNotification.show(context, snapshot.promptId);
+        } else {
+            ResidentExpresswayNotification.cancel(context);
+        }
     }
 
     private JSObject buildAuthorization(

@@ -136,15 +136,13 @@ async function fetchLatestRelease(repo, token) {
   if (!response.ok) return null;
   const data = await response.json();
   const assets = Array.isArray(data?.assets) ? data.assets : [];
-  const preferred =
-    assets.find(asset => asset?.name === DEFAULT_APK_NAME) ||
-    assets.find(asset => typeof asset?.name === 'string' && asset.name.toLowerCase().endsWith('.apk')) ||
-    null;
+  const preferred = assets.find(asset => asset?.name === DEFAULT_APK_NAME) || null;
+  if (!preferred) return null;
   return {
     tag: data?.tag_name ?? 'unknown',
     pageUrl: data?.html_url ?? `https://github.com/${repo}/releases/latest`,
-    apkName: preferred?.name ?? DEFAULT_APK_NAME,
-    apkUrl: preferred?.browser_download_url ?? `https://github.com/${repo}/releases/latest/download/${DEFAULT_APK_NAME}`,
+    apkName: DEFAULT_APK_NAME,
+    apkUrl: `https://github.com/${repo}/releases/latest/download/${DEFAULT_APK_NAME}`,
     apkDigest: preferred?.digest ?? 'unknown',
   };
 }

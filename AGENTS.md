@@ -4,9 +4,10 @@
 
 ## Current Product Policy
 - TrackLog は運行記録アプリ。最重要機能は「バックグラウンドでのルート記録」と「高速道路の開始・終了判定」。
-- Android は Capacitor Native の APK として扱う。パッケージID `com.tracklog.assist` は変更しない。
-- iPhone は PWA 配布を維持する。共有URLとホーム画面追加の導線は残す。
-- PWAアップデータや汎用インストール誘導は、明示依頼がない限り追加しない。
+- 運転者向けTrackLogアプリの正式対応は Android のみとし、Capacitor Native APKとして扱う。パッケージID `com.tracklog.assist` は変更しない。
+- Android APKは会社の利用者へ配布する前提とし、運転者の位置記録、位置共有、管理者からのメッセージ／通知を正式機能として維持する。
+- 管理者Web画面と現在地共有サイトは別用途として維持する。管理者のGoogleログイン、端末・位置共有状況の確認、利用者へのメッセージ送信を壊さない。
+- 既存PWAは互換・保守目的で残すが、運転者向け新機能やバックグラウンド記録の保証対象にはしない。明示依頼がない限り、PWA配布導線の拡張、アップデータ、汎用インストール誘導は追加しない。
 
 ## High Priority Behavior
 - 高速道路イベントでは、開始IC名と終了IC名が運行履歴・日報で分かることを優先する。
@@ -17,6 +18,9 @@
 - AI関連の固定文言として `要約してください` を自動挿入しない。
 
 ## Build / Artifact
+- 会社配布URLは `https://github.com/Koutacode/tracklog-pwa/releases/latest/download/tracklog-assist-debug.apk` のみを案内する。過去タグURLやPWAをアプリ共有文へ入れない。
+- ローカルbuildと公開latestに差がある状態で配布しない。version tagの通常Release公開後、`npm run release:verify:apk` でlatest・version・versionCode・署名・SHAを検証し、公開APKで `output/tracklog-assist-debug.apk` を置換してから実機へ `adb install -r` する。
+- 新しいReleaseのlatest URLとSHAが確認できた後、過去ReleaseのAPK assetは配布対象から外す。ロールバックは旧APKの再配布ではなく、より大きいversionCodeの新Releaseで行う。
 - 基本確認手順:
   1. `npm run typecheck`
   2. `npm run check:csp`

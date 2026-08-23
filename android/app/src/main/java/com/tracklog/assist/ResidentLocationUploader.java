@@ -32,6 +32,35 @@ final class ResidentLocationUploader {
         STOPPED_AUTHORIZATION
     }
 
+    enum ExpresswayProbeOutcome {
+        SIGNAL,
+        AUTHORIZATION_RETRY,
+        NETWORK_RETRY,
+        SERVER_RETRY,
+        RESPONSE_RETRY
+    }
+
+    static final class ExpresswayProbeResult {
+        final ExpresswayProbeOutcome outcome;
+        final ResidentExpresswayStore.SignalDetails signal;
+
+        private ExpresswayProbeResult(
+                ExpresswayProbeOutcome outcome,
+                ResidentExpresswayStore.SignalDetails signal
+        ) {
+            this.outcome = outcome;
+            this.signal = signal;
+        }
+
+        static ExpresswayProbeResult signal(ResidentExpresswayStore.SignalDetails signal) {
+            return new ExpresswayProbeResult(ExpresswayProbeOutcome.SIGNAL, signal);
+        }
+
+        static ExpresswayProbeResult retry(ExpresswayProbeOutcome outcome) {
+            return new ExpresswayProbeResult(outcome, null);
+        }
+    }
+
     private ResidentLocationUploader() {}
 
     static long beginAuthorizationMutation() {
@@ -131,6 +160,116 @@ final class ResidentLocationUploader {
             Log.w(TAG, "Latest location retry failed", exception);
             return Outcome.RETRY;
         }
+    }
+
+    /**
+     * Calls the same authenticated IC resolver as the WebView. A resolver 401 gets one refresh
+     * through the existing serialized native refresh path. Resolver authorization failures never
+     * delete the durable probe or clear the resident service's credentials; the WebView may later
+     * install a repaired session and the probe will be retried.
+     */
+    static ExpresswayProbeResult probeExpresswaySignal(
+            Context context,
+            ResidentExpresswayStore.Probe probe
+    ) {
+        Context appContext = context.getApplicationContext();
+        AuthorizationSnapshot snapshot = getAuthorizationSnapshot(appContext);
+        if (snapshot.mutationPending
+                || snapshot.blocked
+                || !snapshot.authorization.isConfigured()) {
+            return ExpresswayProbeResult.retry(ExpresswayProbeOutcome.AUTHORIZATION_RETRY);
+        }
+        HttpResult result;
+        try {
+            result = postExpresswayProbe(snapshot.authorization, probe);
+        } catch (Exception exception) {
+            Log.w(TAG, "Expressway road-signal request failed; durable probe retained");
+            return ExpresswayProbeResult.retry(ExpresswayProbeOutcome.NETWORK_RETRY);
+        }
+        if (result.statusCode == 401) {
+            AuthorizationRefreshResult refresh;
+            try {
+                refresh = refreshAfterUnauthorized(
+                        appContext,
+                        snapshot.authorization,
+                        snapshot.epoch
+                );
+            } catch (Exception exception) {
+                Log.w(TAG, "Expressway road-signal authorization refresh deferred");
+                return ExpresswayProbeResult.retry(ExpresswayProbeOutcome.AUTHORIZATION_RETRY);
+            }
+            if (refresh.cancelled
+                    || refresh.blocked
+                    || !refresh.authorization.isConfigured()) {
+                return ExpresswayProbeResult.retry(ExpresswayProbeOutcome.AUTHORIZATION_RETRY);
+            }
+            try {
+                result = postExpresswayProbe(refresh.authorization, probe);
+            } catch (Exception exception) {
+                Log.w(TAG, "Expressway road-signal retry failed; durable probe retained");
+                return ExpresswayProbeResult.retry(ExpresswayProbeOutcome.NETWORK_RETRY);
+            }
+        }
+        ExpresswayProbeOutcome failure = classifyExpresswayProbeStatus(result.statusCode);
+        if (failure != ExpresswayProbeOutcome.SIGNAL) {
+            return ExpresswayProbeResult.retry(failure);
+        }
+        try {
+            JSONObject envelope = new JSONObject(result.body);
+            if (!envelope.optBoolean("ok", false)) {
+                return ExpresswayProbeResult.retry(ExpresswayProbeOutcome.RESPONSE_RETRY);
+            }
+            JSONObject data = envelope.optJSONObject("data");
+            if (data == null) {
+                return ExpresswayProbeResult.retry(ExpresswayProbeOutcome.RESPONSE_RETRY);
+            }
+            JSONObject nearest = data.optJSONObject("nearestIc");
+            String nearestName = nearest == null ? "" : nearest.optString("icName", "");
+            Double nearestDistance = nearest != null
+                    && nearest.has("distanceM")
+                    && !nearest.isNull("distanceM")
+                    ? nearest.optDouble("distanceM", Double.NaN)
+                    : null;
+            return ExpresswayProbeResult.signal(new ResidentExpresswayStore.SignalDetails(
+                    data.optBoolean("resolved", false),
+                    data.optBoolean("onExpresswayRoad", false),
+                    data.optBoolean("nearIc", false),
+                    data.optBoolean("nearEtcGate", false),
+                    nearestName,
+                    nearestDistance
+            ));
+        } catch (Exception exception) {
+            Log.w(TAG, "Expressway road-signal response was invalid; durable probe retained");
+            return ExpresswayProbeResult.retry(ExpresswayProbeOutcome.RESPONSE_RETRY);
+        }
+    }
+
+    static ExpresswayProbeOutcome classifyExpresswayProbeStatus(int statusCode) {
+        if (statusCode >= 200 && statusCode < 300) return ExpresswayProbeOutcome.SIGNAL;
+        if (statusCode == 401 || statusCode == 403) {
+            return ExpresswayProbeOutcome.AUTHORIZATION_RETRY;
+        }
+        if (statusCode == 408 || statusCode == 425 || statusCode == 429 || statusCode >= 500) {
+            return ExpresswayProbeOutcome.SERVER_RETRY;
+        }
+        return ExpresswayProbeOutcome.RESPONSE_RETRY;
+    }
+
+    private static HttpResult postExpresswayProbe(
+            ResidentLocationState.Authorization authorization,
+            ResidentExpresswayStore.Probe probe
+    ) throws Exception {
+        JSONObject payload = new JSONObject()
+                .put("deviceId", authorization.deviceId)
+                .put("lat", probe.latitude)
+                .put("lon", probe.longitude)
+                .put("radiusM", 5_000);
+        return postJson(
+                authorization.supabaseUrl + "/functions/v1/tracklog-ic-resolver",
+                authorization.anonKey,
+                authorization.accessToken,
+                payload
+        );
     }
 
     private static AuthorizationSnapshot getAuthorizationSnapshot(Context context) {
@@ -269,11 +408,23 @@ final class ResidentLocationUploader {
             ResidentLocationState.Authorization current,
             long expectedEpoch
     ) throws Exception {
+        long nowMs = System.currentTimeMillis();
+        long retryAfterMs = ResidentLocationState.getRefreshRetryAfterAt(context);
+        if (!ResidentLocationUploadPolicy.shouldAttemptRefresh(nowMs, retryAfterMs)) {
+            long remainingMs = Math.max(1L, retryAfterMs - nowMs);
+            throw new TokenRefreshException(
+                    "Token refresh is temporarily deferred for " + remainingMs + " ms",
+                    false
+            );
+        }
         ResidentLocationState.Authorization refreshed;
         try {
             refreshed = requestTokenRefresh(current);
         } catch (TokenRefreshException exception) {
-            if (!exception.permanent) throw exception;
+            if (!exception.permanent) {
+                ResidentLocationState.markRefreshFailure(context, System.currentTimeMillis());
+                throw exception;
+            }
             if (!isAuthorizationMutationApplied(expectedEpoch)) {
                 return currentRefreshResultLocked(context, true);
             }
@@ -282,8 +433,16 @@ final class ResidentLocationUploader {
                 return currentRefreshResultLocked(context, true);
             }
             return currentRefreshResultLocked(context, false);
+        } catch (Exception exception) {
+            ResidentLocationState.markRefreshFailure(context, System.currentTimeMillis());
+            throw new TokenRefreshException(
+                    "Token refresh failed temporarily",
+                    false,
+                    exception
+            );
         }
         if (!refreshed.isConfigured()) {
+            ResidentLocationState.markRefreshFailure(context, System.currentTimeMillis());
             throw new TokenRefreshException(
                     "Token refresh returned incomplete credentials",
                     false
@@ -519,6 +678,11 @@ final class ResidentLocationUploader {
 
         TokenRefreshException(String message, boolean permanent) {
             super(message);
+            this.permanent = permanent;
+        }
+
+        TokenRefreshException(String message, boolean permanent, Throwable cause) {
+            super(message, cause);
             this.permanent = permanent;
         }
     }

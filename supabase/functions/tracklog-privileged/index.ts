@@ -1241,6 +1241,16 @@ async function listPendingAdminMessages(payload: JsonRecord, user: TracklogUser,
     .slice(0, 20);
 }
 
+function adminMessageReceiptUpsertOptions(locationRequestedAt: string | null) {
+  return {
+    onConflict: 'message_id,device_id',
+    // A normal receipt must never erase a location-request receipt that won a
+    // concurrent race. Location-request ACKs remain allowed to update a prior
+    // normal receipt or a prior request timestamp.
+    ...(locationRequestedAt == null ? { ignoreDuplicates: true } : {}),
+  };
+}
+
 async function ackAdminMessages(payload: JsonRecord, user: TracklogUser, admin: boolean) {
   const deviceId = requiredText(payload, 'deviceId');
   const messageIds = stringArray(payload.messageIds, 'messageIds');
@@ -1263,7 +1273,7 @@ async function ackAdminMessages(payload: JsonRecord, user: TracklogUser, admin: 
   }));
   const { error } = await adminClient
     .from('tracklog_admin_message_receipts')
-    .upsert(rows, { onConflict: 'message_id,device_id' });
+    .upsert(rows, adminMessageReceiptUpsertOptions(locationRequestedAt));
   if (error) throw new HttpError(500, `Admin message ack failed: ${error.message}`);
   return { acknowledged: rows.length };
 }

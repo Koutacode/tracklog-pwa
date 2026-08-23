@@ -12,6 +12,7 @@ import {
   computeDayRuns,
   computeTotals,
   isRestStartOdoCheckpoint,
+  projectAutomaticBreakAsRest,
 } from '../domain/metrics';
 import { DAY_MS, getJstDateInfo } from '../domain/jst';
 import {
@@ -40,7 +41,8 @@ export type TripViewModel = {
  */
 export function buildTripViewModel(tripId: string, events: AppEvent[]): TripViewModel {
   const rawEvents = events.filter(e => e.tripId === tripId);
-  const sorted = resolveTogglePairing(rawEvents, PERSISTED_TOGGLE_DEFINITIONS).normalEvents;
+  const projectedEvents = projectAutomaticBreakAsRest(rawEvents);
+  const sorted = resolveTogglePairing(projectedEvents, PERSISTED_TOGGLE_DEFINITIONS).normalEvents;
   const tripStart = sorted.find(e => e.type === 'trip_start') as TripStartEvent | undefined;
   if (!tripStart) {
     return {
@@ -113,7 +115,8 @@ export function buildTripViewModel(tripId: string, events: AppEvent[]): TripView
  * buildTimeline maps events into a human-friendly chronological description.
  */
 export function buildTimeline(events: AppEvent[]): TimelineItem[] {
-  const pairing = resolveTogglePairing(events, PERSISTED_TOGGLE_DEFINITIONS);
+  const projectedEvents = projectAutomaticBreakAsRest(events);
+  const pairing = resolveTogglePairing(projectedEvents, PERSISTED_TOGGLE_DEFINITIONS);
   const sorted = pairing.normalEvents;
   const tripStart = sorted.find(e => e.type === 'trip_start') as TripStartEvent | undefined;
   const tripStartDayStamp = tripStart ? getJstDateInfo(tripStart.ts).dayStamp : null;

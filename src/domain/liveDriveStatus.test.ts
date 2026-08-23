@@ -105,8 +105,13 @@ function testAutomaticBreakToRestIsIndependentOfEqualTimestampInputOrder() {
     assertEqual(status.currentCategory, 'rest', `${ordering}: automatic transition must finish in rest`);
     assertEqual(
       status.currentCategoryStartedAt,
-      transitionAt,
-      `${ordering}: automatic rest must start at the shared transition timestamp`,
+      breakStartedAt,
+      `${ordering}: automatic rest must include the original three-hour break`,
+    );
+    assertEqual(
+      status.currentNonDrivingMinutes,
+      240,
+      `${ordering}: the complete four-hour interval is non-driving rest`,
     );
   }
 }

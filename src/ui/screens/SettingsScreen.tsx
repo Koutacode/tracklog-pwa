@@ -4,8 +4,6 @@ import { Capacitor } from '@capacitor/core';
 import { APP_VERSION, BUILD_DATE } from '../../app/version';
 import { getDriverIdentity, sendDriverMagicLink, setDriverProfileLocal } from '../../services/remoteAuth';
 import { getRemoteSyncState, hydrateRemoteSyncState, runRemoteSync, subscribeRemoteSyncState } from '../../services/remoteSync';
-import { shareText } from '../../services/nativeShare';
-import { PWA_URL, DEFAULT_APK_DOWNLOAD_URL } from '../../app/releaseInfo';
 import {
   checkLatestAndroidRelease,
   checkLatestPwaBuild,
@@ -14,6 +12,7 @@ import {
   type PwaBuildCheck,
 } from '../../services/appVersionCheck';
 import { startNativeAppUpdate } from '../../services/appUpdate';
+import { copyLatestAndroidApkUrl, shareLatestAndroidApk } from '../../services/appDistribution';
 import {
   checkLocationPermissionStatus,
   checkNotificationPermissionStatus,
@@ -71,6 +70,8 @@ export default function SettingsScreen() {
   const [versionCheck, setVersionCheck] = useState<AndroidReleaseCheck | PwaBuildCheck | null>(null);
   const [versionChecking, setVersionChecking] = useState(false);
   const [versionUpdating, setVersionUpdating] = useState(false);
+  const [apkSharing, setApkSharing] = useState(false);
+  const [apkUrlCopying, setApkUrlCopying] = useState(false);
 
   const isNative = Capacitor.isNativePlatform();
   const standalone = useMemo(() => isStandaloneMode(), []);
@@ -101,6 +102,38 @@ export default function SettingsScreen() {
       setMessage(error?.message ?? 'バージョン確認に失敗しました。通信状態を確認してください。');
     } finally {
       setVersionChecking(false);
+    }
+  };
+
+  const shareLatestApk = async () => {
+    setApkSharing(true);
+    setMessage('最新APKの公開状況を確認しています…');
+    try {
+      const result = await shareLatestAndroidApk();
+      if (result.delivery === 'clipboard') {
+        setMessage(`公開版 v${result.release.latestVersion} のダウンロードURLをコピーしました`);
+      } else if (result.delivery === 'cancelled') {
+        setMessage('共有をキャンセルしました');
+      } else {
+        setMessage(`公開版 v${result.release.latestVersion} の共有画面を開きました`);
+      }
+    } catch (error: any) {
+      setMessage(error?.message ?? '最新版APKを確認できないため共有を停止しました。通信状態を確認してください。');
+    } finally {
+      setApkSharing(false);
+    }
+  };
+
+  const copyLatestApkUrl = async () => {
+    setApkUrlCopying(true);
+    setMessage('最新APKの公開状況を確認しています…');
+    try {
+      const result = await copyLatestAndroidApkUrl();
+      setMessage(`公開版 v${result.release.latestVersion} のダウンロードURLをコピーしました`);
+    } catch (error: any) {
+      setMessage(error?.message ?? '最新版APKを確認できないためコピーを停止しました。通信状態を確認してください。');
+    } finally {
+      setApkUrlCopying(false);
     }
   };
 
@@ -146,24 +179,10 @@ export default function SettingsScreen() {
           <div className="screen-card__actions">
             <button
               className="pill-link"
-              onClick={async () => {
-                const text = `【TrackLog 配布用アプリ】\nAndroidはこちらのAPKをインストールしてください。\n${DEFAULT_APK_DOWNLOAD_URL}\n\niPhoneはSafariでこちらを開いてホーム画面に追加してください。\n${PWA_URL}`;
-                try {
-                  const shared = await shareText({ title: 'TrackLog アプリを共有', text });
-                  if (!shared && navigator.share) {
-                    await navigator.share({ title: 'TrackLog アプリ', text });
-                  } else if (!shared) {
-                    await navigator.clipboard.writeText(text);
-                    setMessage('クリップボードにURLをコピーしました');
-                  }
-                } catch (e) {
-                  console.error(e);
-                  await navigator.clipboard.writeText(text);
-                  setMessage('クリップボードにURLをコピーしました');
-                }
-              }}
+              disabled={apkSharing}
+              onClick={() => void shareLatestApk()}
             >
-              アプリ共有
+              {apkSharing ? '最新版を確認中…' : 'Android APKを共有'}
             </button>
             <Link to="/" className="pill-link">
               ホーム
@@ -509,14 +528,14 @@ export default function SettingsScreen() {
           </article>
 
           <article className="card settings-panel">
-            <div className="settings-panel__title">PWA / 配布</div>
+            <div className="settings-panel__title">Android APK 配布</div>
             <div className="settings-info-row">
               <span>実行形態</span>
               <strong>{isNative ? 'Android ネイティブ' : standalone ? 'PWA' : 'ブラウザ'}</strong>
             </div>
             <div className="settings-note">
-              iPhone等でPWAとして利用するには、以下の共有URLを Safari で開いて「ホーム画面に追加」してください。
-              PWAの位置・同期更新はアプリを開いている間、操作時、再表示時に行います。
+              会社への配布はAndroid APKのみです。共有前にGitHubの最新公開版と固定名APKを確認し、
+              このアプリより公開版が古い場合は共有を停止します。リンクは常に最新リリースを指します。
             </div>
             {!isNative && !standalone && (
               <div className="approval-wait-card">
@@ -534,28 +553,11 @@ export default function SettingsScreen() {
               <button
                 className="trip-btn"
                 style={{ flex: 1, minWidth: '140px' }}
-                onClick={() => {
-                  const url = PWA_URL;
-                  navigator.clipboard.writeText(url).then(() => {
-                    setMessage('共有URLをコピーしました');
-                  }).catch(() => {
-                    setMessage('コピーに失敗しました');
-                  });
-                }}
+                disabled={apkUrlCopying}
+                onClick={() => void copyLatestApkUrl()}
               >
-                共有URLをコピー
+                {apkUrlCopying ? '最新版を確認中…' : '最新版APK URLをコピー'}
               </button>
-              {!isNative && (
-                <a
-                  href={DEFAULT_APK_DOWNLOAD_URL}
-                  className="trip-btn trip-btn--ghost"
-                  style={{ flex: 1, minWidth: '140px', textAlign: 'center', textDecoration: 'none' }}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                >
-                  Android用APKをDL
-                </a>
-              )}
             </div>
             {isNative && (
               <Link

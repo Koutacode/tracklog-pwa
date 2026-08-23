@@ -8,23 +8,23 @@ let bgWatcherId: string | null = null;
 let webWatchId: number | null = null;
 let activeTripId: string | null = null;
 let residentEnabled = false;
-let lastPoint: { lat: number; lng: number; at: number } | null = null;
-let currentMode: RouteTrackingMode = 'precision';
 let activeRouteMode: RouteTrackingMode = 'precision';
 let residentMode: RouteTrackingMode = 'battery';
 let watcherMode: RouteTrackingMode | null = null;
 let watcherPurpose: 'route' | 'resident' | null = null;
 let watcherNotificationText: string | null = null;
+let watcherRouteGeneration: number | null = null;
+let watcherGeneration = 0;
 let locationNotificationText = '位置記録中';
-let recordQueue: Promise<void> = Promise.resolve();
-let pendingRecordCount = 0;
-let droppedRecordCount = 0;
-let lastDropWarningAt = 0;
 let routePointRetentionRunAt = 0;
-let smoothedSpeedKmh: number | null = null;
+let routeGeneration = 0;
+let watcherTransitionQueue: Promise<void> = Promise.resolve();
 
 const MAX_PENDING_RECORDS = 120;
-const MAX_STALE_POINT_AGE_MS = 90 * 1000;
+export const MAX_STALE_POINT_AGE_MS = 90 * 1000;
+// Match the native quality gate. Location providers and the wall clock can
+// differ slightly, so accept up to one minute of positive skew, never more.
+export const MAX_FUTURE_POINT_SKEW_MS = 60 * 1000;
 const DROP_WARNING_INTERVAL_MS = 60 * 1000;
 
 type ModeConfig = {
@@ -64,8 +64,6 @@ const MODE_CONFIG: Record<RouteTrackingMode, ModeConfig> = {
   },
 };
 
-let modeConfig = MODE_CONFIG.precision;
-
 export type LocationPayload = {
   lat: number;
   lng: number;
@@ -76,20 +74,78 @@ export type LocationPayload = {
   source: 'foreground' | 'background';
 };
 
+export type RoutePointWriter = (
+  point: Parameters<typeof addRoutePoint>[0],
+) => Promise<unknown>;
+
 type LocationUpdateListener = (location: LocationPayload) => void | Promise<void>;
 
 const locationListeners = new Set<LocationUpdateListener>();
+let lastEmittedLocationAt: number | null = null;
+
+/**
+ * A small serial queue whose trip identity is fixed when the queue is created.
+ * Closing a queue rejects no callers: already accepted writes drain in order,
+ * while late callbacks are ignored instead of being attached to a later trip.
+ */
+export class RouteRecordQueue<T> {
+  private tail: Promise<void> = Promise.resolve();
+  private accepting = true;
+  private pendingCount = 0;
+
+  constructor(
+    readonly tripId: string,
+    readonly generation: number,
+    private readonly writer: (tripId: string, payload: T) => Promise<void>,
+    private readonly maxPending = MAX_PENDING_RECORDS,
+    private readonly onDrop?: () => void,
+  ) {}
+
+  enqueue(payload: T): Promise<void> {
+    if (!this.accepting) return this.tail;
+    if (this.pendingCount >= this.maxPending) {
+      this.onDrop?.();
+      return this.tail;
+    }
+
+    this.pendingCount += 1;
+    const write = this.tail.then(() => this.writer(this.tripId, payload));
+    this.tail = write
+      .catch(() => {
+        // A failed point must not poison the remaining serial writes.
+      })
+      .finally(() => {
+        this.pendingCount = Math.max(0, this.pendingCount - 1);
+      });
+    // Return this point's real result to the enqueue caller while the internal
+    // tail remains recovered for subsequent writes and stop/drain.
+    return write;
+  }
+
+  closeAndDrain(): Promise<void> {
+    this.accepting = false;
+    return this.tail;
+  }
+}
+
+export type RouteRecordSession = {
+  tripId: string;
+  generation: number;
+  mode: RouteTrackingMode;
+  config: ModeConfig;
+  queue: RouteRecordQueue<LocationPayload>;
+  lastPoint: { lat: number; lng: number; at: number } | null;
+  smoothedSpeedKmh: number | null;
+  droppedRecordCount: number;
+  lastDropWarningAt: number;
+  writeRoutePoint: RoutePointWriter;
+};
+
+let activeRecordSession: RouteRecordSession | null = null;
 
 function applyMode(mode: RouteTrackingMode) {
   const config = MODE_CONFIG[mode] ?? MODE_CONFIG.precision;
-  currentMode = mode;
-  modeConfig = config;
   return config;
-}
-
-function resetTrackingRuntime() {
-  lastPoint = null;
-  smoothedSpeedKmh = null;
 }
 
 function emitLocationUpdate(location: LocationPayload) {
@@ -137,6 +193,61 @@ function speedKmhToMs(speedKmh?: number | null): number | null {
   return speedKmh / 3.6;
 }
 
+export function resolveRoutePointTimestamp(
+  candidateTime: number | null | undefined,
+  nowMs: number,
+  lastAcceptedAt: number | null,
+): number | null {
+  if (!Number.isFinite(nowMs) || nowMs <= 0) return null;
+  const timestamp = candidateTime == null ? nowMs : candidateTime;
+  if (!Number.isFinite(timestamp) || timestamp <= 0) return null;
+  if (nowMs - timestamp > MAX_STALE_POINT_AGE_MS) return null;
+  if (timestamp - nowMs > MAX_FUTURE_POINT_SKEW_MS) return null;
+  if (lastAcceptedAt != null && timestamp <= lastAcceptedAt) return null;
+  return timestamp;
+}
+
+type RawLocationUpdate = {
+  latitude: number;
+  longitude: number;
+  accuracy?: number | null;
+  speed?: number | null;
+  bearing?: number | null;
+  time?: number | null;
+};
+
+export function resolveLocationUpdatePayload(
+  location: RawLocationUpdate,
+  source: LocationPayload['source'],
+  nowMs: number,
+  lastAcceptedAt: number | null,
+): { payload: LocationPayload; acceptedAt: number } | null {
+  if (
+    !Number.isFinite(location.latitude)
+    || location.latitude < -90
+    || location.latitude > 90
+    || !Number.isFinite(location.longitude)
+    || location.longitude < -180
+    || location.longitude > 180
+  ) {
+    return null;
+  }
+  const acceptedAt = resolveRoutePointTimestamp(location.time, nowMs, lastAcceptedAt);
+  if (acceptedAt == null) return null;
+  return {
+    acceptedAt,
+    payload: {
+      lat: location.latitude,
+      lng: location.longitude,
+      accuracy: location.accuracy ?? null,
+      speed: location.speed ?? null,
+      heading: location.bearing ?? null,
+      time: acceptedAt,
+      source,
+    },
+  };
+}
+
 function fuseSpeedKmh(
   sensorSpeedKmh: number | null,
   inferredSpeedKmh: number | null,
@@ -157,13 +268,15 @@ function fuseSpeedKmh(
   return sensorSpeedKmh * sensorWeight + inferredSpeedKmh * (1 - sensorWeight);
 }
 
-function smoothSpeedEstimate(nextSpeedKmh: number | null, accuracyM: number | null): number | null {
+function nextSmoothedSpeedEstimate(
+  previousSmoothedSpeedKmh: number | null,
+  nextSpeedKmh: number | null,
+  accuracyM: number | null,
+): number | null {
   if (nextSpeedKmh == null) {
-    smoothedSpeedKmh = null;
     return null;
   }
-  if (smoothedSpeedKmh == null) {
-    smoothedSpeedKmh = nextSpeedKmh;
+  if (previousSmoothedSpeedKmh == null) {
     return nextSpeedKmh;
   }
   let alpha = 0.34;
@@ -171,48 +284,48 @@ function smoothSpeedEstimate(nextSpeedKmh: number | null, accuracyM: number | nu
     if (accuracyM <= 10) alpha = 0.46;
     else if (accuracyM >= 35) alpha = 0.22;
   }
-  smoothedSpeedKmh = smoothedSpeedKmh + alpha * (nextSpeedKmh - smoothedSpeedKmh);
-  return smoothedSpeedKmh;
+  return previousSmoothedSpeedKmh + alpha * (nextSpeedKmh - previousSmoothedSpeedKmh);
 }
 
-async function recordLocation(params: LocationPayload) {
-  if (!activeTripId) return;
-  const now = typeof params.time === 'number' ? params.time : Date.now();
-  if (Date.now() - now > MAX_STALE_POINT_AGE_MS) {
-    return;
-  }
+async function recordLocation(
+  session: RouteRecordSession,
+  tripId: string,
+  params: LocationPayload,
+) {
+  const now = resolveRoutePointTimestamp(params.time, Date.now(), session.lastPoint?.at ?? null);
+  if (now == null) return;
   const accuracy = typeof params.accuracy === 'number' && Number.isFinite(params.accuracy) ? params.accuracy : null;
-  if (accuracy != null && accuracy > modeConfig.maxAccuracyM) {
+  if (accuracy != null && accuracy > session.config.maxAccuracyM) {
     return;
   }
 
   let inferredSpeedKmh: number | null = null;
   const sensorSpeedKmh = speedMsToKmh(params.speed);
-  if (lastPoint) {
-    const dt = now - lastPoint.at;
-    const dist = distanceMeters(lastPoint, { lat: params.lat, lng: params.lng });
+  if (session.lastPoint) {
+    const dt = now - session.lastPoint.at;
+    const dist = distanceMeters(session.lastPoint, { lat: params.lat, lng: params.lng });
     inferredSpeedKmh = inferSpeedKmh(dist, dt);
     const speedKmh = fuseSpeedKmh(sensorSpeedKmh, inferredSpeedKmh, accuracy);
     if (
       speedKmh != null &&
-      dist >= modeConfig.maxJumpDistanceM &&
-      speedKmh > modeConfig.maxJumpSpeedKmh
+      dist >= session.config.maxJumpDistanceM &&
+      speedKmh > session.config.maxJumpSpeedKmh
     ) {
       return;
     }
-    if (dt < modeConfig.minTimeMs && dist < modeConfig.minDistanceM) return;
+    if (dt < session.config.minTimeMs && dist < session.config.minDistanceM) return;
   }
 
-  const fusedSpeedKmh = smoothSpeedEstimate(
+  const fusedSpeedKmh = nextSmoothedSpeedEstimate(
+    session.smoothedSpeedKmh,
     fuseSpeedKmh(sensorSpeedKmh, inferredSpeedKmh, accuracy),
     accuracy,
   );
   const fusedSpeedMs = speedKmhToMs(fusedSpeedKmh);
 
-  lastPoint = { lat: params.lat, lng: params.lng, at: now };
-  await addRoutePoint({
-    tripId: activeTripId,
-    ts: toIso(params.time ?? undefined),
+  await session.writeRoutePoint({
+    tripId,
+    ts: toIso(now),
     lat: params.lat,
     lng: params.lng,
     accuracy: params.accuracy ?? undefined,
@@ -220,34 +333,62 @@ async function recordLocation(params: LocationPayload) {
     heading: params.heading ?? null,
     source: params.source,
   });
+  // Filtering state describes durable history only. A failed Dexie write must
+  // not suppress or distort the next point that can actually be saved.
+  session.lastPoint = { lat: params.lat, lng: params.lng, at: now };
+  session.smoothedSpeedKmh = fusedSpeedKmh;
 }
 
-function enqueueRecordLocation(params: LocationPayload): Promise<void> {
-  if (pendingRecordCount >= MAX_PENDING_RECORDS) {
-    droppedRecordCount += 1;
-    const now = Date.now();
-    if (now - lastDropWarningAt >= DROP_WARNING_INTERVAL_MS) {
-      console.warn(
-        `[routeTracking] queue saturated. Dropped ${droppedRecordCount} point(s) in the last minute.`,
-      );
-      lastDropWarningAt = now;
-      droppedRecordCount = 0;
-    }
-    return recordQueue;
+function warnDroppedRecord(session: RouteRecordSession) {
+  session.droppedRecordCount += 1;
+  const now = Date.now();
+  if (now - session.lastDropWarningAt >= DROP_WARNING_INTERVAL_MS) {
+    console.warn(
+      `[routeTracking] queue saturated. Dropped ${session.droppedRecordCount} point(s) in the last minute.`,
+    );
+    session.lastDropWarningAt = now;
+    session.droppedRecordCount = 0;
   }
-  pendingRecordCount += 1;
-  recordQueue = recordQueue
-    .then(() => recordLocation(params))
-    .catch(() => {
-      // keep the queue healthy for subsequent points
-    })
-    .finally(() => {
-      pendingRecordCount = Math.max(0, pendingRecordCount - 1);
-    });
-  return recordQueue;
+}
+
+export function createRouteRecordSession(
+  tripId: string,
+  mode: RouteTrackingMode,
+  writeRoutePoint: RoutePointWriter = addRoutePoint,
+): RouteRecordSession {
+  const session: RouteRecordSession = {
+    tripId,
+    generation: ++routeGeneration,
+    mode,
+    config: MODE_CONFIG[mode] ?? MODE_CONFIG.precision,
+    queue: null as unknown as RouteRecordQueue<LocationPayload>,
+    lastPoint: null,
+    smoothedSpeedKmh: null,
+    droppedRecordCount: 0,
+    lastDropWarningAt: 0,
+    writeRoutePoint,
+  };
+  session.queue = new RouteRecordQueue(
+    tripId,
+    session.generation,
+    (capturedTripId, payload) => recordLocation(session, capturedTripId, payload),
+    MAX_PENDING_RECORDS,
+    () => warnDroppedRecord(session),
+  );
+  return session;
+}
+
+function enqueueRecordLocation(
+  session: RouteRecordSession | null,
+  params: LocationPayload,
+): Promise<void> {
+  if (!session) return Promise.resolve();
+  return session.queue.enqueue(params);
 }
 
 async function removeLocationWatcher() {
+  // Invalidate callbacks before awaiting native/web watcher cleanup.
+  watcherGeneration += 1;
   if (bgWatcherId) {
     const id = bgWatcherId;
     bgWatcherId = null;
@@ -264,6 +405,7 @@ async function removeLocationWatcher() {
   watcherMode = null;
   watcherPurpose = null;
   watcherNotificationText = null;
+  watcherRouteGeneration = null;
 }
 
 function buildBackgroundMessage() {
@@ -279,34 +421,34 @@ export function setLocationNotificationText(text?: string | null) {
   locationNotificationText = normalizeLocationNotificationText(text);
 }
 
-async function handleLocation(location: {
-  latitude: number;
-  longitude: number;
-  accuracy?: number | null;
-  speed?: number | null;
-  bearing?: number | null;
-  time?: number | null;
-}, source: LocationPayload['source']) {
-  const payload: LocationPayload = {
-    lat: location.latitude,
-    lng: location.longitude,
-    accuracy: location.accuracy ?? null,
-    speed: location.speed ?? null,
-    heading: location.bearing ?? null,
-    time: location.time ?? null,
+async function handleLocation(
+  location: RawLocationUpdate,
+  source: LocationPayload['source'],
+  recordSession: RouteRecordSession | null,
+) {
+  const resolved = resolveLocationUpdatePayload(
+    location,
     source,
-  };
+    Date.now(),
+    lastEmittedLocationAt,
+  );
+  if (!resolved) return;
+  const { payload } = resolved;
+  lastEmittedLocationAt = resolved.acceptedAt;
   emitLocationUpdate(payload);
-  await enqueueRecordLocation(payload);
+  await enqueueRecordLocation(recordSession, payload);
 }
 
 async function ensureLocationWatcher(purpose: 'route' | 'resident', mode: RouteTrackingMode) {
   const notificationText = normalizeLocationNotificationText(locationNotificationText);
+  const routeSession = purpose === 'route' ? activeRecordSession : null;
+  const routeSessionGeneration = routeSession?.generation ?? null;
   if (
     (bgWatcherId || webWatchId != null) &&
     watcherPurpose === purpose &&
     watcherMode === mode &&
-    watcherNotificationText === notificationText
+    watcherNotificationText === notificationText &&
+    watcherRouteGeneration === routeSessionGeneration
   ) {
     return;
   }
@@ -315,7 +457,8 @@ async function ensureLocationWatcher(purpose: 'route' | 'resident', mode: RouteT
   const config = applyMode(mode);
 
   if (Capacitor.isNativePlatform()) {
-    bgWatcherId = await BackgroundGeolocation.addWatcher(
+    const callbackGeneration = ++watcherGeneration;
+    const nextWatcherId = await BackgroundGeolocation.addWatcher(
       {
         requestPermissions: true,
         stale: purpose === 'resident' ? true : config.stale,
@@ -324,37 +467,51 @@ async function ensureLocationWatcher(purpose: 'route' | 'resident', mode: RouteT
         backgroundMessage: buildBackgroundMessage(),
       },
       async (location, error) => {
+        if (callbackGeneration !== watcherGeneration) return;
         if (error) {
-          console.warn('[routeTracking] native watcher error', error);
+          console.warn('[routeTracking] native watcher error');
           return;
         }
         if (!location) return;
-        await handleLocation(location, 'background');
+        try {
+          await handleLocation(location, 'background', routeSession);
+        } catch {
+          console.warn('[routeTracking] route point write failed');
+        }
       },
     );
+    bgWatcherId = nextWatcherId;
     watcherMode = mode;
     watcherPurpose = purpose;
     watcherNotificationText = notificationText;
+    watcherRouteGeneration = routeSessionGeneration;
     return;
   }
 
   if (!navigator.geolocation) throw new Error('位置情報が利用できません');
+  const callbackGeneration = ++watcherGeneration;
   webWatchId = navigator.geolocation.watchPosition(
     async pos => {
-      await handleLocation(
-        {
-          latitude: pos.coords.latitude,
-          longitude: pos.coords.longitude,
-          accuracy: pos.coords.accuracy,
-          speed: pos.coords.speed ?? null,
-          bearing: pos.coords.heading ?? null,
-          time: pos.timestamp ?? Date.now(),
-        },
-        'foreground',
-      );
+      if (callbackGeneration !== watcherGeneration) return;
+      try {
+        await handleLocation(
+          {
+            latitude: pos.coords.latitude,
+            longitude: pos.coords.longitude,
+            accuracy: pos.coords.accuracy,
+            speed: pos.coords.speed ?? null,
+            bearing: pos.coords.heading ?? null,
+            time: pos.timestamp ?? Date.now(),
+          },
+          'foreground',
+          routeSession,
+        );
+      } catch {
+        console.warn('[routeTracking] route point write failed');
+      }
     },
-    err => {
-      console.warn('[routeTracking] web watcher error', err);
+    () => {
+      console.warn('[routeTracking] web watcher error');
     },
     purpose === 'resident'
       ? { enableHighAccuracy: true, maximumAge: 30000, timeout: 10000 }
@@ -363,9 +520,10 @@ async function ensureLocationWatcher(purpose: 'route' | 'resident', mode: RouteT
   watcherMode = mode;
   watcherPurpose = purpose;
   watcherNotificationText = notificationText;
+  watcherRouteGeneration = routeSessionGeneration;
 }
 
-async function reconcileLocationWatcher() {
+async function reconcileLocationWatcherNow() {
   if (activeTripId) {
     await ensureLocationWatcher('route', activeRouteMode);
     return;
@@ -377,37 +535,72 @@ async function reconcileLocationWatcher() {
   await removeLocationWatcher();
 }
 
+function reconcileLocationWatcher() {
+  const transition = watcherTransitionQueue
+    .catch(() => {
+      // A failed native transition must not poison later start/stop requests.
+    })
+    .then(() => reconcileLocationWatcherNow());
+  watcherTransitionQueue = transition.catch(() => {
+    // Preserve a healthy transition chain while returning the real failure to
+    // the caller that requested this reconciliation.
+  });
+  return transition;
+}
+
 export async function startRouteTracking(tripId: string, mode: RouteTrackingMode = 'precision') {
   const isAlreadyRunning =
     (bgWatcherId || webWatchId != null) &&
     watcherPurpose === 'route' &&
     watcherMode === mode &&
-    activeTripId === tripId;
+    activeTripId === tripId &&
+    watcherRouteGeneration === activeRecordSession?.generation;
   if (isAlreadyRunning) {
     return;
   }
-  const tripChanged = activeTripId !== tripId;
+
+  const existingSession = activeRecordSession;
+  const canReuseSession =
+    existingSession?.tripId === tripId && existingSession.mode === mode;
+  const previousSession = canReuseSession ? null : existingSession;
+  let previousDrain: Promise<void> = Promise.resolve();
+  if (previousSession) {
+    // Close before publishing the next session. Any late callback holding the
+    // old generation is ignored, but writes already accepted still drain to
+    // the old tripId captured by its queue.
+    previousDrain = previousSession.queue.closeAndDrain();
+    watcherGeneration += 1;
+    watcherRouteGeneration = null;
+  }
+
+  const nextSession = canReuseSession
+    ? existingSession
+    : createRouteRecordSession(tripId, mode);
+  activeRecordSession = nextSession;
   activeTripId = tripId;
   activeRouteMode = mode;
-  if (tripChanged || currentMode !== mode) {
-    resetTrackingRuntime();
-    recordQueue = Promise.resolve();
-    pendingRecordCount = 0;
-    droppedRecordCount = 0;
-    lastDropWarningAt = 0;
-  }
   maybeRunRoutePointRetention();
-  await reconcileLocationWatcher();
+  await Promise.all([
+    reconcileLocationWatcher(),
+    previousDrain,
+  ]);
 }
 
 export async function stopRouteTracking() {
+  const session = activeRecordSession;
+  const sessionDrain = session?.queue.closeAndDrain() ?? Promise.resolve();
+  // End acceptance synchronously, before the first await. A caller may start a
+  // new trip without awaiting this promise and the two queues remain isolated.
+  activeRecordSession = null;
   activeTripId = null;
-  resetTrackingRuntime();
-  recordQueue = Promise.resolve();
-  pendingRecordCount = 0;
-  droppedRecordCount = 0;
-  lastDropWarningAt = 0;
-  await reconcileLocationWatcher();
+  if (watcherPurpose === 'route') {
+    watcherGeneration += 1;
+    watcherRouteGeneration = null;
+  }
+  await Promise.all([
+    reconcileLocationWatcher(),
+    sessionDrain,
+  ]);
 }
 
 export async function startResidentLocationUpdates(mode: RouteTrackingMode = 'battery') {

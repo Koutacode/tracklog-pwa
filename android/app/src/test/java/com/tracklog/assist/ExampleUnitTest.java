@@ -36,11 +36,32 @@ public class ExampleUnitTest {
     }
 
     @Test
-    public void residentEligibility_doesNotRequireActiveTrip() {
+    public void residentEligibility_requiresDurableEnrollmentButNotNetworkAuthorization() {
         assertTrue(ResidentLocationState.isEligibleState(true, true, true));
+        assertTrue(ResidentLocationState.isEligibleState(true, true, false));
         assertFalse(ResidentLocationState.isEligibleState(false, true, true));
         assertFalse(ResidentLocationState.isEligibleState(true, false, true));
-        assertFalse(ResidentLocationState.isEligibleState(true, true, false));
+    }
+
+    @Test
+    public void readiness_keepsBatteryAndExactAlarmAsDiagnosticsOnly() {
+        ResidentLocationState.Readiness recommendedSettingsMissing =
+                new ResidentLocationState.Readiness(true, true, true, false, false, true);
+        ResidentLocationState.Readiness requiredPermissionMissing =
+                new ResidentLocationState.Readiness(true, false, true, true, true, true);
+
+        assertTrue(recommendedSettingsMissing.isReady());
+        assertFalse(requiredPermissionMissing.isReady());
+    }
+
+    @Test
+    public void locationRejectMetricKeyContainsReasonButNoLocation() {
+        assertEquals(
+                "location_reject_count_implausible_jump",
+                ResidentLocationState.locationRejectPreferenceKey(
+                        ResidentLocationQualityPolicy.Rejection.IMPLAUSIBLE_JUMP
+                )
+        );
     }
 
     @Test
@@ -207,6 +228,7 @@ public class ExampleUnitTest {
         assertTrue(ResidentLocationUploadPolicy.isPermanentRefreshFailure(403, ""));
         assertFalse(ResidentLocationUploadPolicy.isPermanentRefreshFailure(429, ""));
         assertFalse(ResidentLocationUploadPolicy.isPermanentRefreshFailure(500, ""));
+        assertFalse(ResidentLocationUploadPolicy.isPermanentRefreshFailure(520, ""));
     }
 
     @Test
@@ -214,6 +236,33 @@ public class ExampleUnitTest {
         assertFalse(ResidentLocationUploadPolicy.shouldAttempt(29_999L, 1L));
         assertTrue(ResidentLocationUploadPolicy.shouldAttempt(30_001L, 1L));
         assertTrue(ResidentLocationUploadPolicy.shouldAttempt(10L, 0L));
+    }
+
+    @Test
+    public void refreshBackoff_growsExponentiallyAndCapsAtFiveMinutes() {
+        assertEquals(30_000L, ResidentLocationUploadPolicy.refreshBackoffDelayMs(0));
+        assertEquals(30_000L, ResidentLocationUploadPolicy.refreshBackoffDelayMs(1));
+        assertEquals(60_000L, ResidentLocationUploadPolicy.refreshBackoffDelayMs(2));
+        assertEquals(120_000L, ResidentLocationUploadPolicy.refreshBackoffDelayMs(3));
+        assertEquals(240_000L, ResidentLocationUploadPolicy.refreshBackoffDelayMs(4));
+        assertEquals(300_000L, ResidentLocationUploadPolicy.refreshBackoffDelayMs(5));
+        assertEquals(300_000L, ResidentLocationUploadPolicy.refreshBackoffDelayMs(100));
+    }
+
+    @Test
+    public void refreshBackoff_allowsAttemptOnlyAtOrAfterRetryThreshold() {
+        assertTrue(ResidentLocationUploadPolicy.shouldAttemptRefresh(10L, 0L));
+        assertFalse(ResidentLocationUploadPolicy.shouldAttemptRefresh(9_999L, 10_000L));
+        assertTrue(ResidentLocationUploadPolicy.shouldAttemptRefresh(10_000L, 10_000L));
+        assertTrue(ResidentLocationUploadPolicy.shouldAttemptRefresh(10_001L, 10_000L));
+        assertEquals(
+                130_000L,
+                ResidentLocationUploadPolicy.refreshRetryAfterMs(100_000L, 1)
+        );
+        assertEquals(
+                Long.MAX_VALUE,
+                ResidentLocationUploadPolicy.refreshRetryAfterMs(Long.MAX_VALUE - 1L, 5)
+        );
     }
 
     @Test

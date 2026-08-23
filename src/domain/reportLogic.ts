@@ -13,6 +13,10 @@ import type {
 } from './reportTypes';
 import type { AppEvent, DayRun as SourceDayRun } from './types';
 import { parseJsonInput } from './jsonInput';
+import {
+  projectAutomaticBreakAsRest,
+  projectAutomaticBreakAsRestWithSources,
+} from './metrics';
 import { computeContinuousDriveTimeline } from './regulationTimeline';
 import {
   ALL_TOGGLE_DEFINITIONS,
@@ -185,15 +189,49 @@ function mapEvent(raw: RawEvent): TripEvent | null {
 }
 
 function normalizeReportDays(days: DayRecord[]): DayRecord[] {
+  const sourceDayIndexByEvent = new Map<TripEvent, number>();
+  const sourceEvents: TripEvent[] = [];
+  for (const [dayIndex, day] of days.entries()) {
+    for (const event of day.events) {
+      sourceEvents.push(event);
+      sourceDayIndexByEvent.set(event, dayIndex);
+    }
+  }
+
+  const projection = projectAutomaticBreakAsRestWithSources(sourceEvents);
   const pairing = resolveTogglePairing(
-    days.flatMap(day => day.events),
+    projection.events,
     ALL_TOGGLE_DEFINITIONS,
   );
-  const normalEvents = new Set(pairing.normalEvents);
-  return days.map(day => ({
-    ...day,
-    events: day.events.filter(event => normalEvents.has(event)),
-  }));
+  const eventsByDay = days.map(() => [] as TripEvent[]);
+  for (const event of pairing.normalEvents) {
+    const projectedSources = projection.sourcesByProjectedRest.get(event);
+    const sourceDayIndex = projectedSources
+      ? sourceDayIndexByEvent.get(projectedSources.breakStart)
+        ?? sourceDayIndexByEvent.get(projectedSources.restStart)
+      : sourceDayIndexByEvent.get(event);
+    if (sourceDayIndex != null) {
+      eventsByDay[sourceDayIndex].push(event);
+    }
+  }
+  return days.map((day, dayIndex) => {
+    const events = eventsByDay[dayIndex];
+    const restStart = events.find(event => event.type === 'rest_start');
+    return {
+      ...day,
+      events,
+      restStartMin: restStart ? minuteOfDayJst(restStart.ts) : null,
+      restPlace: restStart?.address ?? '',
+    };
+  });
+}
+
+/** Return a pure normalized copy without mutating the source snapshot or canonical events. */
+export function projectReportTripForView(trip: Trip): Trip {
+  return {
+    ...trip,
+    days: normalizeReportDays(trip.days),
+  };
 }
 
 function hasImportableDayRuns(rawDayRuns?: RawDayRun[]): rawDayRuns is RawDayRun[] {
@@ -401,7 +439,8 @@ export function buildImportableDayRunsFromAppEvents(
   dayRuns: ReadonlyArray<Pick<SourceDayRun, 'dateKey' | 'km'>>,
 ): ImportableReportDayRun[] {
   const groupedEvents = new Map<string, RawEvent[]>();
-  const normalEvents = resolveTogglePairing(events, ALL_TOGGLE_DEFINITIONS).normalEvents;
+  const projectedEvents = projectAutomaticBreakAsRest(events);
+  const normalEvents = resolveTogglePairing(projectedEvents, ALL_TOGGLE_DEFINITIONS).normalEvents;
   for (const event of normalEvents) {
     const dateKey = jstDateKey(event.ts);
     const entry = groupedEvents.get(dateKey) ?? [];

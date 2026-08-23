@@ -48,6 +48,17 @@ public class ResidentLocationManifestTest {
     }
 
     @Test
+    public void expresswayDecisionReceiverIsPrivateAndEnabled() throws Exception {
+        Context context = InstrumentationRegistry.getInstrumentation().getTargetContext();
+        ActivityInfo receiver = context.getPackageManager().getReceiverInfo(
+                new ComponentName(context, ResidentExpresswayNotificationReceiver.class),
+                PackageManager.GET_META_DATA
+        );
+        assertFalse(receiver.exported);
+        assertTrue(receiver.enabled);
+    }
+
+    @Test
     public void dependencyBackgroundLocationServiceIsNotExported() throws Exception {
         Context context = InstrumentationRegistry.getInstrumentation().getTargetContext();
         ServiceInfo service = context.getPackageManager().getServiceInfo(
@@ -71,24 +82,30 @@ public class ResidentLocationManifestTest {
 
     @Test
     public void approvedConfiguredDeviceIsEligibleWithoutActiveTripAndAuthCanBeCleared() {
-        Context context = InstrumentationRegistry.getInstrumentation().getTargetContext();
+        // Mutating tests must use the instrumentation APK's isolated storage. Target context is
+        // the user's real app data when tests run against an installed build.
+        Context context = InstrumentationRegistry.getInstrumentation().getContext();
         ResidentLocationState.preferences(context).edit().clear().commit();
         ResidentLocationState.reconcile(
                 context,
                 true,
                 true,
                 "",
-                0L,
+                0L
+        );
+        ResidentLocationState.Authorization authorization = ResidentLocationState.Authorization.create(
                 "https://example.supabase.co",
                 "anon-key",
                 "access-token",
                 "refresh-token",
-                "android:test-device"
+                "android:test-device",
+                System.currentTimeMillis()
         );
+        assertTrue(ResidentLocationState.installAuthorization(context, authorization));
         assertTrue(ResidentLocationState.isEligible(context));
         assertEquals("", ResidentLocationState.getActiveTripId(context));
 
-        ResidentLocationState.clearAuthorizationAndDisable(context);
+        assertTrue(ResidentLocationState.clearAuthorizationAndDisableIfCurrent(context, authorization));
         assertFalse(ResidentLocationState.isEligible(context));
         assertFalse(ResidentLocationState.getAuthorization(context).isConfigured());
         assertTrue(ResidentLocationState.isAuthorizationBlocked(context));
@@ -98,29 +115,57 @@ public class ResidentLocationManifestTest {
                 true,
                 true,
                 "",
-                0L,
-                "https://example.supabase.co",
-                "anon-key",
-                "access-token",
-                "refresh-token",
-                "android:test-device"
+                0L
         );
         assertFalse(ResidentLocationState.isEligible(context));
 
-        ResidentLocationState.reconcile(
-                context,
-                true,
-                true,
-                "",
-                0L,
+        ResidentLocationState.Authorization replacement = ResidentLocationState.Authorization.create(
                 "https://example.supabase.co",
                 "anon-key",
                 "new-access-token",
                 "new-refresh-token",
-                "android:test-device"
+                "android:test-device",
+                System.currentTimeMillis()
         );
+        assertTrue(ResidentLocationState.installAuthorization(context, replacement));
         assertTrue(ResidentLocationState.isEligible(context));
         assertFalse(ResidentLocationState.isAuthorizationBlocked(context));
         ResidentLocationState.stop(context, true, true);
+    }
+
+    @Test
+    public void locationQualityMetricsAreSessionBoundedAndContainNoCoordinates() {
+        Context context = InstrumentationRegistry.getInstrumentation().getContext();
+        ResidentLocationState.preferences(context).edit().clear().commit();
+        ResidentLocationState.resetLocationQualitySession(context, 100L);
+
+        assertEquals(100L, ResidentLocationState.getLocationQualitySessionStartedAt(context));
+        assertEquals(0, ResidentLocationState.getLocationRejectCount(
+                context,
+                ResidentLocationQualityPolicy.Rejection.POOR_ACCURACY
+        ));
+        ResidentLocationState.markLocationRejected(
+                context,
+                ResidentLocationQualityPolicy.Rejection.POOR_ACCURACY
+        );
+        ResidentLocationState.markLocationRejected(
+                context,
+                ResidentLocationQualityPolicy.Rejection.POOR_ACCURACY
+        );
+        ResidentLocationState.markLocationAccepted(context, 200L);
+
+        assertEquals(2, ResidentLocationState.getLocationRejectCount(
+                context,
+                ResidentLocationQualityPolicy.Rejection.POOR_ACCURACY
+        ));
+        assertEquals(200L, ResidentLocationState.getLastAcceptedLocationAt(context));
+        assertEquals(200L, ResidentLocationState.getLocationQualityUpdatedAt(context));
+
+        ResidentLocationState.resetLocationQualitySession(context, 300L);
+        assertEquals(0, ResidentLocationState.getLocationRejectCount(
+                context,
+                ResidentLocationQualityPolicy.Rejection.POOR_ACCURACY
+        ));
+        assertEquals(200L, ResidentLocationState.getLastAcceptedLocationAt(context));
     }
 }

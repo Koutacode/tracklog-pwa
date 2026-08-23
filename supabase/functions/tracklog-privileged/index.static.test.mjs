@@ -44,6 +44,67 @@ assert.match(
   'stored subscriptions must be revalidated before delivery',
 );
 
+const receiptOptionsStart = source.indexOf('function adminMessageReceiptUpsertOptions');
+const receiptOptionsEnd = source.indexOf('\nasync function ackAdminMessages', receiptOptionsStart);
+assert.notEqual(receiptOptionsStart, -1, 'admin receipt conflict policy must exist');
+assert.notEqual(receiptOptionsEnd, -1, 'admin receipt policy must precede the ACK handler');
+const receiptOptionsJavascript = ts.transpileModule(
+  `${source.slice(receiptOptionsStart, receiptOptionsEnd)}\n` +
+    '(globalThis).__adminMessageReceiptUpsertOptions = adminMessageReceiptUpsertOptions;',
+  {
+    compilerOptions: {
+      module: ts.ModuleKind.None,
+      target: ts.ScriptTarget.ES2022,
+    },
+  },
+).outputText;
+const receiptContext = vm.createContext({});
+vm.runInContext(receiptOptionsJavascript, receiptContext);
+const adminMessageReceiptUpsertOptions = receiptContext.__adminMessageReceiptUpsertOptions;
+assert.equal(typeof adminMessageReceiptUpsertOptions, 'function');
+
+const applyReceipts = (state, messageIds, locationRequestedAt) => {
+  const options = adminMessageReceiptUpsertOptions(locationRequestedAt);
+  for (const messageId of messageIds) {
+    if (state.has(messageId) && options.ignoreDuplicates === true) continue;
+    state.set(messageId, locationRequestedAt);
+  }
+};
+const requestThenNormal = new Map();
+applyReceipts(requestThenNormal, ['message-a'], '2026-08-23T10:00:00.000Z');
+applyReceipts(requestThenNormal, ['message-a'], null);
+assert.equal(
+  requestThenNormal.get('message-a'),
+  '2026-08-23T10:00:00.000Z',
+  'a later normal ACK must preserve the location-request timestamp',
+);
+const normalThenRequest = new Map();
+applyReceipts(normalThenRequest, ['message-a'], null);
+applyReceipts(normalThenRequest, ['message-a'], '2026-08-23T10:01:00.000Z');
+assert.equal(
+  normalThenRequest.get('message-a'),
+  '2026-08-23T10:01:00.000Z',
+  'a location-request ACK must update an earlier normal receipt',
+);
+applyReceipts(normalThenRequest, ['message-a'], '2026-08-23T10:02:00.000Z');
+applyReceipts(normalThenRequest, ['message-a'], null);
+assert.equal(
+  normalThenRequest.get('message-a'),
+  '2026-08-23T10:02:00.000Z',
+  'duplicate delivery permits only a timestamp-bearing ACK to replace the receipt',
+);
+applyReceipts(normalThenRequest, ['message-b', 'message-c'], null);
+applyReceipts(normalThenRequest, ['message-b'], '2026-08-23T10:03:00.000Z');
+assert.equal(normalThenRequest.get('message-b'), '2026-08-23T10:03:00.000Z');
+assert.equal(normalThenRequest.get('message-c'), null, 'multi-message ACKs remain isolated per receipt key');
+
+const ackHandler = functionSource('ackAdminMessages', 'setDeviceApproval');
+assert.match(
+  ackHandler,
+  /\.upsert\(rows, adminMessageReceiptUpsertOptions\(locationRequestedAt\)\)/,
+  'the ACK handler must apply the race-safe receipt conflict policy',
+);
+
 const validatorStart = source.indexOf('function parseCanonicalIpv4Literal');
 const validatorEnd = source.indexOf('\nfunction normalizeWebPushSubscription', validatorStart);
 assert.notEqual(validatorStart, -1, 'Web Push endpoint validator helpers must exist');

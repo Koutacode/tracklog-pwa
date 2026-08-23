@@ -5,6 +5,10 @@ on:
     tags:
       - 'v*' # v1.0.0 のようなタグがプッシュされたら実行
 
+concurrency:
+  group: tracklog-android-release
+  cancel-in-progress: false
+
 jobs:
   build-and-release:
     runs-on: ubuntu-latest
@@ -161,11 +165,12 @@ jobs:
           cp "$HOME/.android/debug.keystore" "$TRACKLOG_ANDROID_KEYSTORE_PATH"
           cd android
           chmod +x gradlew
-          ./gradlew testDebugUnitTest assembleDebug
+          ./gradlew :app:testDebugUnitTest :app:assembleDebugAndroidTest :app:assembleDebug
 
       - name: Prepare release APK
         shell: bash
         run: |
+          set -euo pipefail
           cp android/app/build/outputs/apk/debug/app-debug.apk tracklog-assist-debug.apk
           AAPT="$(find "$ANDROID_HOME/build-tools" -type f -name aapt | sort -V | tail -n 1)"
           BADGING="$($AAPT dump badging tracklog-assist-debug.apk | head -n 1)"
@@ -176,7 +181,39 @@ jobs:
           echo "$BADGING" | grep "versionName='${GITHUB_REF_NAME#v}'"
           sha256sum tracklog-assist-debug.apk | tee tracklog-assist-debug.apk.sha256
 
-      - name: Create GitHub Release
+      - name: Verify release APK signer
+        shell: bash
+        run: |
+          set -euo pipefail
+          readonly EXPECTED_SIGNER_SHA256="14121cbf70043af3bd2fe17dd57833ed51b7f5dbf326459dde6b830f07cbb99c"
+          APKSIGNER="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -n 1)"
+          if [ -z "$APKSIGNER" ] || [ ! -x "$APKSIGNER" ]; then
+            echo "::error::Android apksigner was not found."
+            exit 1
+          fi
+          if ! signer_output="$("$APKSIGNER" verify --print-certs tracklog-assist-debug.apk)"; then
+            echo "::error::The release APK signature could not be verified."
+            exit 1
+          fi
+          mapfile -t signer_digests < <(
+            printf '%s\n' "$signer_output" |
+              sed -n 's/^Signer #[0-9][0-9]* certificate SHA-256 digest: //p' |
+              tr '[:upper:]' '[:lower:]'
+          )
+          if [ "${#signer_digests[@]}" -ne 1 ]; then
+            echo "::error::Expected exactly one APK signer, found ${#signer_digests[@]}."
+            exit 1
+          fi
+          actual_signer_sha256="${signer_digests[0]}"
+          if [ "$actual_signer_sha256" != "$EXPECTED_SIGNER_SHA256" ]; then
+            echo "::error::APK signer SHA-256 does not match the official TrackLog signer."
+            echo "Expected: $EXPECTED_SIGNER_SHA256"
+            echo "Actual:   $actual_signer_sha256"
+            exit 1
+          fi
+          echo "Release APK signer verified: $actual_signer_sha256"
+
+      - name: Create draft GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
@@ -184,7 +221,242 @@ jobs:
             tracklog-assist-debug.apk.sha256
           name: Release ${{ github.ref_name }}
           tag_name: ${{ github.ref_name }}
-          draft: false
+          draft: true
           prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify draft release APK
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if ! release_id="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+            --jq ".[] | select(.tag_name == \"${GITHUB_REF_NAME}\") | .id")"; then
+            echo "::error::Could not resolve the draft release ID."
+            exit 1
+          fi
+          if [[ ! "$release_id" =~ ^[0-9]+$ ]]; then
+            echo "::error::Expected exactly one numeric release ID for ${GITHUB_REF_NAME}; got: ${release_id:-none}"
+            exit 1
+          fi
+          release_state="$(gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}" --jq '[.tag_name, .draft] | @tsv')"
+          IFS=$'\t' read -r release_tag release_draft <<< "$release_state"
+          if [ "$release_tag" != "$GITHUB_REF_NAME" ] || [ "$release_draft" != "true" ]; then
+            echo "::error::Release ${release_id} is not the expected ${GITHUB_REF_NAME} draft."
+            exit 1
+          fi
+          echo "TRACKLOG_RELEASE_ID=${release_id}" >> "$GITHUB_ENV"
+
+          mkdir -p verified-draft-release
+          gh release download "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern tracklog-assist-debug.apk \
+            --pattern tracklog-assist-debug.apk.sha256 \
+            --dir verified-draft-release \
+            --clobber
+          expected_sha="$(sha256sum tracklog-assist-debug.apk | awk '{print $1}')"
+          draft_sha="$(sha256sum verified-draft-release/tracklog-assist-debug.apk | awk '{print $1}')"
+          if [ "$draft_sha" != "$expected_sha" ]; then
+            echo "::error::Draft release APK does not match the verified build."
+            exit 1
+          fi
+          printf '%s  tracklog-assist-debug.apk\n' "$expected_sha" > verified-draft-release/expected-tracklog-assist-debug.apk.sha256
+          if ! cmp --silent \
+            verified-draft-release/expected-tracklog-assist-debug.apk.sha256 \
+            verified-draft-release/tracklog-assist-debug.apk.sha256; then
+            echo "::error::Draft release checksum sidecar is not the exact lowercase SHA-256, two spaces, fixed APK name format."
+            exit 1
+          fi
+
+      - name: Publish verified GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          rollback_release_to_draft() {
+            local rollback_attempt verify_attempt draft_state
+            for rollback_attempt in $(seq 1 6); do
+              echo "Rollback attempt ${rollback_attempt}/6: returning release ${TRACKLOG_RELEASE_ID} to draft."
+              if gh api --method PATCH \
+                "repos/${GITHUB_REPOSITORY}/releases/${TRACKLOG_RELEASE_ID}" \
+                -F draft=true >/dev/null; then
+                for verify_attempt in $(seq 1 3); do
+                  if draft_state="$(gh api "repos/${GITHUB_REPOSITORY}/releases/${TRACKLOG_RELEASE_ID}" --jq '.draft' 2>/dev/null)" && \
+                    [ "$draft_state" = "true" ]; then
+                    echo "Rollback verified by release ID: ${GITHUB_REF_NAME} is draft=true."
+                    return 0
+                  fi
+                  sleep 2
+                done
+              fi
+              sleep $((rollback_attempt * 2))
+            done
+            echo "::error title=CRITICAL RELEASE ROLLBACK FAILED::Release ${TRACKLOG_RELEASE_ID} (${GITHUB_REF_NAME}) could not be returned to a verified draft state after publication failed and may still be public. Immediate manual intervention is required."
+            return 1
+          }
+
+          if ! gh release edit "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --draft=false \
+            --latest; then
+            echo "::error::Release publication did not complete cleanly; starting verified rollback in case GitHub accepted the publication."
+            if rollback_release_to_draft; then
+              echo "::error::Publication failed. ${GITHUB_REF_NAME} was confirmed as draft and was not left public."
+              exit 1
+            fi
+            exit 2
+          fi
+
+      - name: Verify latest APK points to this release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          rollback_release_to_draft() {
+            local rollback_attempt verify_attempt draft_state
+            for rollback_attempt in $(seq 1 6); do
+              echo "Rollback attempt ${rollback_attempt}/6: returning release ${TRACKLOG_RELEASE_ID} to draft."
+              if gh api --method PATCH \
+                "repos/${GITHUB_REPOSITORY}/releases/${TRACKLOG_RELEASE_ID}" \
+                -F draft=true >/dev/null; then
+                for verify_attempt in $(seq 1 3); do
+                  if draft_state="$(gh api "repos/${GITHUB_REPOSITORY}/releases/${TRACKLOG_RELEASE_ID}" --jq '.draft' 2>/dev/null)" && \
+                    [ "$draft_state" = "true" ]; then
+                    echo "Rollback verified by release ID: ${GITHUB_REF_NAME} is draft=true."
+                    return 0
+                  fi
+                  sleep 2
+                done
+              fi
+              sleep $((rollback_attempt * 2))
+            done
+            echo "::error title=CRITICAL RELEASE ROLLBACK FAILED::Release ${TRACKLOG_RELEASE_ID} (${GITHUB_REF_NAME}) could not be returned to a verified draft state and may still be public. Immediate manual intervention is required."
+            return 1
+          }
+
+          expected_sha="$(sha256sum tracklog-assist-debug.apk | awk '{print $1}')"
+          latest_url="https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/tracklog-assist-debug.apk"
+          latest_sidecar_url="${latest_url}.sha256"
+          printf '%s  tracklog-assist-debug.apk\n' "$expected_sha" > expected-latest-tracklog-assist-debug.apk.sha256
+          verified=false
+          for attempt in $(seq 1 12); do
+            if latest_tag="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq '.tag_name' 2>/dev/null)"; then
+              if [ "$latest_tag" = "$GITHUB_REF_NAME" ]; then
+                if curl --fail --location --retry 3 --output latest-tracklog-assist-debug.apk "$latest_url"; then
+                  if curl --fail --location --retry 3 --output latest-tracklog-assist-debug.apk.sha256 "$latest_sidecar_url"; then
+                    actual_sha="$(sha256sum latest-tracklog-assist-debug.apk | awk '{print $1}')"
+                    if [ "$actual_sha" = "$expected_sha" ] && \
+                      cmp --silent expected-latest-tracklog-assist-debug.apk.sha256 latest-tracklog-assist-debug.apk.sha256; then
+                      verified=true
+                      break
+                    fi
+                  fi
+                fi
+              fi
+            fi
+            sleep 5
+          done
+          if [ "$verified" != true ]; then
+            echo "::error::GitHub latest APK or checksum sidecar does not match ${GITHUB_REF_NAME}; starting verified rollback."
+            if rollback_release_to_draft; then
+              echo "::error::Latest APK verification failed. ${GITHUB_REF_NAME} was returned to draft and was not left public."
+              exit 1
+            fi
+            exit 2
+          fi
+
+      - name: Remove APK assets from older releases
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          fetch_old_apk_assets() {
+            gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+              --jq ".[] | select(.tag_name != \"${GITHUB_REF_NAME}\") | .tag_name as \$tag | .assets[]? | select((.name | ascii_downcase | endswith(\".apk\")) or (.name | ascii_downcase | endswith(\".apk.sha256\"))) | [.id, \$tag, .name] | @tsv"
+          }
+
+          rollback_release_to_draft() {
+            local rollback_attempt verify_attempt draft_state
+            for rollback_attempt in $(seq 1 6); do
+              echo "Rollback attempt ${rollback_attempt}/6: returning release ${TRACKLOG_RELEASE_ID} to draft."
+              if gh api --method PATCH \
+                "repos/${GITHUB_REPOSITORY}/releases/${TRACKLOG_RELEASE_ID}" \
+                -F draft=true >/dev/null; then
+                for verify_attempt in $(seq 1 3); do
+                  if draft_state="$(gh api "repos/${GITHUB_REPOSITORY}/releases/${TRACKLOG_RELEASE_ID}" --jq '.draft' 2>/dev/null)" && \
+                    [ "$draft_state" = "true" ]; then
+                    echo "Rollback verified by release ID: ${GITHUB_REF_NAME} is draft=true."
+                    return 0
+                  fi
+                  sleep 2
+                done
+              fi
+              sleep $((rollback_attempt * 2))
+            done
+            echo "::error title=CRITICAL RELEASE ROLLBACK FAILED::Release ${TRACKLOG_RELEASE_ID} (${GITHUB_REF_NAME}) could not be returned to a verified draft state after old-asset cleanup failed and may still be public. Immediate manual intervention is required."
+            return 1
+          }
+
+          asset_snapshot="$(mktemp)"
+          next_snapshot="${asset_snapshot}.next"
+          trap 'rm -f "$asset_snapshot" "$next_snapshot"' EXIT
+          cleanup_verified=false
+          zero_scan_count=0
+          remaining="unknown"
+
+          for scan_attempt in $(seq 1 8); do
+            echo "Old APK asset scan ${scan_attempt}/8."
+            if ! fetch_old_apk_assets > "$next_snapshot"; then
+              echo "::warning::Could not enumerate old APK assets on scan ${scan_attempt}/8."
+              sleep $((scan_attempt * 2))
+              continue
+            fi
+            mv "$next_snapshot" "$asset_snapshot"
+            remaining="$(wc -l < "$asset_snapshot" | tr -d '[:space:]')"
+
+            if [ "$remaining" -eq 0 ]; then
+              zero_scan_count=$((zero_scan_count + 1))
+              echo "Old APK asset scan is empty (${zero_scan_count}/2 confirmations)."
+              if [ "$zero_scan_count" -ge 2 ]; then
+                cleanup_verified=true
+                break
+              fi
+              sleep 3
+              continue
+            fi
+
+            zero_scan_count=0
+            echo "Found ${remaining} old APK or checksum assets; deleting by asset ID."
+            while IFS=$'\t' read -r asset_id tag asset_name; do
+              [ -n "$asset_id" ] || continue
+              deleted=false
+              for delete_attempt in $(seq 1 4); do
+                if gh api --method DELETE "repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}" >/dev/null 2>&1; then
+                  echo "Deleted ${tag}/${asset_name}."
+                  deleted=true
+                  break
+                fi
+                echo "::warning::Delete attempt ${delete_attempt}/4 failed for ${tag}/${asset_name} (asset ${asset_id})."
+                sleep $((delete_attempt * 2))
+              done
+              if [ "$deleted" != true ]; then
+                echo "::warning::Asset ${asset_id} remains pending; a later scan will retry it."
+              fi
+            done < "$asset_snapshot"
+            sleep 4
+          done
+
+          if [ "$cleanup_verified" != true ]; then
+            echo "::error::Older APK asset cleanup was not confirmed at zero after retries (last observed count: ${remaining})."
+            if rollback_release_to_draft; then
+              echo "::error::Old APK asset cleanup failed. ${GITHUB_REF_NAME} was returned to draft and was not left public."
+              exit 1
+            fi
+            exit 2
+          fi
+          echo "Older release APK assets verified at zero after two consecutive scans."

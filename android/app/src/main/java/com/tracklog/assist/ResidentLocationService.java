@@ -17,6 +17,7 @@ import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.IBinder;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.util.Log;
 
 import androidx.annotation.Nullable;
@@ -27,6 +28,7 @@ import androidx.core.content.ContextCompat;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.UUID;
 
 public final class ResidentLocationService extends Service implements LocationListener {
     static final String NOTIFICATION_TEXT = "位置記録中";
@@ -39,6 +41,11 @@ public final class ResidentLocationService extends Service implements LocationLi
     private static final AtomicBoolean RUNNING = new AtomicBoolean(false);
 
     private final Handler handler = new Handler(Looper.getMainLooper());
+    private final Runnable expresswayProbeRetryCheck = this::scheduleDueExpresswayProbe;
+    private final Runnable queueIdleSeal = () -> ResidentLocationQueue.sealActiveIfIdle(
+            this,
+            System.currentTimeMillis()
+    );
     private final Runnable readinessCheck = new Runnable() {
         @Override
         public void run() {
@@ -51,8 +58,14 @@ public final class ResidentLocationService extends Service implements LocationLi
     };
     private LocationManager locationManager;
     private HandlerThread locationThread;
+    private Handler locationHandler;
     private ExecutorService uploadExecutor;
     private final AtomicBoolean uploadInFlight = new AtomicBoolean(false);
+    private final AtomicBoolean expresswayProbeInFlight = new AtomicBoolean(false);
+    private final String monotonicLocationSessionId = UUID.randomUUID().toString();
+    private ResidentLocationQualityPolicy.Fix lastAcceptedFix;
+    private ResidentExpresswayDetectionPolicy.State expresswayDetectionState;
+    private long expresswayDetectionRevision = -1L;
 
     static boolean isRunning() {
         return RUNNING.get();
@@ -86,9 +99,11 @@ public final class ResidentLocationService extends Service implements LocationLi
     @Override
     public void onCreate() {
         super.onCreate();
+        ResidentLocationState.resetLocationQualitySession(this, System.currentTimeMillis());
         locationManager = (LocationManager) getSystemService(Context.LOCATION_SERVICE);
         locationThread = new HandlerThread("tracklog-resident-location");
         locationThread.start();
+        locationHandler = new Handler(locationThread.getLooper());
         uploadExecutor = Executors.newSingleThreadExecutor(runnable -> {
             Thread thread = new Thread(runnable, "tracklog-location-upload");
             thread.setDaemon(true);
@@ -106,6 +121,8 @@ public final class ResidentLocationService extends Service implements LocationLi
         try {
             promoteToForeground();
             requestLocationUpdates();
+            ResidentExpresswayNotification.restoreIfPending(this);
+            scheduleDueExpresswayProbe();
             RUNNING.set(true);
             handler.removeCallbacks(readinessCheck);
             handler.postDelayed(readinessCheck, READINESS_CHECK_MS);
@@ -189,15 +206,273 @@ public final class ResidentLocationService extends Service implements LocationLi
             stopResidentService();
             return;
         }
+        long now = System.currentTimeMillis();
+        long nowElapsedRealtimeNanos = SystemClock.elapsedRealtimeNanos();
+        ResidentLocationQualityPolicy.Fix candidate = new ResidentLocationQualityPolicy.Fix(
+                location.getLatitude(),
+                location.getLongitude(),
+                location.getTime(),
+                location.getElapsedRealtimeNanos(),
+                location.hasAccuracy(),
+                location.hasAccuracy() ? location.getAccuracy() : 0f,
+                location.getProvider()
+        );
+        ResidentLocationQualityPolicy.Decision quality =
+                ResidentLocationQualityPolicy.evaluate(
+                        lastAcceptedFix,
+                        candidate,
+                        now,
+                        nowElapsedRealtimeNanos
+                );
+        if (!quality.accepted) {
+            ResidentLocationState.markLocationRejected(this, quality.rejection);
+            return;
+        }
+        ResidentLocationState.markLocationAccepted(this, now);
+
         String tripId = ResidentLocationState.getActiveTripId(this);
-        if (!tripId.isEmpty() && ResidentLocationState.shouldRecordRouteAt(this, System.currentTimeMillis())) {
+        boolean queueWriteSucceeded = true;
+        boolean routeShouldRecord = !tripId.isEmpty()
+                && ResidentLocationState.shouldRecordRouteAt(this, now);
+        if (routeShouldRecord) {
             try {
-                ResidentLocationQueue.append(this, tripId, location);
+                ResidentLocationQueue.append(this, tripId, location, monotonicLocationSessionId);
+                ResidentLocationState.markQueueWriteSuccess(this, now);
+                handler.removeCallbacks(queueIdleSeal);
+                handler.postDelayed(queueIdleSeal, ResidentLocationQueue.ACTIVE_IDLE_SEAL_MS);
             } catch (Exception exception) {
+                queueWriteSucceeded = false;
+                ResidentLocationState.markQueueWriteFailure(this, now);
                 Log.e(TAG, "Unable to persist resident location", exception);
             }
         }
+        if (queueWriteSucceeded) lastAcceptedFix = candidate;
+        if (routeShouldRecord && queueWriteSucceeded) {
+            advanceExpresswayDetection(location, tripId);
+        }
         uploadLatestLocation(location);
+    }
+
+    private void advanceExpresswayDetection(Location location, String tripId) {
+        ResidentExpresswayStore.Snapshot nativeState = ResidentExpresswayStore.snapshot(this);
+        if (!nativeState.storageHealthy
+                || nativeState.paused
+                || !tripId.equals(nativeState.tripId)) {
+            expresswayDetectionState = null;
+            expresswayDetectionRevision = -1L;
+            return;
+        }
+        if (expresswayDetectionState == null
+                || !tripId.equals(expresswayDetectionState.tripId)
+                || expresswayDetectionRevision != nativeState.revision) {
+            expresswayDetectionState = new ResidentExpresswayDetectionPolicy.State(tripId);
+            expresswayDetectionState.keepSuppressed = nativeState.keepSuppressed;
+            expresswayDetectionRevision = nativeState.revision;
+        }
+        long elapsedRealtimeNanos = location.getElapsedRealtimeNanos();
+        long elapsedRealtimeMs = elapsedRealtimeNanos > 0L
+                ? elapsedRealtimeNanos / 1_000_000L
+                : -1L;
+        ResidentExpresswayDetectionPolicy.Point point =
+                new ResidentExpresswayDetectionPolicy.Point(
+                        tripId,
+                        location.getTime(),
+                        elapsedRealtimeMs >= 0L ? monotonicLocationSessionId : "",
+                        elapsedRealtimeMs,
+                        location.hasAccuracy(),
+                        location.hasAccuracy() ? location.getAccuracy() : 0d,
+                        location.hasSpeed(),
+                        location.hasSpeed() ? location.getSpeed() : 0d
+                );
+        ResidentExpresswayDetectionPolicy.Result result =
+                ResidentExpresswayDetectionPolicy.advance(
+                        expresswayDetectionState,
+                        point,
+                        nativeState.config,
+                        nativeState.open,
+                        !nativeState.promptId.isEmpty()
+                );
+        expresswayDetectionState = result.state;
+        if (result.effect.kind == ResidentExpresswayDetectionPolicy.EffectKind.CLEAR_KEEP) {
+            if (ResidentExpresswayStore.clearKeepSuppression(
+                    this,
+                    tripId,
+                    nativeState.revision
+            )) {
+                expresswayDetectionRevision = ResidentExpresswayStore.snapshot(this).revision;
+                expresswayDetectionState = null;
+            }
+            return;
+        }
+        if (result.effect.kind != ResidentExpresswayDetectionPolicy.EffectKind.PROBE_START
+                && result.effect.kind != ResidentExpresswayDetectionPolicy.EffectKind.PROBE_END) {
+            return;
+        }
+        ResidentExpresswayStore.Probe probe = ResidentExpresswayStore.createProbe(
+                this,
+                result.effect.kind == ResidentExpresswayDetectionPolicy.EffectKind.PROBE_START
+                        ? ResidentExpresswayStore.ProbeKind.START
+                        : ResidentExpresswayStore.ProbeKind.END,
+                tripId,
+                ResidentLocationQueue.toIsoTimestamp(location.getTime()),
+                location.getTime(),
+                location.getLatitude(),
+                location.getLongitude(),
+                location.hasAccuracy() ? (double) location.getAccuracy() : null,
+                result.effect.speedKmh,
+                result.effect.accelerationMs2,
+                result.effect.lowSpeedElapsedMs,
+                elapsedRealtimeMs >= 0L ? monotonicLocationSessionId : "",
+                elapsedRealtimeMs
+        );
+        if (probe != null) scheduleDueExpresswayProbe();
+    }
+
+    private void scheduleDueExpresswayProbe() {
+        handler.removeCallbacks(expresswayProbeRetryCheck);
+        if (uploadExecutor == null || uploadExecutor.isShutdown()) return;
+        ResidentExpresswayStore.Probe probe = ResidentExpresswayStore.dueProbe(
+                this,
+                System.currentTimeMillis()
+        );
+        if (probe == null || !expresswayProbeInFlight.compareAndSet(false, true)) return;
+        uploadExecutor.execute(() -> {
+            ResidentLocationUploader.ExpresswayProbeResult result =
+                    ResidentLocationUploader.probeExpresswaySignal(this, probe);
+            Handler callbackHandler = locationHandler;
+            if (callbackHandler == null) {
+                expresswayProbeInFlight.set(false);
+                return;
+            }
+            callbackHandler.post(() -> handleExpresswayProbeResult(probe, result));
+        });
+    }
+
+    private void handleExpresswayProbeResult(
+            ResidentExpresswayStore.Probe probe,
+            ResidentLocationUploader.ExpresswayProbeResult result
+    ) {
+        try {
+            if (result.outcome != ResidentLocationUploader.ExpresswayProbeOutcome.SIGNAL
+                    || result.signal == null) {
+                ResidentExpresswayStore.markProbeFailure(
+                        this,
+                        probe.id,
+                        probeFailureCategory(result.outcome),
+                        System.currentTimeMillis()
+                );
+                scheduleNextExpresswayProbeRetry();
+                return;
+            }
+            ResidentExpresswayStore.Snapshot current = ResidentExpresswayStore.snapshot(this);
+            if (current.pendingProbe == null
+                    || !probe.id.equals(current.pendingProbe.id)
+                    || !ResidentExpresswayStore.canApplyProbe(
+                            probe.tripId,
+                            probe.expectedRevision,
+                            current.tripId,
+                            current.revision
+                    )) {
+                return;
+            }
+            if (probe.kind == ResidentExpresswayStore.ProbeKind.START) {
+                if (expresswayDetectionState == null
+                        || !probe.tripId.equals(expresswayDetectionState.tripId)) {
+                    ResidentExpresswayStore.clearProbe(this, probe.id);
+                    return;
+                }
+                ResidentExpresswayDetectionPolicy.StartSignalResult signalResult =
+                        ResidentExpresswayDetectionPolicy.applyStartSignal(
+                                expresswayDetectionState,
+                                probe.elapsedRealtimeMs >= 0L
+                                        ? probe.elapsedRealtimeMs
+                                        : probe.detectedAtMs,
+                                result.signal.policySignal
+                        );
+                expresswayDetectionState = signalResult.state;
+                if (!signalResult.shouldStart) {
+                    ResidentExpresswayStore.clearProbe(this, probe.id);
+                    return;
+                }
+                if (ResidentExpresswayStore.commitStart(
+                        this,
+                        probe.id,
+                        result.signal,
+                        signalResult.hits,
+                        signalResult.holdMs
+                )) {
+                    expresswayDetectionState = ResidentExpresswayDetectionPolicy.afterTransition(
+                            expresswayDetectionState,
+                            false
+                    );
+                    expresswayDetectionRevision = ResidentExpresswayStore.snapshot(this).revision;
+                } else {
+                    ResidentExpresswayStore.markProbeFailure(
+                            this,
+                            probe.id,
+                            "response",
+                            System.currentTimeMillis()
+                    );
+                    scheduleNextExpresswayProbeRetry();
+                }
+                return;
+            }
+            if (!ResidentExpresswayDetectionPolicy.shouldPromptForEnd(
+                    result.signal.policySignal,
+                    probe.lowSpeedElapsedMs
+            )) {
+                ResidentExpresswayStore.clearProbe(this, probe.id);
+                return;
+            }
+            String promptId = ResidentExpresswayStore.commitEndPrompt(
+                    this,
+                    probe.id,
+                    result.signal
+            );
+            if (!promptId.isEmpty()) {
+                expresswayDetectionState = ResidentExpresswayDetectionPolicy.afterTransition(
+                        expresswayDetectionState,
+                        false
+                );
+                expresswayDetectionRevision = ResidentExpresswayStore.snapshot(this).revision;
+                handler.post(() -> ResidentExpresswayNotification.show(this, promptId));
+            } else {
+                ResidentExpresswayStore.markProbeFailure(
+                        this,
+                        probe.id,
+                        "response",
+                        System.currentTimeMillis()
+                );
+                scheduleNextExpresswayProbeRetry();
+            }
+        } finally {
+            expresswayProbeInFlight.set(false);
+        }
+    }
+
+    private void scheduleNextExpresswayProbeRetry() {
+        ResidentExpresswayStore.Snapshot snapshot = ResidentExpresswayStore.snapshot(this);
+        if (snapshot.pendingProbe == null) return;
+        long now = System.currentTimeMillis();
+        long delay = Math.max(1_000L, snapshot.pendingProbe.retryAfterAtMs - now);
+        delay = Math.min(delay, ResidentExpresswayStore.PROBE_RETRY_MAX_MS);
+        handler.removeCallbacks(expresswayProbeRetryCheck);
+        handler.postDelayed(expresswayProbeRetryCheck, delay);
+    }
+
+    private static String probeFailureCategory(
+            ResidentLocationUploader.ExpresswayProbeOutcome outcome
+    ) {
+        if (outcome == ResidentLocationUploader.ExpresswayProbeOutcome.AUTHORIZATION_RETRY) {
+            return "authorization";
+        }
+        if (outcome == ResidentLocationUploader.ExpresswayProbeOutcome.NETWORK_RETRY) {
+            return "network";
+        }
+        if (outcome == ResidentLocationUploader.ExpresswayProbeOutcome.SERVER_RETRY) {
+            return "server";
+        }
+        return "response";
     }
 
     private void uploadLatestLocation(Location location) {
@@ -255,6 +530,8 @@ public final class ResidentLocationService extends Service implements LocationLi
     @Override
     public void onDestroy() {
         handler.removeCallbacks(readinessCheck);
+        handler.removeCallbacks(expresswayProbeRetryCheck);
+        handler.removeCallbacks(queueIdleSeal);
         if (locationManager != null) {
             try {
                 locationManager.removeUpdates(this);
@@ -266,9 +543,11 @@ public final class ResidentLocationService extends Service implements LocationLi
         if (locationThread != null) {
             locationThread.quitSafely();
         }
+        locationHandler = null;
         if (uploadExecutor != null) {
             uploadExecutor.shutdownNow();
         }
+        ResidentLocationQueue.sealActive(this);
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE);
         super.onDestroy();
     }

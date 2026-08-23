@@ -40,9 +40,12 @@ Obsidian は今後更新せず、運用ログ、配布情報、改善履歴は N
 - Obsidian の運用ログは今後更新しない。
 - 推奨順:
   1. `git status` / 変更確認
-  2. Web build / `cap sync android` / 実機反映
-  3. Notion 3ページ更新
-  4. Git commit / push
+  2. Web build / `cap sync android` / Android検証
+  3. Git commit / push / version tag / GitHub Release公開
+  4. `npm run release:verify:apk` でGitHub latest・package・version・署名・SHAを照合
+  5. 公開Releaseから取得した同じAPKを実機へ `adb install -r`
+  6. Notion 3ページ更新
+- Notionへ記録するAPK URLは、過去タグを含まない `releases/latest/download/tracklog-assist-debug.apk` だけを使用する。
 - Notion 側の TrackLog ログには、少なくとも「変更概要 / 検証結果 / 実機インストール結果 / 残課題」を残す。
 
 ## ローカル実行コマンド

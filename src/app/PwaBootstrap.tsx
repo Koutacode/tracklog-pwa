@@ -12,6 +12,10 @@ const PWA_UPDATE_CHECK_INTERVAL_MS = 60 * 1000;
 export default function PwaBootstrap() {
   useEffect(() => {
     if (Capacitor.isNativePlatform()) return;
+    // Vite's development server does not emit the generated production sw.js.
+    // Skipping registration here avoids a noisy text/html MIME error while
+    // leaving preview and production PWA update behavior unchanged.
+    if (import.meta.env.DEV) return;
     if (!('serviceWorker' in navigator)) return;
     let cancelled = false;
 

@@ -156,9 +156,11 @@ export default function ReportDashboard() {
         </div>
 
         {/* Tab bar */}
-        <div className="report-tabs">
+        <div className="report-tabs" role="group" aria-label="運行日報の表示切替">
           {MAIN_TABS.map(t => (
             <button
+              type="button"
+              aria-pressed={mainTab === t.key}
               key={t.key}
               className={`report-tab ${mainTab === t.key ? 'report-tab--active' : ''}`}
               onClick={() => setMainTab(t.key)}
@@ -223,30 +225,46 @@ function TripListTab({ trips, onOpen, onReload }: {
   return (
     <div className="report-list">
       {trips.map(trip => (
-        <div key={trip.id} className="report-card report-trip-card" onClick={() => onOpen(trip.id)}>
-          <div className="report-trip-card__row">
-            <div className="report-trip-card__label">{trip.label || '無題の運行'}</div>
-            <div className="report-trip-card__date">
-              {trip.days.length > 0 ? trip.days[0].dateKey : '-'}
+        <article key={trip.id} className="report-card report-trip-card">
+          <div
+            role="button"
+            tabIndex={0}
+            className="report-trip-card__main"
+            onClick={() => onOpen(trip.id)}
+            onKeyDown={event => {
+              if (event.key !== 'Enter' && event.key !== ' ') return;
+              event.preventDefault();
+              onOpen(trip.id);
+            }}
+            aria-label={`${trip.label || trip.days[0]?.dateKey || '無題の運行'}の日報を開く`}
+          >
+            <div className="report-trip-card__row">
+              <div className="report-trip-card__label">{trip.label || '無題の運行'}</div>
+              <div className="report-trip-card__date">
+                {trip.days.length > 0 ? trip.days[0].dateKey : '-'}
+              </div>
             </div>
-          </div>
-          <div className="report-trip-card__meta">
-            <span>{trip.days.length}日間</span>
-            <span>#{trip.id.slice(0, 8)}</span>
-          </div>
-          <div className="report-trip-card__summary">
-            <span>最初の日付</span>
-            <strong>{trip.days[0]?.dateKey ?? '-'}</strong>
+            <div className="report-trip-card__meta">
+              <span>{trip.days.length}日間</span>
+              <span>#{trip.id.slice(0, 8)}</span>
+            </div>
+            <div className="report-trip-card__summary">
+              <span>最初の日付</span>
+              <strong>{trip.days[0]?.dateKey ?? '-'}</strong>
+            </div>
+            <span className="report-trip-card__open" aria-hidden="true">日報を開く →</span>
           </div>
           <div className="report-trip-card__actions">
             <button
+              type="button"
               className="report-btn report-btn--danger report-btn--small"
-              onClick={(e) => { e.stopPropagation(); void handleDelete(trip.id); }}
+              onClick={() => void handleDelete(trip.id)}
+              aria-label={`${trip.label || trip.days[0]?.dateKey || '無題の運行'}の日報を削除`}
             >
               削除
             </button>
           </div>
-        </div>
+        </article>
       ))}
     </div>
   );
@@ -337,6 +355,7 @@ function ReportTab({ trip, trips, requestedTripId, onSelectTrip, onRefreshLiveTr
         </div>
         <div style={{ display: 'flex', gap: 10, marginTop: 14, flexWrap: 'wrap' }}>
           <button
+            type="button"
             className="report-btn report-btn--primary"
             disabled={refreshing}
             onClick={() => {
@@ -375,6 +394,7 @@ function ReportTab({ trip, trips, requestedTripId, onSelectTrip, onRefreshLiveTr
           <div className="report-day-pills">
             {trip.days.map((d, idx) => (
               <button
+                type="button"
                 key={d.dayIndex}
                 className={`report-day-pill ${idx === dayIdx ? 'report-day-pill--active' : ''}`}
                 onClick={() => setDayIdx(idx)}
@@ -387,9 +407,11 @@ function ReportTab({ trip, trips, requestedTripId, onSelectTrip, onRefreshLiveTr
       </div>
 
       {/* Sub tabs */}
-      <div className="report-sub-tabs">
+      <div className="report-sub-tabs" role="group" aria-label="日報の詳細表示切替">
         {subTabs.map(st => (
           <button
+            type="button"
+            aria-pressed={subTab === st.key}
             key={st.key}
             className={`report-sub-tab ${subTab === st.key ? 'report-sub-tab--active' : ''}`}
             onClick={() => setSubTab(st.key)}

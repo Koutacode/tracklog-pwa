@@ -1,20 +1,32 @@
 import { Capacitor } from '@capacitor/core';
-import { LocalNotifications } from '@capacitor/local-notifications';
+import { LocalNotifications, type ActionPerformed, type ActionType } from '@capacitor/local-notifications';
 import { checkNotificationPermissionStatus } from './nativeSetup';
 import {
   clearPendingExpresswayEndDecision,
   clearPendingExpresswayEndPrompt,
+  clearPendingExpresswayEndPromptIfMatches,
   endExpressway,
+  getPendingExpresswayEndPrompt,
   setPendingExpresswayEndDecision,
   setPendingExpresswayEndPrompt,
   type PendingExpresswayEndPrompt,
 } from '../db/repositories';
+import { enqueueNotificationExpresswayEndIcResolution } from './expresswayIcResolution';
 
 const ACTION_TYPE_ID = 'tracklog_expressway_end_actions';
 const ACTION_END = 'end_expressway';
 const ACTION_KEEP = 'keep_expressway';
 const CHANNEL_ID = 'tracklog_expressway_alert';
 const EXTRA_KIND = 'expressway_end_prompt_v1';
+const RESIDENT_SERVICE_NOTIFICATION_OWNER = 'resident-service';
+
+export const NATIVE_EXPRESSWAY_NOTIFICATION_ACTION_TYPE: ActionType = {
+  id: ACTION_TYPE_ID,
+  actions: [
+    { id: ACTION_END, title: '終了する', foreground: false },
+    { id: ACTION_KEEP, title: 'まだ高速中', foreground: false },
+  ],
+};
 
 let initialized = false;
 let initPromise: Promise<void> | null = null;
@@ -40,12 +52,14 @@ function parsePromptFromExtra(extra: any): PendingExpresswayEndPrompt | null {
   const lat = Number(extra.lat);
   const lng = Number(extra.lng);
   const accuracy = Number(extra.accuracy);
+  const promptId = typeof extra.promptId === 'string' ? extra.promptId.trim() : '';
   const reason = extra.reason && typeof extra.reason === 'object' ? extra.reason : undefined;
   if (!tripId || !Number.isFinite(speedKmh) || !detectedAt || !Number.isFinite(lat) || !Number.isFinite(lng)) {
     return null;
   }
   return {
     tripId,
+    ...(promptId ? { promptId } : {}),
     speedKmh: Math.max(0, Math.min(200, Math.round(speedKmh))),
     detectedAt,
     geo: {
@@ -57,6 +71,33 @@ function parsePromptFromExtra(extra: any): PendingExpresswayEndPrompt | null {
   };
 }
 
+function promptIdentity(prompt: PendingExpresswayEndPrompt) {
+  return {
+    tripId: prompt.tripId,
+    promptId: prompt.promptId,
+    nativeDetectionId: prompt.reason?.nativeDetectionId,
+  };
+}
+
+async function clearHandledPrompt(prompt: PendingExpresswayEndPrompt) {
+  if (prompt.promptId || prompt.reason?.nativeDetectionId) {
+    return clearPendingExpresswayEndPromptIfMatches(promptIdentity(prompt));
+  }
+  await clearPendingExpresswayEndPrompt(prompt.tripId);
+  return true;
+}
+
+async function canPersistFailedPromptAction(prompt: PendingExpresswayEndPrompt) {
+  const current = await getPendingExpresswayEndPrompt();
+  if (!current) return true;
+  if (current.tripId !== prompt.tripId) return false;
+  if (prompt.promptId) return current.promptId === prompt.promptId;
+  if (prompt.reason?.nativeDetectionId) {
+    return current.reason?.nativeDetectionId === prompt.reason.nativeDetectionId;
+  }
+  return !current.promptId && !current.reason?.nativeDetectionId;
+}
+
 async function ensureNativePermission(): Promise<boolean> {
   const current = await LocalNotifications.checkPermissions();
   if (current.display === 'granted') return true;
@@ -66,17 +107,6 @@ async function ensureNativePermission(): Promise<boolean> {
 }
 
 async function setupNativeActionBindings() {
-  await LocalNotifications.registerActionTypes({
-    types: [
-      {
-        id: ACTION_TYPE_ID,
-        actions: [
-          { id: ACTION_END, title: '終了する', foreground: false },
-          { id: ACTION_KEEP, title: 'まだ高速中', foreground: false },
-        ],
-      },
-    ],
-  });
   try {
     await LocalNotifications.createChannel({
       id: CHANNEL_ID,
@@ -91,39 +121,59 @@ async function setupNativeActionBindings() {
   } catch {
     // channel may already exist
   }
-  await LocalNotifications.addListener('localNotificationActionPerformed', async event => {
-    const prompt = parsePromptFromExtra(event.notification?.extra);
-    if (!prompt) return;
-    if (event.actionId === ACTION_END) {
-      try {
-        await endExpressway({ tripId: prompt.tripId, geo: prompt.geo, autoDecision: prompt.reason });
-        await clearPendingExpresswayEndPrompt(prompt.tripId);
-        await clearPendingExpresswayEndDecision(prompt.tripId);
-      } catch {
+}
+
+export async function handleNativeExpresswayPromptNotificationAction(
+  event: ActionPerformed,
+): Promise<boolean> {
+  if (event.notification?.extra?.owner === RESIDENT_SERVICE_NOTIFICATION_OWNER) return false;
+  const prompt = parsePromptFromExtra(event.notification?.extra);
+  if (!prompt) return false;
+  if (event.actionId === ACTION_END) {
+    let shouldCancel = true;
+    try {
+      const { eventId } = await endExpressway({
+        tripId: prompt.tripId,
+        geo: prompt.geo,
+        autoDecision: prompt.reason,
+      });
+      enqueueNotificationExpresswayEndIcResolution({ eventId, geo: prompt.geo });
+      await clearHandledPrompt(prompt);
+      await clearPendingExpresswayEndDecision(prompt.tripId);
+    } catch {
+      if (await canPersistFailedPromptAction(prompt)) {
         await setPendingExpresswayEndPrompt(prompt);
         await setPendingExpresswayEndDecision({
           tripId: prompt.tripId,
+          promptId: prompt.promptId,
+          nativeDetectionId: prompt.reason?.nativeDetectionId,
           action: 'end',
           decidedAt: new Date().toISOString(),
           speedKmh: prompt.speedKmh,
           geo: prompt.geo,
         });
+      } else {
+        shouldCancel = false;
       }
-      await cancelNativeExpresswayEndPrompt(prompt.tripId);
-      return;
     }
-    if (event.actionId === ACTION_KEEP) {
-      await clearPendingExpresswayEndPrompt(prompt.tripId);
-      await setPendingExpresswayEndDecision({
-        tripId: prompt.tripId,
-        action: 'keep',
-        decidedAt: new Date().toISOString(),
-        speedKmh: prompt.speedKmh,
-        geo: prompt.geo,
-      });
-      await cancelNativeExpresswayEndPrompt(prompt.tripId);
-    }
-  });
+    if (shouldCancel) await cancelNativeExpresswayEndPrompt(prompt.tripId);
+    return true;
+  }
+  if (event.actionId === ACTION_KEEP) {
+    const cleared = await clearHandledPrompt(prompt);
+    if (!cleared) return true;
+    await setPendingExpresswayEndDecision({
+      tripId: prompt.tripId,
+      promptId: prompt.promptId,
+      nativeDetectionId: prompt.reason?.nativeDetectionId,
+      action: 'keep',
+      decidedAt: new Date().toISOString(),
+      speedKmh: prompt.speedKmh,
+      geo: prompt.geo,
+    });
+    await cancelNativeExpresswayEndPrompt(prompt.tripId);
+  }
+  return true;
 }
 
 export async function initNativeExpresswayPrompt() {
@@ -163,6 +213,7 @@ export async function showNativeExpresswayEndPrompt(prompt: PendingExpresswayEnd
         extra: {
           kind: EXTRA_KIND,
           tripId: prompt.tripId,
+          promptId: prompt.promptId ?? null,
           speedKmh: prompt.speedKmh,
           detectedAt: prompt.detectedAt,
           lat: prompt.geo.lat,

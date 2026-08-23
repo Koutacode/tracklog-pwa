@@ -11,11 +11,23 @@ import type {
   RoutePoint,
 } from '../domain/types';
 import {
-  buildBreakToRestTransition,
+  AUTO_REST_REASON_BREAK_THRESHOLD,
   computeTotals,
+  getOpenBreakToRestThresholdTs,
   isRestStartOdoCheckpoint,
   type BreakToRestTransition,
 } from '../domain/metrics';
+import {
+  attachBreakToRestOdometer,
+  canCloseDueBreakAfterConfirmation,
+  createStoredBreakToRestConfirmation,
+  findDueBreakToRestCandidate,
+  normalizeOptionalRestStartOdometer,
+  parseStoredBreakToRestConfirmation,
+  serializeStoredBreakToRestConfirmation,
+  type BreakToRestCandidate,
+  type BreakToRestConfirmationStatus,
+} from '../domain/breakToRestConfirmation';
 import { parseJsonInput } from '../domain/jsonInput';
 import {
   normalizeRoutePointAccuracy,
@@ -33,14 +45,18 @@ import {
 } from '../domain/togglePairing';
 import { reverseGeocode } from '../services/geo';
 import { resolveNearestIC } from '../services/icResolver';
+import { notifyTrackLogEventsChanged } from '../services/localEventsChanged';
 import {
+  canApplyIcResolutionResult,
   canRetryIcResolve as canRetryIcResolveExtras,
+  captureIcResolutionEventVersion,
   computeIcResolveBackoffMs,
   getIcResolveAlgorithmVersion as getIcResolveAlgorithmVersionFromExtras,
   getIcResolveRetryCount as getIcResolveRetryCountFromExtras,
   IC_RESOLVE_ALGORITHM_VERSION,
   IC_RESOLVE_RETRY_LIMIT,
   isStaleIcResolveAlgorithm as isStaleIcResolveAlgorithmExtras,
+  type IcResolutionEventVersion,
 } from '../services/expresswayIcRetryPolicy';
 
 /*
@@ -91,6 +107,8 @@ const META_ROUTE_TRACKING_ENABLED = 'routeTrackingEnabled';
 const META_ROUTE_TRACKING_MODE = 'routeTrackingMode';
 const META_PENDING_EXPRESSWAY_END_PROMPT = 'pendingExpresswayEndPrompt';
 const META_PENDING_EXPRESSWAY_END_DECISION = 'pendingExpresswayEndDecision';
+const META_NATIVE_EXPRESSWAY_GENERATION_PREFIX = 'nativeExpresswayGeneration:';
+const META_BREAK_TO_REST_CONFIRMATION_PREFIX = 'breakToRestConfirmation:';
 const META_REMOTE_ROUTE_POINTS_UPLOADED_THROUGH = 'remoteRoutePointsUploadedThrough';
 const EXPRESSWAY_EVENT_TYPES = ['expressway', 'expressway_start', 'expressway_end'] as const;
 const REPORT_MIN_DURATION_MINUTES = 15;
@@ -105,6 +123,7 @@ export type AutoExpresswayConfig = {
 
 export type PendingExpresswayEndPrompt = {
   tripId: string;
+  promptId?: string;
   speedKmh: number;
   detectedAt: string;
   geo: Geo;
@@ -113,14 +132,75 @@ export type PendingExpresswayEndPrompt = {
 
 export type PendingExpresswayEndDecision = {
   tripId: string;
+  nativeDetectionId?: string;
+  promptId?: string;
   action: 'end' | 'keep';
   decidedAt: string;
   speedKmh?: number;
   geo?: Geo;
 };
 
+export type BreakToRestConfirmationState = {
+  tripId: string;
+  breakStartId: string;
+  breakStartTs: string;
+  thresholdTs: string;
+  status: BreakToRestConfirmationStatus;
+};
+
+export type BreakToRestPromptState = Omit<BreakToRestConfirmationState, 'status'> & {
+  decision: Exclude<BreakToRestConfirmationStatus, 'declined'>;
+};
+
+function breakToRestConfirmationTripPrefix(tripId: string): string {
+  return `${META_BREAK_TO_REST_CONFIRMATION_PREFIX}${encodeURIComponent(tripId)}:`;
+}
+
+function breakToRestConfirmationKey(tripId: string, breakStartId: string): string {
+  return `${breakToRestConfirmationTripPrefix(tripId)}${encodeURIComponent(breakStartId)}`;
+}
+
+function publicBreakToRestConfirmationState(
+  candidate: BreakToRestCandidate,
+  status: BreakToRestConfirmationStatus,
+): BreakToRestConfirmationState {
+  return {
+    tripId: candidate.tripId,
+    breakStartId: candidate.breakStartId,
+    breakStartTs: candidate.breakStartTs,
+    thresholdTs: candidate.thresholdTs,
+    status,
+  };
+}
+
+async function clearBreakToRestConfirmationsForTripTx(tripId: string): Promise<void> {
+  await db.meta.where('key').startsWith(breakToRestConfirmationTripPrefix(tripId)).delete();
+}
+
+async function assertDueBreakCanCloseTx(
+  events: readonly AppEvent[],
+  tripId: string,
+  evaluatedAt: string,
+): Promise<void> {
+  const candidate = findDueBreakToRestCandidate(events, evaluatedAt);
+  if (!candidate) return;
+  const stored = parseStoredBreakToRestConfirmation(
+    (await db.meta.get(breakToRestConfirmationKey(tripId, candidate.breakStartId)))?.value ?? null,
+    candidate,
+  );
+  if (canCloseDueBreakAfterConfirmation(stored?.status ?? null)) return;
+  if (stored?.status === 'approved') {
+    throw new Error('休息開始ODOの入力を完了してください');
+  }
+  throw new Error('休息への変更確認で「はい」か「いいえ」を選択してください');
+}
+
 export type AutoExpresswayDecisionReason = {
   source: 'native-auto';
+  nativeDetectionId?: string;
+  nativeGeneration?: number;
+  monotonicSessionId?: string;
+  elapsedRealtimeMs?: number;
   action: 'start' | 'end-prompt';
   evaluatedAt: string;
   speedKmh: number;
@@ -146,6 +226,12 @@ export type AutoExpresswayDecisionReason = {
   };
 };
 
+function normalizeNativeDetectionId(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.trim();
+  return normalized && normalized.length <= 160 ? normalized : undefined;
+}
+
 function normalizeAutoExpresswayDecisionReason(raw: unknown): AutoExpresswayDecisionReason | undefined {
   if (!raw || typeof raw !== 'object') return undefined;
   const row = raw as Record<string, unknown>;
@@ -153,6 +239,10 @@ function normalizeAutoExpresswayDecisionReason(raw: unknown): AutoExpresswayDeci
   const action = row.action === 'start' || row.action === 'end-prompt' ? row.action : null;
   const evaluatedAt = typeof row.evaluatedAt === 'string' ? row.evaluatedAt : '';
   const speedKmh = Number(row.speedKmh);
+  const nativeDetectionId = normalizeNativeDetectionId(row.nativeDetectionId);
+  const nativeGeneration = Number(row.nativeGeneration);
+  const monotonicSessionId = normalizeNativeDetectionId(row.monotonicSessionId);
+  const elapsedRealtimeMs = Number(row.elapsedRealtimeMs);
   if (!source || !action || !evaluatedAt || !Number.isFinite(speedKmh)) return undefined;
 
   const configRaw = (row.config ?? null) as Record<string, unknown> | null;
@@ -197,6 +287,14 @@ function normalizeAutoExpresswayDecisionReason(raw: unknown): AutoExpresswayDeci
 
   return {
     source,
+    ...(nativeDetectionId ? { nativeDetectionId } : {}),
+    ...(Number.isSafeInteger(nativeGeneration) && nativeGeneration >= 1
+      ? { nativeGeneration }
+      : {}),
+    ...(monotonicSessionId ? { monotonicSessionId } : {}),
+    ...(Number.isFinite(elapsedRealtimeMs) && elapsedRealtimeMs >= 0
+      ? { elapsedRealtimeMs }
+      : {}),
     action,
     evaluatedAt,
     speedKmh: Math.max(0, Math.min(200, Math.round(speedKmh))),
@@ -250,9 +348,11 @@ function normalizePendingExpresswayEndPrompt(raw: unknown): PendingExpresswayEnd
   const lng = Number(geoRaw.lng);
   const accuracy = Number(geoRaw.accuracy);
   const reason = normalizeAutoExpresswayDecisionReason(row.reason);
+  const promptId = normalizeNativeDetectionId(row.promptId);
   if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
   return {
     tripId,
+    ...(promptId ? { promptId } : {}),
     speedKmh: Math.max(0, Math.min(200, Math.round(speedRaw))),
     detectedAt,
     geo: {
@@ -272,6 +372,8 @@ function normalizePendingExpresswayEndDecision(raw: unknown): PendingExpresswayE
   const decidedAt = typeof row.decidedAt === 'string' ? row.decidedAt : '';
   if (!tripId || !action || !decidedAt) return null;
   const speedRaw = Number(row.speedKmh);
+  const nativeDetectionId = normalizeNativeDetectionId(row.nativeDetectionId);
+  const promptId = normalizeNativeDetectionId(row.promptId);
   const geoRaw = (row.geo ?? null) as Record<string, unknown> | null;
   let geo: Geo | undefined;
   if (geoRaw) {
@@ -288,6 +390,8 @@ function normalizePendingExpresswayEndDecision(raw: unknown): PendingExpresswayE
   }
   return {
     tripId,
+    ...(nativeDetectionId ? { nativeDetectionId } : {}),
+    ...(promptId ? { promptId } : {}),
     action,
     decidedAt,
     ...(Number.isFinite(speedRaw) ? { speedKmh: Math.max(0, Math.min(200, Math.round(speedRaw))) } : {}),
@@ -382,6 +486,15 @@ export async function setPendingExpresswayEndPrompt(prompt: PendingExpresswayEnd
   if (!normalized) {
     throw new Error('高速終了確認データが不正です');
   }
+  const current = await getPendingExpresswayEndPrompt();
+  const currentDetectionId = current?.reason?.nativeDetectionId;
+  const nextDetectionId = normalized.reason?.nativeDetectionId;
+  if (
+    (currentDetectionId && currentDetectionId === nextDetectionId)
+    || (current?.promptId && current.promptId === normalized.promptId)
+  ) {
+    return;
+  }
   await setMeta(META_PENDING_EXPRESSWAY_END_PROMPT, JSON.stringify(normalized));
 }
 
@@ -394,6 +507,35 @@ export async function clearPendingExpresswayEndPrompt(tripId?: string): Promise<
   if (current?.tripId === tripId) {
     await setMeta(META_PENDING_EXPRESSWAY_END_PROMPT, null);
   }
+}
+
+export async function clearPendingExpresswayEndPromptIfMatches(expected: {
+  tripId: string;
+  promptId?: string;
+  nativeDetectionId?: string;
+}): Promise<boolean> {
+  const promptId = normalizeNativeDetectionId(expected.promptId);
+  const nativeDetectionId = normalizeNativeDetectionId(expected.nativeDetectionId);
+  if (!promptId && !nativeDetectionId) return false;
+  return db.transaction('rw', db.meta, async () => {
+    const raw = (await db.meta.get(META_PENDING_EXPRESSWAY_END_PROMPT))?.value ?? null;
+    if (!raw) return false;
+    let current: PendingExpresswayEndPrompt | null = null;
+    try {
+      current = normalizePendingExpresswayEndPrompt(JSON.parse(raw) as unknown);
+    } catch {
+      return false;
+    }
+    if (
+      current?.tripId !== expected.tripId
+      || (promptId && current.promptId !== promptId)
+      || (nativeDetectionId && current.reason?.nativeDetectionId !== nativeDetectionId)
+    ) {
+      return false;
+    }
+    await db.meta.delete(META_PENDING_EXPRESSWAY_END_PROMPT);
+    return true;
+  });
 }
 
 export async function getPendingExpresswayEndDecision(): Promise<PendingExpresswayEndDecision | null> {
@@ -409,6 +551,14 @@ export async function getPendingExpresswayEndDecision(): Promise<PendingExpressw
 export async function setPendingExpresswayEndDecision(decision: PendingExpresswayEndDecision): Promise<void> {
   const normalized = normalizePendingExpresswayEndDecision(decision);
   if (!normalized) throw new Error('高速終了アクションが不正です');
+  const current = await getPendingExpresswayEndDecision();
+  if (
+    (current?.nativeDetectionId
+      && current.nativeDetectionId === normalized.nativeDetectionId)
+    || (current?.promptId && current.promptId === normalized.promptId)
+  ) {
+    return;
+  }
   await setMeta(META_PENDING_EXPRESSWAY_END_DECISION, JSON.stringify(normalized));
 }
 
@@ -421,6 +571,49 @@ export async function clearPendingExpresswayEndDecision(tripId?: string): Promis
   if (current?.tripId === tripId) {
     await setMeta(META_PENDING_EXPRESSWAY_END_DECISION, null);
   }
+}
+
+export async function clearPendingExpresswayKeepDecision(tripId: string): Promise<boolean> {
+  return db.transaction('rw', db.meta, async () => {
+    const raw = (await db.meta.get(META_PENDING_EXPRESSWAY_END_DECISION))?.value ?? null;
+    if (!raw) return false;
+    let current: PendingExpresswayEndDecision | null = null;
+    try {
+      current = normalizePendingExpresswayEndDecision(JSON.parse(raw) as unknown);
+    } catch {
+      return false;
+    }
+    if (current?.tripId !== tripId || current.action !== 'keep') return false;
+    await db.meta.delete(META_PENDING_EXPRESSWAY_END_DECISION);
+    return true;
+  });
+}
+
+function nativeExpresswayGenerationKey(tripId: string) {
+  return `${META_NATIVE_EXPRESSWAY_GENERATION_PREFIX}${encodeURIComponent(tripId)}`;
+}
+
+export async function getNativeExpresswayGeneration(tripId: string): Promise<number> {
+  const value = Number(await getMeta(nativeExpresswayGenerationKey(tripId)));
+  return Number.isSafeInteger(value) && value >= 0 ? value : 0;
+}
+
+export async function advanceNativeExpresswayGeneration(
+  tripId: string,
+  generation: number,
+): Promise<number> {
+  const normalized = Math.max(0, Math.trunc(generation));
+  if (!Number.isSafeInteger(normalized)) throw new Error('高速判定世代が不正です');
+  const key = nativeExpresswayGenerationKey(tripId);
+  return db.transaction('rw', db.meta, async () => {
+    const currentValue = Number((await db.meta.get(key))?.value);
+    const current = Number.isSafeInteger(currentValue) && currentValue >= 0 ? currentValue : 0;
+    const next = Math.max(current, normalized);
+    if (next !== current) {
+      await db.meta.put({ key, value: String(next), updatedAt: nowIso() });
+    }
+    return next;
+  });
 }
 
 // Trip active handling
@@ -748,48 +941,48 @@ export async function updateExpresswayIcNameManual(eventId: string, icName: stri
   delete extras.icResolveError;
   await db.events.update(eventId, { extras, syncStatus: 'pending' });
   notifyRemoteMutation('expressway-ic-manual');
+  notifyTrackLogEventsChanged();
 }
 
 export async function refreshExpresswayIcFromGeo(eventId: string): Promise<{ icName: string; distanceM: number }> {
   const ev = await db.events.get(eventId);
   if (!ev) throw new Error('イベントが見つかりません');
   assertExpresswayEvent(ev);
+  const expectedVersion = captureIcResolutionEventVersion(ev);
+  const preserveExistingManual = expectedVersion.resolvedManually;
   const geo = (ev as any).geo as Geo | undefined;
   if (!geo) {
-    await markExpresswayResolveFailure({
-      eventId,
-      errorMessage: '位置情報が未保存のためIC解決不可',
-      nextRetryAt: null,
-    });
+    if (!preserveExistingManual) {
+      await markExpresswayResolveFailure({
+        eventId,
+        errorMessage: '位置情報が未保存のためIC解決不可',
+        nextRetryAt: null,
+        guard: { expectedVersion, allowExistingManual: true },
+      });
+    }
     throw new Error('このイベントには位置情報が保存されていません');
   }
 
-  await updateExpresswayResolved({ eventId, status: 'pending' });
   const result = await resolveNearestIC(geo.lat, geo.lng);
   if (!result) {
-    await markExpresswayResolveFailure({
-      eventId,
-      errorMessage: '近傍ICを取得できませんでした',
-      nextRetryAt: null,
-    });
+    if (!preserveExistingManual) {
+      await markExpresswayResolveFailure({
+        eventId,
+        errorMessage: '近傍ICを取得できませんでした',
+        nextRetryAt: null,
+        guard: { expectedVersion, allowExistingManual: true },
+      });
+    }
     throw new Error('近傍ICを取得できませんでした');
   }
-
-  const latest = await db.events.get(eventId);
-  if (!latest) throw new Error('イベントが見つかりません');
-  const extras = { ...(latest as any).extras };
-  extras.icName = result.icName;
-  extras.icDistanceM = result.distanceM;
-  extras.icResolveStatus = 'resolved';
-  extras.icResolveAlgorithmVersion = IC_RESOLVE_ALGORITHM_VERSION;
-  extras.icResolveRetryCount = 0;
-  extras.icResolveLastAttemptAt = nowIso();
-  delete extras.icResolvedManually;
-  delete extras.icResolveManualUpdatedAt;
-  delete extras.icResolveNextRetryAt;
-  delete extras.icResolveError;
-  await db.events.update(eventId, { extras, syncStatus: 'pending' });
-  notifyRemoteMutation('expressway-ic-refresh');
+  await updateExpresswayResolved({
+    eventId,
+    status: 'resolved',
+    icName: result.icName,
+    icDistanceM: result.distanceM,
+    clearManualResolution: true,
+    guard: { expectedVersion, allowExistingManual: true },
+  });
   return result;
 }
 
@@ -979,6 +1172,7 @@ export async function endTrip(params: {
   address?: string;
   occurredAt?: string;
 }): Promise<{ event: TripEndEvent }> {
+  const occurredAt = resolveOccurredAt(params.occurredAt);
   let event: TripEndEvent | undefined;
   await db.transaction('rw', db.events, db.meta, db.routePoints, async () => {
     const activeTripId = await getActiveTripId();
@@ -987,6 +1181,7 @@ export async function endTrip(params: {
     }
     const events = await getTripEventsCached(params.tripId);
     assertTripOpen(events);
+    await assertDueBreakCanCloseTx(events, params.tripId, occurredAt);
     const start = events.find(e => e.type === 'trip_start') as TripStartEvent;
     const restStarts = (events.filter(e => e.type === 'rest_start') as RestStartEvent[])
       .filter(isRestStartOdoCheckpoint);
@@ -1009,7 +1204,7 @@ export async function endTrip(params: {
       id: uuid(),
       tripId: params.tripId,
       type: 'trip_end',
-      ts: resolveOccurredAt(params.occurredAt),
+      ts: occurredAt,
       geo: params.geo,
       address: params.address,
       syncStatus: 'pending',
@@ -1023,6 +1218,7 @@ export async function endTrip(params: {
     await clearActiveTripId();
     await clearPendingExpresswayEndPrompt(params.tripId);
     await clearPendingExpresswayEndDecision(params.tripId);
+    await clearBreakToRestConfirmationsForTripTx(params.tripId);
   });
   if (!event) throw new Error('運行終了イベントを保存できませんでした');
   notifyRemoteMutation('trip-end');
@@ -1044,11 +1240,9 @@ export async function startRest(params: {
     const events = await getTripEventsCached(params.tripId);
     assertTripOpen(events);
     assertCanStartBasicToggle(events, BASIC_TOGGLE_GROUPS[0]);
-    if (!Number.isFinite(params.odoKm) || params.odoKm <= 0) {
-      throw new Error('休息開始にはODOが必要です');
-    }
-    const lastOdo = findLatestOdoCheckpoint(events);
-    if (lastOdo != null && params.odoKm < lastOdo) {
+    const odoCheckpoint = normalizeOptionalRestStartOdometer(params.odoKm);
+    const lastOdo = odoCheckpoint != null ? findLatestOdoCheckpoint(events) : null;
+    if (odoCheckpoint != null && lastOdo != null && odoCheckpoint < lastOdo) {
       throw new Error('休息開始メーターが前回メーターより小さいため保存できません');
     }
     event = {
@@ -1061,7 +1255,7 @@ export async function startRest(params: {
       syncStatus: 'pending',
       extras: {
         restSessionId,
-        odoKm: params.odoKm,
+        ...(odoCheckpoint != null ? { odoKm: odoCheckpoint } : {}),
         reportMinDurationMinutes: REPORT_MIN_DURATION_MINUTES,
       },
     };
@@ -1303,33 +1497,206 @@ export async function startBreak(params: { tripId: string; geo?: Geo; address?: 
   return { breakSessionId: sessionId };
 }
 
-async function putBreakToRestTransitionTx(transition: BreakToRestTransition): Promise<void> {
-  await putEventWithRoutePointTx(transition.breakEnd);
-  await putEventWithRoutePointTx({
+async function putBreakToRestTransitionTx(transition: BreakToRestTransition): Promise<RestStartEvent> {
+  const restStart: RestStartEvent = {
     ...transition.restStart,
     extras: {
       ...transition.restStart.extras,
       reportMinDurationMinutes: REPORT_MIN_DURATION_MINUTES,
     },
-  });
+  };
+  await putEventWithRoutePointTx(transition.breakEnd);
+  await putEventWithRoutePointTx(restStart);
+  return restStart;
 }
 
+export async function getBreakToRestConfirmationState(params: {
+  tripId: string;
+  evaluatedAt?: string;
+}): Promise<BreakToRestConfirmationState | null> {
+  const evaluatedAt = resolveOccurredAt(params.evaluatedAt);
+  let state: BreakToRestConfirmationState | null = null;
+  await db.transaction('rw', db.events, db.meta, async () => {
+    const events = await getTripEventsCached(params.tripId);
+    const thresholdTs = getOpenBreakToRestThresholdTs(events);
+    if (!thresholdTs) return;
+    const thresholdMs = Date.parse(thresholdTs);
+    const evaluatedAtMs = Date.parse(evaluatedAt);
+    if (!Number.isFinite(thresholdMs) || !Number.isFinite(evaluatedAtMs)) return;
+
+    // A final answer belongs to the break-start identity, not to its editable
+    // timestamp. Rebuild the candidate at the current threshold so an existing
+    // declined/approved answer is still visible after a timeline edit, while a
+    // brand-new break remains silent until it actually reaches three hours.
+    const candidate = findDueBreakToRestCandidate(
+      events,
+      evaluatedAtMs < thresholdMs ? thresholdTs : evaluatedAt,
+    );
+    if (!candidate || candidate.tripId !== params.tripId) return;
+
+    const key = breakToRestConfirmationKey(params.tripId, candidate.breakStartId);
+    const raw = (await db.meta.get(key))?.value ?? null;
+    let stored = parseStoredBreakToRestConfirmation(raw, candidate);
+    if (!stored) {
+      if (evaluatedAtMs < thresholdMs) return;
+      stored = createStoredBreakToRestConfirmation({
+        candidate,
+        status: 'pending',
+        updatedAt: nowIso(),
+      });
+      await db.meta.put({
+        key,
+        value: serializeStoredBreakToRestConfirmation(stored),
+        updatedAt: stored.updatedAt,
+      });
+    }
+    state = publicBreakToRestConfirmationState(candidate, stored.status);
+  });
+  return state;
+}
+
+export async function getBreakToRestPromptState(params: {
+  tripId: string;
+  evaluatedAt?: string;
+}): Promise<BreakToRestPromptState | null> {
+  const evaluatedAt = resolveOccurredAt(params.evaluatedAt);
+  const state = await getBreakToRestConfirmationState({
+    tripId: params.tripId,
+    evaluatedAt,
+  });
+  if (!state || state.status === 'declined') return null;
+  if (Date.parse(evaluatedAt) < Date.parse(state.thresholdTs)) return null;
+  const { status, ...candidate } = state;
+  return { ...candidate, decision: status };
+}
+
+export async function setBreakToRestPromptDecision(params: {
+  tripId: string;
+  breakStartId: string;
+  decision: 'approved' | 'declined';
+  evaluatedAt?: string;
+}): Promise<BreakToRestConfirmationState> {
+  if (params.decision !== 'approved' && params.decision !== 'declined') {
+    throw new Error('休憩確認の回答が不正です');
+  }
+  const evaluatedAt = resolveOccurredAt(params.evaluatedAt);
+  let state: BreakToRestConfirmationState | undefined;
+  await db.transaction('rw', db.events, db.meta, async () => {
+    const events = await getTripEventsCached(params.tripId);
+    const candidate = findDueBreakToRestCandidate(events, evaluatedAt);
+    if (!candidate || candidate.breakStartId !== params.breakStartId) {
+      throw new Error('対象の休憩は確認待ちではありません');
+    }
+
+    const key = breakToRestConfirmationKey(params.tripId, params.breakStartId);
+    const raw = (await db.meta.get(key))?.value ?? null;
+    const stored = parseStoredBreakToRestConfirmation(raw, candidate);
+    if (stored && stored.status !== 'pending' && stored.status !== params.decision) {
+      throw new Error('この休憩の回答はすでに確定しています');
+    }
+
+    const updated = createStoredBreakToRestConfirmation({
+      candidate,
+      status: params.decision,
+      updatedAt: nowIso(),
+    });
+    await db.meta.put({
+      key,
+      value: serializeStoredBreakToRestConfirmation(updated),
+      updatedAt: updated.updatedAt,
+    });
+    state = publicBreakToRestConfirmationState(candidate, updated.status);
+  });
+  if (!state) throw new Error('休憩確認の回答を保存できませんでした');
+  return state;
+}
+
+function getPersistedBreakToRestTransition(
+  events: readonly AppEvent[],
+  tripId: string,
+  breakStartId: string,
+): { restStart: RestStartEvent | null; partial: boolean } {
+  const idBase = `auto-break-rest-${breakStartId}`;
+  const breakEnd = events.find(event => event.id === `${idBase}-0-break-end`);
+  const restStart = events.find(event => event.id === `${idBase}-1-rest-start`);
+  if (!breakEnd && !restStart) return { restStart: null, partial: false };
+  if (
+    !breakEnd
+    || !restStart
+    || breakEnd.tripId !== tripId
+    || restStart.tripId !== tripId
+    || breakEnd.type !== 'break_end'
+    || restStart.type !== 'rest_start'
+    || breakEnd.ts !== restStart.ts
+    || breakEnd.extras?.autoReason !== AUTO_REST_REASON_BREAK_THRESHOLD
+    || restStart.extras?.autoReason !== AUTO_REST_REASON_BREAK_THRESHOLD
+    || breakEnd.extras?.generatedFrom !== breakStartId
+    || restStart.extras?.generatedFrom !== breakStartId
+  ) {
+    return { restStart: null, partial: true };
+  }
+  return { restStart: restStart as RestStartEvent, partial: false };
+}
+
+export async function confirmBreakToRest(params: {
+  tripId: string;
+  breakStartId: string;
+  odoKm: number;
+  evaluatedAt?: string;
+}): Promise<{ transitioned: boolean; event: RestStartEvent }> {
+  if (!Number.isFinite(params.odoKm) || params.odoKm < 0) {
+    throw new Error('休息開始メーターが不正です');
+  }
+  const evaluatedAt = resolveOccurredAt(params.evaluatedAt);
+  let transitioned = false;
+  let event: RestStartEvent | undefined;
+  await db.transaction('rw', db.events, db.meta, db.routePoints, async () => {
+    const events = await getTripEventsCached(params.tripId);
+    const existing = getPersistedBreakToRestTransition(events, params.tripId, params.breakStartId);
+    if (existing.partial) throw new Error('休憩から休息への変換データが不完全です');
+    if (existing.restStart) {
+      event = existing.restStart;
+      return;
+    }
+
+    assertTripOpen(events);
+    const candidate = findDueBreakToRestCandidate(events, evaluatedAt);
+    if (!candidate || candidate.breakStartId !== params.breakStartId) {
+      throw new Error('対象の休憩は休息へ変更できません');
+    }
+    const key = breakToRestConfirmationKey(params.tripId, params.breakStartId);
+    const stored = parseStoredBreakToRestConfirmation(
+      (await db.meta.get(key))?.value ?? null,
+      candidate,
+    );
+    if (stored?.status !== 'approved') {
+      throw new Error('休息への変更が承認されていません');
+    }
+
+    if (params.odoKm > 0) {
+      const lastOdo = findLatestOdoCheckpoint(events);
+      if (lastOdo != null && params.odoKm < lastOdo) {
+        throw new Error('休息開始メーターが前回メーターより小さいため保存できません');
+      }
+    }
+
+    const transition = attachBreakToRestOdometer(candidate.transition, params.odoKm);
+    event = await putBreakToRestTransitionTx(transition);
+    await db.meta.delete(key);
+    transitioned = true;
+  });
+  if (!event) throw new Error('休憩から休息への変更を保存できませんでした');
+  if (transitioned) notifyRemoteMutation('event-break-confirmed-rest');
+  return { transitioned, event };
+}
+
+/** @deprecated Use the confirmation APIs; this never converts events. */
 export async function reconcileBreakToRestThreshold(params: {
   tripId: string;
   evaluatedAt?: string;
 }): Promise<boolean> {
-  const evaluatedAt = resolveOccurredAt(params.evaluatedAt);
-  let transitioned = false;
-  await db.transaction('rw', db.events, db.routePoints, async () => {
-    const events = await getTripEventsCached(params.tripId);
-    if (!events.some(event => event.type === 'trip_start')) return;
-    const transition = buildBreakToRestTransition(events, evaluatedAt);
-    if (!transition) return;
-    await putBreakToRestTransitionTx(transition);
-    transitioned = true;
-  });
-  if (transitioned) notifyRemoteMutation('event-break-auto-rest');
-  return transitioned;
+  await getBreakToRestConfirmationState(params);
+  return false;
 }
 
 export async function endBreak(params: {
@@ -1339,18 +1706,12 @@ export async function endBreak(params: {
   occurredAt?: string;
 }) {
   const occurredAt = resolveOccurredAt(params.occurredAt);
-  let transitioned = false;
   let event: AppEvent | undefined;
-  await db.transaction('rw', db.events, db.routePoints, async () => {
+  await db.transaction('rw', db.events, db.meta, db.routePoints, async () => {
     const events = await getTripEventsCached(params.tripId);
     assertTripOpen(events);
-    const transition = buildBreakToRestTransition(events, occurredAt);
-    if (transition) {
-      await putBreakToRestTransitionTx(transition);
-      transitioned = true;
-      return;
-    }
-
+    await assertDueBreakCanCloseTx(events, params.tripId, occurredAt);
+    const openStart = findOpenToggleStart(events, BASIC_TOGGLE_GROUPS[1]);
     const open = requireOpenToggle(events, BASIC_TOGGLE_GROUPS[1]);
     event = baseEvent({
       tripId: params.tripId,
@@ -1361,10 +1722,13 @@ export async function endBreak(params: {
       extras: open === LEGACY_TOGGLE_SESSION_ID ? undefined : { breakSessionId: open },
     });
     await putEventWithRoutePointTx(event);
+    if (openStart?.id) {
+      await db.meta.delete(breakToRestConfirmationKey(params.tripId, openStart.id));
+    }
   });
-  if (!transitioned && !event) throw new Error('休憩終了イベントを保存できませんでした');
-  notifyRemoteMutation(transitioned ? 'event-break-auto-rest' : 'event-break_end');
-  return { autoRestStarted: transitioned };
+  if (!event) throw new Error('休憩終了イベントを保存できませんでした');
+  notifyRemoteMutation('event-break_end');
+  return { autoRestStarted: false };
 }
 
 // Refuel (給油)
@@ -1402,12 +1766,6 @@ export async function addBoarding(
   await db.transaction('rw', db.events, db.routePoints, async () => {
     const events = await getTripEventsCached(params.tripId);
     assertTripOpen(events);
-
-    const breakTransition = buildBreakToRestTransition(events, occurredAt);
-    if (breakTransition) {
-      await putBreakToRestTransitionTx(breakTransition);
-      events.push(breakTransition.breakEnd, breakTransition.restStart);
-    }
 
     const openBreak = findOpenToggleSessionId(events, BASIC_TOGGLE_GROUPS[1]);
     const openLoad = findOpenToggleSessionId(events, BASIC_TOGGLE_GROUPS[2]);
@@ -1533,6 +1891,51 @@ export async function addPointMark(params: {
 }
 
 // Expressway (高速道路)
+export const STALE_NATIVE_EXPRESSWAY_DETECTION_ERROR = 'STALE_NATIVE_EXPRESSWAY_DETECTION';
+
+function eventNativeDetectionId(event: AppEvent): string | undefined {
+  const autoDecision = (event.extras as Record<string, unknown> | undefined)?.autoDecision;
+  if (!autoDecision || typeof autoDecision !== 'object') return undefined;
+  return normalizeNativeDetectionId((autoDecision as Record<string, unknown>).nativeDetectionId);
+}
+
+function latestExpresswayEventTs(events: readonly AppEvent[]): string | null {
+  let latest: string | null = null;
+  for (const event of events) {
+    if (!EXPRESSWAY_EVENT_TYPES.includes(event.type as (typeof EXPRESSWAY_EVENT_TYPES)[number])) continue;
+    if (!latest || event.ts > latest) latest = event.ts;
+  }
+  return latest;
+}
+
+function latestNativeExpresswayGeneration(events: readonly AppEvent[]): number | null {
+  let latest: number | null = null;
+  for (const event of events) {
+    if (!EXPRESSWAY_EVENT_TYPES.includes(event.type as (typeof EXPRESSWAY_EVENT_TYPES)[number])) continue;
+    const autoDecision = (event.extras as Record<string, unknown> | undefined)?.autoDecision;
+    if (!autoDecision || typeof autoDecision !== 'object') continue;
+    const generation = Number((autoDecision as Record<string, unknown>).nativeGeneration);
+    if (Number.isSafeInteger(generation) && generation >= 1 && (latest == null || generation > latest)) {
+      latest = generation;
+    }
+  }
+  return latest;
+}
+
+function latestUnversionedExpresswayEventTs(events: readonly AppEvent[]): string | null {
+  let latest: string | null = null;
+  for (const event of events) {
+    if (!EXPRESSWAY_EVENT_TYPES.includes(event.type as (typeof EXPRESSWAY_EVENT_TYPES)[number])) continue;
+    const autoDecision = (event.extras as Record<string, unknown> | undefined)?.autoDecision;
+    const generation = autoDecision && typeof autoDecision === 'object'
+      ? Number((autoDecision as Record<string, unknown>).nativeGeneration)
+      : Number.NaN;
+    if (Number.isSafeInteger(generation) && generation >= 1) continue;
+    if (!latest || event.ts > latest) latest = event.ts;
+  }
+  return latest;
+}
+
 export async function startExpressway(params: {
   tripId: string;
   geo?: Geo;
@@ -1540,8 +1943,11 @@ export async function startExpressway(params: {
   occurredAt?: string;
   autoDecision?: AutoExpresswayDecisionReason;
 }) {
-  const expresswaySessionId = uuid();
+  let expresswaySessionId = uuid();
+  let eventId = '';
+  let created = false;
   const autoDecision = normalizeAutoExpresswayDecisionReason(params.autoDecision);
+  const occurredAt = resolveOccurredAt(params.occurredAt);
   const e = baseEvent({
     tripId: params.tripId,
     type: 'expressway_start',
@@ -1558,15 +1964,46 @@ export async function startExpressway(params: {
   await db.transaction('rw', db.events, db.meta, db.routePoints, async () => {
     const events = await db.events.where('tripId').equals(params.tripId).toArray();
     events.sort((a, b) => a.ts.localeCompare(b.ts));
+    if (autoDecision?.nativeDetectionId) {
+      const existing = events.find(event => (
+        eventNativeDetectionId(event) === autoDecision.nativeDetectionId
+      ));
+      if (existing) {
+        if (existing.type === 'expressway_start') {
+          eventId = existing.id;
+          expresswaySessionId = typeof existing.extras?.expresswaySessionId === 'string'
+            ? existing.extras.expresswaySessionId
+            : LEGACY_TOGGLE_SESSION_ID;
+          return;
+        }
+        throw new Error(STALE_NATIVE_EXPRESSWAY_DETECTION_ERROR);
+      }
+      const latestGeneration = latestNativeExpresswayGeneration(events);
+      const latestTs = latestExpresswayEventTs(events);
+      const latestUnversionedTs = latestUnversionedExpresswayEventTs(events);
+      if (
+        (autoDecision.nativeGeneration != null
+          && latestGeneration != null
+          && autoDecision.nativeGeneration <= latestGeneration)
+        || (autoDecision.nativeGeneration != null
+          && latestUnversionedTs
+          && autoDecision.evaluatedAt <= latestUnversionedTs)
+        || (autoDecision.nativeGeneration == null && latestTs && e.ts <= latestTs)
+      ) {
+        throw new Error(STALE_NATIVE_EXPRESSWAY_DETECTION_ERROR);
+      }
+    }
     assertTripOpen(events);
     const open = findOpenToggleSessionId(events, EXPRESSWAY_TOGGLE_DEFINITION);
     if (open) throw new Error('高速道路が開始済みです（終了を押してください）');
     await putEventWithRoutePointTx(e);
     await clearPendingExpresswayEndPrompt(params.tripId);
     await clearPendingExpresswayEndDecision(params.tripId);
+    eventId = e.id;
+    created = true;
   });
-  notifyRemoteMutation('expressway-start');
-  return { expresswaySessionId, eventId: e.id };
+  if (created) notifyRemoteMutation('expressway-start');
+  return { expresswaySessionId, eventId, created };
 }
 
 export async function endExpressway(params: {
@@ -1577,10 +2014,38 @@ export async function endExpressway(params: {
   autoDecision?: AutoExpresswayDecisionReason;
 }) {
   let eventId = '';
+  let created = false;
   const autoDecision = normalizeAutoExpresswayDecisionReason(params.autoDecision);
+  const occurredAt = resolveOccurredAt(params.occurredAt);
   await db.transaction('rw', db.events, db.meta, db.routePoints, async () => {
     const events = await db.events.where('tripId').equals(params.tripId).toArray();
     events.sort((a, b) => a.ts.localeCompare(b.ts));
+    if (autoDecision?.nativeDetectionId) {
+      const existing = events.find(event => (
+        eventNativeDetectionId(event) === autoDecision.nativeDetectionId
+      ));
+      if (existing) {
+        if (existing.type === 'expressway_end') {
+          eventId = existing.id;
+          return;
+        }
+        throw new Error(STALE_NATIVE_EXPRESSWAY_DETECTION_ERROR);
+      }
+      const latestGeneration = latestNativeExpresswayGeneration(events);
+      const latestTs = latestExpresswayEventTs(events);
+      const latestUnversionedTs = latestUnversionedExpresswayEventTs(events);
+      if (
+        (autoDecision.nativeGeneration != null
+          && latestGeneration != null
+          && autoDecision.nativeGeneration <= latestGeneration)
+        || (autoDecision.nativeGeneration != null
+          && latestUnversionedTs
+          && autoDecision.evaluatedAt <= latestUnversionedTs)
+        || (autoDecision.nativeGeneration == null && latestTs && occurredAt <= latestTs)
+      ) {
+        throw new Error(STALE_NATIVE_EXPRESSWAY_DETECTION_ERROR);
+      }
+    }
     assertTripOpen(events);
     const open = findOpenToggleSessionId(events, EXPRESSWAY_TOGGLE_DEFINITION);
     if (!open) throw new Error('高速道路が開始されていません');
@@ -1589,7 +2054,7 @@ export async function endExpressway(params: {
       type: 'expressway_end',
       geo: params.geo,
       address: params.address,
-      occurredAt: params.occurredAt,
+      occurredAt,
       extras:
         open === LEGACY_TOGGLE_SESSION_ID
           ? {
@@ -1608,9 +2073,10 @@ export async function endExpressway(params: {
     await clearPendingExpresswayEndPrompt(params.tripId);
     await clearPendingExpresswayEndDecision(params.tripId);
     eventId = e.id;
+    created = true;
   });
-  notifyRemoteMutation('expressway-end');
-  return { eventId };
+  if (created) notifyRemoteMutation('expressway-end');
+  return { eventId, created };
 }
 
 export async function getPendingExpresswayEvents(
@@ -1642,40 +2108,45 @@ export async function backfillPendingExpresswayIcs(limit = 8): Promise<boolean> 
     let updatedAny = false;
 
     for (const ev of candidates) {
+      const guard = { expectedVersion: captureIcResolutionEventVersion(ev) };
       const geo = (ev as any).geo as Geo | undefined;
       if (!geo) {
-        await markExpresswayResolveFailure({
+        const failure = await markExpresswayResolveFailure({
           eventId: ev.id,
           errorMessage: '位置情報が未保存のためIC解決不可',
           nextRetryAt: null,
+          guard,
         });
-        updatedAny = true;
+        updatedAny = failure.applied || updatedAny;
         continue;
       }
 
       try {
         const result = await resolveNearestIC(geo.lat, geo.lng);
         if (result) {
-          await updateExpresswayResolved({
+          const applied = await updateExpresswayResolved({
             eventId: ev.id,
             status: 'resolved',
             icName: result.icName,
             icDistanceM: result.distanceM,
+            guard,
           });
-          updatedAny = true;
+          updatedAny = applied || updatedAny;
         } else {
-          await markExpresswayResolveFailure({
+          const failure = await markExpresswayResolveFailure({
             eventId: ev.id,
             errorMessage: '近傍ICを取得できませんでした',
+            guard,
           });
-          updatedAny = true;
+          updatedAny = failure.applied || updatedAny;
         }
       } catch (error: any) {
-        await markExpresswayResolveFailure({
+        const failure = await markExpresswayResolveFailure({
           eventId: ev.id,
           errorMessage: error?.message ?? 'IC解決に失敗しました',
+          guard,
         });
-        updatedAny = true;
+        updatedAny = failure.applied || updatedAny;
       }
     }
 
@@ -1689,6 +2160,12 @@ export async function backfillPendingExpresswayIcs(limit = 8): Promise<boolean> 
   }
 }
 
+export type ExpresswayIcResolutionWriteGuard = {
+  expectedVersion: IcResolutionEventVersion;
+  /** Explicit user-requested network refresh may replace the unchanged manual value it started from. */
+  allowExistingManual?: boolean;
+};
+
 export async function updateExpresswayResolved(params: {
   eventId: string;
   status: 'resolved' | 'failed' | 'pending';
@@ -1696,25 +2173,123 @@ export async function updateExpresswayResolved(params: {
   icDistanceM?: number;
   nextRetryAt?: string | null;
   errorMessage?: string;
+  retryCount?: number;
+  clearManualResolution?: boolean;
+  guard?: ExpresswayIcResolutionWriteGuard;
 }) {
-  const ev = await db.events.get(params.eventId);
-  if (!ev) return;
-  const extras = { ...(ev as any).extras };
-  extras.icResolveStatus = params.status;
-  extras.icResolveAlgorithmVersion = IC_RESOLVE_ALGORITHM_VERSION;
-  if (params.status === 'resolved') {
-    if (params.icName) extras.icName = params.icName;
-    if (params.icDistanceM != null) extras.icDistanceM = params.icDistanceM;
-    extras.icResolveRetryCount = 0;
-    delete extras.icResolveNextRetryAt;
-    delete extras.icResolveLastAttemptAt;
-    delete extras.icResolveError;
+  let applied = false;
+  await db.transaction('rw', db.events, async () => {
+    const ev = await db.events.get(params.eventId);
+    if (!ev) return;
+    if (
+      params.guard
+      && !canApplyIcResolutionResult(
+        params.guard.expectedVersion,
+        ev,
+        {
+          // A user-requested refresh may replace an unchanged manual value
+          // only with a successful resolution. Pending/failed states never
+          // downgrade the driver's confirmed IC name.
+          allowExistingManual:
+            params.status === 'resolved' && params.guard.allowExistingManual === true,
+        },
+      )
+    ) {
+      return;
+    }
+    const extras = { ...(ev as any).extras };
+    extras.icResolveStatus = params.status;
+    extras.icResolveAlgorithmVersion = IC_RESOLVE_ALGORITHM_VERSION;
+    if (params.status === 'resolved') {
+      if (params.icName) extras.icName = params.icName;
+      if (params.icDistanceM != null) extras.icDistanceM = params.icDistanceM;
+      extras.icResolveRetryCount = 0;
+      delete extras.icResolveNextRetryAt;
+      delete extras.icResolveLastAttemptAt;
+      delete extras.icResolveError;
+      if (params.clearManualResolution) {
+        delete extras.icResolvedManually;
+        delete extras.icResolveManualUpdatedAt;
+      }
+    }
+    if (params.status === 'pending') {
+      if (Number.isFinite(params.retryCount)) {
+        extras.icResolveRetryCount = Math.max(0, Math.floor(params.retryCount ?? 0));
+      } else if (extras.icResolveRetryCount == null) {
+        extras.icResolveRetryCount = 0;
+      }
+      extras.icResolveLastAttemptAt = new Date().toISOString();
+      if (params.nextRetryAt) {
+        extras.icResolveNextRetryAt = params.nextRetryAt;
+      } else {
+        delete extras.icResolveNextRetryAt;
+      }
+      const message = params.errorMessage?.trim();
+      if (message) {
+        extras.icResolveError = message.slice(0, 180);
+      } else {
+        delete extras.icResolveError;
+      }
+    }
+    await db.events.update(params.eventId, { extras, syncStatus: 'pending' });
+    applied = true;
+  });
+  if (applied) {
+    notifyRemoteMutation('expressway-resolved');
+    notifyTrackLogEventsChanged();
   }
-  if (params.status === 'pending') {
-    if (extras.icResolveRetryCount == null) extras.icResolveRetryCount = 0;
-    extras.icResolveLastAttemptAt = new Date().toISOString();
-    if (params.nextRetryAt) {
-      extras.icResolveNextRetryAt = params.nextRetryAt;
+  return applied;
+}
+
+export async function markExpresswayResolveFailure(params: {
+  eventId: string;
+  errorMessage?: string;
+  nextRetryAt?: string | null;
+  guard?: ExpresswayIcResolutionWriteGuard;
+}) {
+  let result = {
+    retryCount: 0,
+    exhausted: true,
+    nextRetryAt: null as string | null,
+    applied: false,
+  };
+  await db.transaction('rw', db.events, async () => {
+    const ev = await db.events.get(params.eventId);
+    if (!ev) return;
+    if (
+      params.guard
+      && !canApplyIcResolutionResult(
+        params.guard.expectedVersion,
+        ev,
+        { allowExistingManual: false },
+      )
+    ) {
+      return;
+    }
+    const previousAlgorithmVersion = getIcResolveAlgorithmVersion(ev);
+    const previousResolveStatus = (ev as any).extras?.icResolveStatus;
+    const previousRetryCount =
+      previousAlgorithmVersion < IC_RESOLVE_ALGORITHM_VERSION || previousResolveStatus !== 'failed'
+        ? 0
+        : getIcResolveRetryCount(ev);
+    const retryCount = previousRetryCount + 1;
+    const exhausted = retryCount >= IC_RESOLVE_RETRY_LIMIT;
+    const nowMs = Date.now();
+    const hasExplicitNextRetryAt = Object.prototype.hasOwnProperty.call(params, 'nextRetryAt');
+    const nextRetryAt =
+      exhausted
+        ? null
+        : hasExplicitNextRetryAt
+          ? params.nextRetryAt ?? null
+          : new Date(nowMs + computeIcResolveBackoffMs(retryCount)).toISOString();
+
+    const extras = { ...(ev as any).extras };
+    extras.icResolveStatus = 'failed';
+    extras.icResolveAlgorithmVersion = IC_RESOLVE_ALGORITHM_VERSION;
+    extras.icResolveRetryCount = retryCount;
+    extras.icResolveLastAttemptAt = new Date(nowMs).toISOString();
+    if (nextRetryAt) {
+      extras.icResolveNextRetryAt = nextRetryAt;
     } else {
       delete extras.icResolveNextRetryAt;
     }
@@ -1724,51 +2299,14 @@ export async function updateExpresswayResolved(params: {
     } else {
       delete extras.icResolveError;
     }
+    await db.events.update(params.eventId, { extras, syncStatus: 'pending' });
+    result = { retryCount, exhausted, nextRetryAt, applied: true };
+  });
+  if (result.applied) {
+    notifyRemoteMutation('expressway-resolve-failure');
+    notifyTrackLogEventsChanged();
   }
-  await db.events.update(params.eventId, { extras, syncStatus: 'pending' });
-  notifyRemoteMutation('expressway-resolved');
-}
-
-export async function markExpresswayResolveFailure(params: {
-  eventId: string;
-  errorMessage?: string;
-  nextRetryAt?: string | null;
-}) {
-  const ev = await db.events.get(params.eventId);
-  if (!ev) {
-    return { retryCount: 0, exhausted: true, nextRetryAt: null as string | null };
-  }
-  const previousAlgorithmVersion = getIcResolveAlgorithmVersion(ev);
-  const previousRetryCount =
-    previousAlgorithmVersion < IC_RESOLVE_ALGORITHM_VERSION ? 0 : getIcResolveRetryCount(ev);
-  const retryCount = previousRetryCount + 1;
-  const exhausted = retryCount >= IC_RESOLVE_RETRY_LIMIT;
-  const nowMs = Date.now();
-  const nextRetryAt =
-    exhausted
-      ? null
-      : params.nextRetryAt ??
-        new Date(nowMs + computeIcResolveBackoffMs(retryCount)).toISOString();
-
-  const extras = { ...(ev as any).extras };
-  extras.icResolveStatus = 'failed';
-  extras.icResolveAlgorithmVersion = IC_RESOLVE_ALGORITHM_VERSION;
-  extras.icResolveRetryCount = retryCount;
-  extras.icResolveLastAttemptAt = new Date(nowMs).toISOString();
-  if (nextRetryAt) {
-    extras.icResolveNextRetryAt = nextRetryAt;
-  } else {
-    delete extras.icResolveNextRetryAt;
-  }
-  const message = params.errorMessage?.trim();
-  if (message) {
-    extras.icResolveError = message.slice(0, 180);
-  } else {
-    delete extras.icResolveError;
-  }
-  await db.events.update(params.eventId, { extras, syncStatus: 'pending' });
-  notifyRemoteMutation('expressway-resolve-failure');
-  return { retryCount, exhausted, nextRetryAt };
+  return result;
 }
 
 // Trip summary
@@ -1853,6 +2391,7 @@ export async function deleteTrip(tripId: string): Promise<void> {
     await db.events.where('tripId').equals(tripId).delete();
     await db.routePoints.where('tripId').equals(tripId).delete();
     await db.reportTrips.delete(tripId);
+    await clearBreakToRestConfirmationsForTripTx(tripId);
     await clearPendingExpresswayEndPrompt(tripId);
     await clearPendingExpresswayEndDecision(tripId);
     const active = await db.meta.get(META_ACTIVE_TRIP_ID);

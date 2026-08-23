@@ -78,6 +78,11 @@
             </intent-filter>
         </receiver>
 
+        <receiver
+            android:name=".ResidentExpresswayNotificationReceiver"
+            android:enabled="true"
+            android:exported="false" />
+
         <service
             android:name="com.equimaps.capacitor_background_geolocation.BackgroundGeolocationService"
             android:exported="false"

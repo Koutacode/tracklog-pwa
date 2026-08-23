@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { Capacitor } from '@capacitor/core';
 import {
   getActiveTripId,
   getEventsByTripId,
@@ -20,7 +21,6 @@ import {
   endExpressway as dbEndExpressway,
   backfillMissingAddresses,
   clearPendingExpresswayEndDecision,
-  reconcileBreakToRestThreshold,
 } from '../db/repositories';
 import { getGeoWithAddress } from '../services/geo';
 import {
@@ -30,6 +30,8 @@ import {
 import { cancelNativeExpresswayEndPrompt } from '../services/nativeExpresswayPrompt';
 import type { AppEvent } from '../domain/types';
 import { requestRouteTrackingSync } from '../app/routeTrackingSignal';
+import { prepareNativeExpresswayEventsForTripEnd } from '../services/nativeExpresswayEventHandoff';
+import { commitRouteTransitionWithNativeFastApply } from '../services/nativeTrackingFastApply';
 
 export type TripOperation =
   | 'trip-start'
@@ -90,8 +92,6 @@ export function useTripManager() {
     try {
       const active = await getActiveTripId();
       if (active) {
-        const transitioned = await reconcileBreakToRestThreshold({ tripId: active });
-        if (transitioned) requestRouteTrackingSync();
         const ev = await getEventsByTripId(active);
         setTripId(active);
         setEvents(ev);
@@ -131,7 +131,9 @@ export function useTripManager() {
     return runOperation('trip-start', async () => {
       const occurredAt = new Date().toISOString();
       const { geo, address } = await captureGeoOnce();
-      const { tripId: newTripId } = await dbStartTrip({ odoKm, geo, address, occurredAt });
+      const { tripId: newTripId } = await commitRouteTransitionWithNativeFastApply(
+        () => dbStartTrip({ odoKm, geo, address, occurredAt }),
+      );
       setTripId(newTripId);
       requestRouteTrackingSync();
       await refresh();
@@ -144,7 +146,13 @@ export function useTripManager() {
     return runOperation('trip-end', async () => {
       const occurredAt = new Date().toISOString();
       const { geo, address } = await captureGeoOnce();
-      const { event } = await dbEndTrip({ tripId, odoEndKm, geo, address, occurredAt });
+      await prepareNativeExpresswayEventsForTripEnd({
+        enabled: Capacitor.isNativePlatform() && Capacitor.getPlatform() === 'android',
+        tripId,
+      });
+      const { event } = await commitRouteTransitionWithNativeFastApply(
+        () => dbEndTrip({ tripId, odoEndKm, geo, address, occurredAt }),
+      );
       requestRouteTrackingSync();
       await refresh();
       return event;
@@ -156,7 +164,9 @@ export function useTripManager() {
     return runOperation('rest-start', async () => {
       const occurredAt = new Date().toISOString();
       const { geo, address } = await captureGeoOnce();
-      const result = await dbStartRest({ tripId, odoKm, geo, address, occurredAt });
+      const result = await commitRouteTransitionWithNativeFastApply(
+        () => dbStartRest({ tripId, odoKm, geo, address, occurredAt }),
+      );
       requestRouteTrackingSync();
       await refresh();
       return result;
@@ -168,7 +178,9 @@ export function useTripManager() {
     return runOperation('rest-end', async () => {
       const occurredAt = new Date().toISOString();
       const { geo, address } = await captureGeoOnce();
-      const result = await dbEndRest({ tripId, restSessionId, dayClose: false, geo, address, occurredAt });
+      const result = await commitRouteTransitionWithNativeFastApply(
+        () => dbEndRest({ tripId, restSessionId, dayClose: false, geo, address, occurredAt }),
+      );
       requestRouteTrackingSync();
       await refresh();
       return result;
@@ -193,15 +205,25 @@ export function useTripManager() {
           ? await dbStartUnload({ tripId, geo, address, occurredAt })
           : await dbEndUnload({ tripId, geo, address, occurredAt });
       } else if (type === 'break') {
-        action === 'start'
-          ? await dbStartBreak({ tripId, geo, address, occurredAt })
-          : await dbEndBreak({ tripId, geo, address, occurredAt });
+        if (action === 'start') {
+          await commitRouteTransitionWithNativeFastApply(
+            () => dbStartBreak({ tripId, geo, address, occurredAt }),
+          );
+        } else {
+          await commitRouteTransitionWithNativeFastApply(
+            () => dbEndBreak({ tripId, geo, address, occurredAt }),
+          );
+        }
       } else if (type === 'expressway') {
         if (action === 'start') {
-          const { eventId } = await dbStartExpressway({ tripId, geo, address, occurredAt });
+          const { eventId } = await commitRouteTransitionWithNativeFastApply(
+            () => dbStartExpressway({ tripId, geo, address, occurredAt }),
+          );
           enqueueExpresswayIcResolution({ eventId, geo });
         } else {
-          const { eventId } = await dbEndExpressway({ tripId, geo, address, occurredAt });
+          const { eventId } = await commitRouteTransitionWithNativeFastApply(
+            () => dbEndExpressway({ tripId, geo, address, occurredAt }),
+          );
           enqueueExpresswayIcResolution({ eventId, geo });
         }
         await cancelNativeExpresswayEndPrompt(tripId);
@@ -230,9 +252,13 @@ export function useTripManager() {
       const occurredAt = new Date().toISOString();
       const { geo, address } = await captureGeoOnce();
       if (action === 'boarding') {
-        await dbAddBoarding({ tripId, geo, address, occurredAt });
+        await commitRouteTransitionWithNativeFastApply(
+          () => dbAddBoarding({ tripId, geo, address, occurredAt }),
+        );
       } else {
-        await dbAddDisembark({ tripId, geo, address, occurredAt });
+        await commitRouteTransitionWithNativeFastApply(
+          () => dbAddDisembark({ tripId, geo, address, occurredAt }),
+        );
       }
       requestRouteTrackingSync();
       await refresh();
@@ -253,9 +279,57 @@ export function useTripManager() {
 
   // Lifecycle
   useEffect(() => {
-    refresh();
-    captureGeoOnce();
+    void refresh();
+    let disposed = false;
+    let permissionStatus: PermissionStatus | null = null;
+    const captureIfAlreadyAllowed = async () => {
+      if (Capacitor.isNativePlatform()) {
+        if (!disposed) void captureGeoOnce();
+        return;
+      }
+      // Do not turn every Home mount into another browser permission prompt.
+      // The resident watcher or an explicit user operation owns the initial
+      // request; once that request is granted, refresh the Home address without
+      // prompting again.
+      if (!navigator.permissions?.query) return;
+      try {
+        permissionStatus = await navigator.permissions.query({ name: 'geolocation' as PermissionName });
+        const onPermissionChange = () => {
+          if (!disposed && permissionStatus?.state === 'granted') void captureGeoOnce();
+        };
+        permissionStatus.addEventListener('change', onPermissionChange);
+        if (permissionStatus.state === 'granted') void captureGeoOnce();
+        return () => permissionStatus?.removeEventListener('change', onPermissionChange);
+      } catch {
+        // Unsupported permission queries must not fall back to a surprise prompt.
+      }
+      return undefined;
+    };
+    let removePermissionListener: (() => void) | undefined;
+    void captureIfAlreadyAllowed().then(remove => {
+      if (disposed) {
+        remove?.();
+      } else {
+        removePermissionListener = remove;
+      }
+    });
+    return () => {
+      disposed = true;
+      removePermissionListener?.();
+    };
   }, [refresh, captureGeoOnce]);
+
+  // Timers can be suspended while the PWA/WebView is in the background. A
+  // visibility refresh restores a pending or approved modal immediately.
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') void refresh();
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [refresh]);
 
   // Backfill logic
   useEffect(() => {

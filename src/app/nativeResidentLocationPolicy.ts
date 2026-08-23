@@ -16,7 +16,13 @@ export function canUseNativeResidentLocation(input: {
     && identity.approvalStatus === 'approved';
 }
 
-export type NativeResidentRoutePoint = Omit<RoutePoint, 'id'> & { id: string };
+export type NativeResidentRoutePoint = Omit<RoutePoint, 'id'> & {
+  id: string;
+  /** Boot-scoped Android monotonic clock identity; not persisted by RoutePoint storage. */
+  monotonicSessionId?: string;
+  /** Android elapsedRealtime converted to milliseconds; meaningful only within its session. */
+  elapsedRealtimeMs?: number;
+};
 
 export function normalizeNativeResidentRoutePoint(
   point: NativeResidentLocationPoint,
@@ -31,6 +37,10 @@ export function normalizeNativeResidentRoutePoint(
   const accuracy = point.accuracy;
   const speed = point.speed;
   const heading = point.heading;
+  const monotonicSessionId = typeof point.monotonicSessionId === 'string'
+    ? point.monotonicSessionId.trim()
+    : '';
+  const elapsedRealtimeMs = point.elapsedRealtimeMs;
   return {
     id,
     tripId,
@@ -43,6 +53,13 @@ export function normalizeNativeResidentRoutePoint(
     speed: typeof speed === 'number' && Number.isFinite(speed) && speed >= 0 ? speed : null,
     heading: typeof heading === 'number' && Number.isFinite(heading) ? heading : null,
     source: 'background',
+    ...(monotonicSessionId ? { monotonicSessionId } : {}),
+    ...(monotonicSessionId
+      && typeof elapsedRealtimeMs === 'number'
+      && Number.isFinite(elapsedRealtimeMs)
+      && elapsedRealtimeMs >= 0
+      ? { elapsedRealtimeMs }
+      : {}),
   };
 }
 
@@ -60,6 +77,43 @@ export function uniqueNativeResidentRoutePoints(
   return normalized;
 }
 
+/**
+ * Preserve spool FIFO across boots. Within one contiguous boot session only,
+ * elapsedRealtime is the authoritative order when the wall clock moves back.
+ */
+export function orderNativeResidentRoutePoints(
+  points: NativeResidentRoutePoint[],
+): NativeResidentRoutePoint[] {
+  const ordered: NativeResidentRoutePoint[] = [];
+  for (let index = 0; index < points.length;) {
+    const first = points[index];
+    const sessionId = first.monotonicSessionId;
+    if (!sessionId) {
+      ordered.push(first);
+      index += 1;
+      continue;
+    }
+    let end = index + 1;
+    while (end < points.length && points[end].monotonicSessionId === sessionId) end += 1;
+    const sessionRun = points.slice(index, end);
+    if (sessionRun.every(point => typeof point.elapsedRealtimeMs === 'number')) {
+      const stableMonotonicRun = sessionRun
+        .map((point, fifoIndex) => ({ point, fifoIndex }))
+        .sort((a, b) => (
+          a.point.elapsedRealtimeMs! - b.point.elapsedRealtimeMs!
+          || a.fifoIndex - b.fifoIndex
+        ))
+        .map(item => item.point);
+      ordered.push(...stableMonotonicRun);
+      index = end;
+      continue;
+    }
+    ordered.push(...sessionRun);
+    index = end;
+  }
+  return ordered;
+}
+
 export async function drainNativeResidentRoutePointQueue(input: {
   enabled: boolean;
   peek: (limit: number) => Promise<{
@@ -68,6 +122,8 @@ export async function drainNativeResidentRoutePointQueue(input: {
   }>;
   acknowledge: (ids: string[]) => Promise<{ remaining: number }>;
   addRoutePoint: (point: NativeResidentRoutePoint) => Promise<unknown>;
+  /** Runs only after the normalized point is durable in Dexie and before ack. */
+  onPersistedPoint?: (point: NativeResidentRoutePoint) => Promise<void>;
   batchSize?: number;
   maxBatches?: number;
 }) {
@@ -87,10 +143,14 @@ export async function drainNativeResidentRoutePointQueue(input: {
     const acknowledgedIds = [...new Set(result.points
       .map(point => typeof point.id === 'string' ? point.id.trim() : '')
       .filter(Boolean))];
-    for (const point of uniqueNativeResidentRoutePoints(result.points)) {
+    const chronologicalPoints = orderNativeResidentRoutePoints(
+      uniqueNativeResidentRoutePoints(result.points),
+    );
+    for (const point of chronologicalPoints) {
       if (persistedIds.has(point.id)) continue;
       persistedIds.add(point.id);
       await input.addRoutePoint(point);
+      await input.onPersistedPoint?.(point);
       persisted += 1;
     }
     const acknowledgement = await input.acknowledge(acknowledgedIds);

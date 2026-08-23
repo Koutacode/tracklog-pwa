@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Capacitor } from '@capacitor/core';
 import BigButton from '../components/BigButton';
@@ -9,23 +9,46 @@ import { useComplianceMetrics } from '../../hooks/useComplianceMetrics';
 import ProgressGauge from '../components/ProgressGauge';
 import DrivingView from './HomeScreen/DrivingView';
 import StoppedView from './HomeScreen/StoppedView';
+import ExpresswayEndConfirmDialog from './HomeScreen/ExpresswayEndConfirmDialog';
+import RunStatusCard from './HomeScreen/RunStatusCard';
+import { subscribeHomeEventsChanged } from './HomeScreen/homeEventsRefresh';
+import {
+  selectPendingExpresswayEndPrompt,
+  summarizeDiagnostics,
+  summarizeExpressway,
+  summarizeLocation,
+  summarizeRouteTracking,
+} from './HomeScreen/homeStatusModel';
 
 import {
+  getPendingExpresswayEndPrompt,
   getRouteTrackingMode,
   setRouteTrackingMode,
   DEFAULT_ROUTE_TRACKING_MODE,
+  type PendingExpresswayEndPrompt,
 } from '../../db/repositories';
 import type { RouteTrackingMode } from '../../db/repositories';
 import { openNativeSettings } from '../../services/routeTracking';
-import { cancelNativeExpresswayEndPrompt } from '../../services/nativeExpresswayPrompt';
+import {
+  getNativeResidentLocationStatus,
+  type NativeResidentLocationStatus,
+} from '../../services/nativeResidentLocation';
+import {
+  commitAutomaticExpresswayEnd,
+  commitAutomaticExpresswayKeep,
+} from '../../services/nativeExpresswayPromptDecision';
 import { runStartupDiagnostics, type StartupDiagnosticItem } from '../../services/startupDiagnostics';
 import {
   openAppPermissionSettings,
   openSystemLocationSettings,
   runNativeQuickSetup as runNativeSetupWizard,
 } from '../../services/nativeSetup';
-import { DEFAULT_APK_DOWNLOAD_URL, RELEASE_PAGE_URL } from '../../app/releaseInfo';
+import { copyLatestAndroidApkUrl } from '../../services/appDistribution';
 import { requestRouteTrackingSync } from '../../app/routeTrackingSignal';
+import {
+  BREAK_TO_REST_MODAL_STATE_EVENT,
+  isBreakToRestModalOpen,
+} from '../../app/breakToRestConfirmationSignal';
 import {
   checkVoiceRecognitionAvailable,
   findVoiceCommand,
@@ -58,16 +81,6 @@ function fmtDateTime(ts?: string) {
   }).format(new Date(ts));
 }
 
-function fmtMinutesShort(minutes: number) {
-  const safe = Math.max(0, Math.round(minutes));
-  const h = Math.floor(safe / 60);
-  const m = safe % 60;
-  if (h === 0) return `${m}分`;
-  if (m === 0) return `${h}時間`;
-  return `${h}時間${m}分`;
-}
-
-const LATEST_APK_URL = DEFAULT_APK_DOWNLOAD_URL;
 const [
   REST_TOGGLE_DEFINITION,
   BREAK_TOGGLE_DEFINITION,
@@ -138,14 +151,15 @@ export default function HomeScreen() {
 
   const [odoDialog, setOdoDialog] = useState<null | { kind: 'trip_start' | 'rest_start' | 'trip_end' }>(null);
   const [fuelOpen, setFuelOpen] = useState(false);
-  const [wakeLockOn, setWakeLockOn] = useState(false);
   const [routeTrackingMode, setRouteTrackingModeState] = useState<RouteTrackingMode>(DEFAULT_ROUTE_TRACKING_MODE);
   const [routeTrackingError, setRouteTrackingError] = useState<string | null>(null);
+  const [nativeLocationStatus, setNativeLocationStatus] = useState<NativeResidentLocationStatus | null>(null);
   const [startupDiagnostics, setStartupDiagnostics] = useState<StartupDiagnosticItem[]>([]);
   const [diagnosticsLoading, setDiagnosticsLoading] = useState(false);
   const [quickSetupRunning, setQuickSetupRunning] = useState(false);
   const [quickSetupMessage, setQuickSetupMessage] = useState<string | null>(null);
   const [apkUrlCopied, setApkUrlCopied] = useState(false);
+  const [apkUrlCopying, setApkUrlCopying] = useState(false);
   const [nativeSettingsOpen, setNativeSettingsOpen] = useState(false);
   const [voiceAvailable, setVoiceAvailable] = useState(false);
   const [voiceListening, setVoiceListening] = useState(false);
@@ -153,9 +167,34 @@ export default function HomeScreen() {
   const [voiceResult, setVoiceResult] = useState<string | null>(null);
   const [voiceError, setVoiceError] = useState<string | null>(null);
   const [focusDriving, setFocusDriving] = useState(false);
+  const [breakToRestModalOpen, setBreakToRestModalOpen] = useState(isBreakToRestModalOpen);
+  const [expresswayEndConfirmation, setExpresswayEndConfirmation] = useState<null | { source: 'manual' | 'voice' | 'automatic' }>(null);
+  const [pendingExpresswayEndPrompt, setPendingExpresswayEndPromptState] = useState<PendingExpresswayEndPrompt | null>(null);
+  const [expresswayEndBusy, setExpresswayEndBusy] = useState(false);
+  const [expresswayEndError, setExpresswayEndError] = useState<string | null>(null);
 
   const apkUrlCopyTimer = useRef<number | null>(null);
   const isNative = Capacitor.isNativePlatform();
+  const isAndroidNative = isNative && Capacitor.getPlatform() === 'android';
+
+  useEffect(() => subscribeHomeEventsChanged(refresh), [refresh]);
+
+  useEffect(() => {
+    const syncModalState = () => setBreakToRestModalOpen(isBreakToRestModalOpen());
+    window.addEventListener(BREAK_TO_REST_MODAL_STATE_EVENT, syncModalState);
+    return () => window.removeEventListener(BREAK_TO_REST_MODAL_STATE_EVENT, syncModalState);
+  }, []);
+
+  useEffect(() => {
+    if (!breakToRestModalOpen) return;
+    // The due confirmation is modal and takes priority over optional Home
+    // dialogs so a hidden dialog cannot reappear after the decision.
+    setOdoDialog(null);
+    setFuelOpen(false);
+    setNativeSettingsOpen(false);
+    setExpresswayEndConfirmation(null);
+    setExpresswayEndError(null);
+  }, [breakToRestModalOpen]);
 
   const openToggleStarts = useMemo(() => ({
     rest: findOpenToggleStart(events, REST_TOGGLE_DEFINITION),
@@ -176,12 +215,54 @@ export default function HomeScreen() {
   const restActive = openToggleStarts.rest !== null;
   const expresswayActive = openToggleStarts.expressway !== null;
   const ferryActive = openToggleStarts.ferry !== null;
-  const operationsDisabled = loading || operationInProgress;
+  const operationsDisabled = loading
+    || operationInProgress
+    || breakToRestModalOpen
+    || expresswayEndConfirmation != null;
   const expresswayPending = activeOperation === 'expressway-start'
     ? 'start'
     : activeOperation === 'expressway-end'
       ? 'end'
       : null;
+
+  useEffect(() => {
+    if (!tripId || !expresswayActive) {
+      setPendingExpresswayEndPromptState(null);
+      setExpresswayEndConfirmation(current => current?.source === 'automatic' ? null : current);
+      return;
+    }
+    let active = true;
+    const syncPendingPrompt = async () => {
+      try {
+        const prompt = await getPendingExpresswayEndPrompt();
+        if (!active) return;
+        const currentPrompt = selectPendingExpresswayEndPrompt({
+          activeTripId: tripId,
+          expresswayActive,
+          prompt,
+        });
+        setPendingExpresswayEndPromptState(currentPrompt);
+        if (currentPrompt && !breakToRestModalOpen) {
+          setExpresswayEndConfirmation(current => current ?? { source: 'automatic' });
+        } else if (!currentPrompt) {
+          setExpresswayEndConfirmation(current => current?.source === 'automatic' ? null : current);
+        }
+      } catch {
+        // A persisted prompt is checked again on the next visibility/poll cycle.
+      }
+    };
+    void syncPendingPrompt();
+    const intervalId = window.setInterval(() => void syncPendingPrompt(), 3000);
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') void syncPendingPrompt();
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => {
+      active = false;
+      window.clearInterval(intervalId);
+      document.removeEventListener('visibilitychange', handleVisibility);
+    };
+  }, [breakToRestModalOpen, expresswayActive, tripId]);
 
   const activeStatuses = useMemo(() => {
     const list: { name: string; startTs: string; type: 'base' | 'expressway' | 'ferry' }[] = [];
@@ -227,6 +308,79 @@ export default function HomeScreen() {
     return handleToggleEvent('expressway', action);
   };
 
+  const requestExpresswayToggle = (action: 'start' | 'end', source: 'manual' | 'voice' = 'manual') => {
+    if (operationInProgress || breakToRestModalOpen) return;
+    if (action === 'end') {
+      if (!expresswayActive) return;
+      setExpresswayEndError(null);
+      setExpresswayEndConfirmation({ source });
+      if (source === 'voice') {
+        setVoiceResult('高速道路を降りたか確認しています。');
+      }
+      return;
+    }
+    void runExpresswayToggle('start');
+  };
+
+  const continueExpressway = async () => {
+    if (expresswayEndBusy) return;
+    const source = expresswayEndConfirmation?.source;
+    const pendingPrompt = source === 'automatic' ? pendingExpresswayEndPrompt : null;
+    setExpresswayEndBusy(true);
+    if (pendingPrompt) {
+      try {
+        await commitAutomaticExpresswayKeep({
+          isAndroidNative,
+          prompt: pendingPrompt,
+          decidedAt: new Date().toISOString(),
+        });
+        requestRouteTrackingSync();
+        setPendingExpresswayEndPromptState(null);
+      } catch {
+        setExpresswayEndError('高速道路の継続状態を保存できませんでした。もう一度お試しください。');
+        setExpresswayEndBusy(false);
+        return;
+      }
+    }
+    setExpresswayEndConfirmation(null);
+    setExpresswayEndError(null);
+    if (source === 'voice') setVoiceResult('高速道路の記録を継続します。');
+    setExpresswayEndBusy(false);
+  };
+
+  const confirmExpresswayEnd = async () => {
+    if (!expresswayEndConfirmation || expresswayEndBusy || operationInProgress) return;
+    const source = expresswayEndConfirmation.source;
+    setExpresswayEndBusy(true);
+    setExpresswayEndError(null);
+    let completed = false;
+    if (source === 'automatic' && pendingExpresswayEndPrompt?.tripId === tripId) {
+      try {
+        await commitAutomaticExpresswayEnd({
+          isAndroidNative,
+          prompt: pendingExpresswayEndPrompt,
+        });
+        setPendingExpresswayEndPromptState(null);
+        requestRouteTrackingSync();
+        await refresh();
+        completed = true;
+      } catch {
+        completed = false;
+      }
+    } else {
+      completed = (await runExpresswayToggle('end')) === true;
+    }
+    if (completed) {
+      setExpresswayEndConfirmation(null);
+      if (source === 'voice') setVoiceResult('実行しました: 高速道路終了');
+    } else {
+      const message = '高速道路の終了を記録できませんでした。通信と位置情報を確認して、もう一度お試しください。';
+      setExpresswayEndError(message);
+      if (source === 'voice') setVoiceError(message);
+    }
+    setExpresswayEndBusy(false);
+  };
+
   // Auto-switch focus when driving starts
   useEffect(() => {
     if (liveDrive.currentCategory === 'drive') {
@@ -237,8 +391,20 @@ export default function HomeScreen() {
   }, [liveDrive.currentCategory]);
 
   const runVoiceCommand = async () => {
+    if (breakToRestModalOpen) {
+      setVoiceError('休息への変更確認を完了してください。');
+      return;
+    }
+    if (operationInProgress || expresswayEndConfirmation) {
+      setVoiceError('別の操作を完了してから、もう一度お試しください。');
+      return;
+    }
     if (!isNative) {
       setVoiceError('音声コマンドはネイティブ版で利用できます。');
+      return;
+    }
+    if (!voiceAvailable) {
+      setVoiceError('この端末では音声入力を利用できません。');
       return;
     }
     setVoiceListening(true);
@@ -251,70 +417,132 @@ export default function HomeScreen() {
       const parsed = findVoiceCommand(matches);
       if (!parsed) throw new Error(`コマンドを判別できませんでした: ${matches[0]}`);
 
-      let operationSucceeded = true;
-      // Execute command using handlers from useTripManager
+      let operationAttempted = false;
+      let operationSucceeded = false;
+      let unavailableReason: string | null = null;
+      let followUpMessage: string | null = null;
       switch (parsed.kind) {
         case 'trip_start':
           if (!tripId) {
-            if (parsed.odoKm) operationSucceeded = (await handleStartTrip(parsed.odoKm)) != null;
-            else setOdoDialog({ kind: 'trip_start' });
-          }
+            if (parsed.odoKm != null) {
+              operationAttempted = true;
+              operationSucceeded = (await handleStartTrip(parsed.odoKm)) != null;
+            } else {
+              setOdoDialog({ kind: 'trip_start' });
+              followUpMessage = '開始ODOを入力してください。';
+            }
+          } else unavailableReason = 'すでに運行中です。';
           break;
         case 'trip_end':
           if (tripId) {
-            if (parsed.odoKm) operationSucceeded = (await handleEndTrip(parsed.odoKm)) != null;
-            else setOdoDialog({ kind: 'trip_end' });
-          }
+            if (parsed.odoKm != null) {
+              operationAttempted = true;
+              operationSucceeded = (await handleEndTrip(parsed.odoKm)) != null;
+            } else {
+              setOdoDialog({ kind: 'trip_end' });
+              followUpMessage = '終了ODOを入力してください。';
+            }
+          } else unavailableReason = '開始中の運行がありません。';
           break;
         case 'rest_start':
           if (tripId && canStartRest) {
-            if (parsed.odoKm) operationSucceeded = (await handleStartRest(parsed.odoKm)) != null;
-            else setOdoDialog({ kind: 'rest_start' });
-          }
+            if (parsed.odoKm != null) {
+              operationAttempted = true;
+              operationSucceeded = (await handleStartRest(parsed.odoKm)) != null;
+            } else {
+              setOdoDialog({ kind: 'rest_start' });
+              followUpMessage = '休息開始ODOを入力してください。';
+            }
+          } else unavailableReason = tripId ? '別の作業中のため休息を開始できません。' : '開始中の運行がありません。';
           break;
         case 'rest_end':
           if (tripId && restActive && openRestSessionId) {
+            operationAttempted = true;
             operationSucceeded = (await handleEndRest(openRestSessionId)) != null;
-          }
+          } else unavailableReason = '終了できる休息がありません。';
           break;
         case 'break_start':
-          if (tripId && canStartBreak) operationSucceeded = (await handleToggleEvent('break', 'start')) === true;
+          if (tripId && canStartBreak) {
+            operationAttempted = true;
+            operationSucceeded = (await handleToggleEvent('break', 'start')) === true;
+          } else unavailableReason = tripId ? '別の作業中のため休憩を開始できません。' : '開始中の運行がありません。';
           break;
         case 'break_end':
-          if (tripId && breakActive) operationSucceeded = (await handleToggleEvent('break', 'end')) === true;
+          if (tripId && breakActive) {
+            operationAttempted = true;
+            operationSucceeded = (await handleToggleEvent('break', 'end')) === true;
+          } else unavailableReason = '終了できる休憩がありません。';
           break;
         case 'load_start':
-          if (tripId && canStartLoad) operationSucceeded = (await handleToggleEvent('load', 'start')) === true;
+          if (tripId && canStartLoad) {
+            operationAttempted = true;
+            operationSucceeded = (await handleToggleEvent('load', 'start')) === true;
+          } else unavailableReason = tripId ? '別の作業中のため積込を開始できません。' : '開始中の運行がありません。';
           break;
         case 'load_end':
-          if (tripId && loadActive) operationSucceeded = (await handleToggleEvent('load', 'end')) === true;
+          if (tripId && loadActive) {
+            operationAttempted = true;
+            operationSucceeded = (await handleToggleEvent('load', 'end')) === true;
+          } else unavailableReason = '終了できる積込がありません。';
           break;
         case 'unload_start':
-          if (tripId && canStartUnload) operationSucceeded = (await handleToggleEvent('unload', 'start')) === true;
+          if (tripId && canStartUnload) {
+            operationAttempted = true;
+            operationSucceeded = (await handleToggleEvent('unload', 'start')) === true;
+          } else unavailableReason = tripId ? '別の作業中のため荷卸を開始できません。' : '開始中の運行がありません。';
           break;
         case 'unload_end':
-          if (tripId && unloadActive) operationSucceeded = (await handleToggleEvent('unload', 'end')) === true;
+          if (tripId && unloadActive) {
+            operationAttempted = true;
+            operationSucceeded = (await handleToggleEvent('unload', 'end')) === true;
+          } else unavailableReason = '終了できる荷卸がありません。';
           break;
         case 'expressway_start':
-          if (tripId && !expresswayActive) operationSucceeded = (await runExpresswayToggle('start')) === true;
+          if (tripId && !expresswayActive) {
+            operationAttempted = true;
+            operationSucceeded = (await runExpresswayToggle('start')) === true;
+          } else unavailableReason = tripId ? 'すでに高速道路を記録中です。' : '開始中の運行がありません。';
           break;
         case 'expressway_end':
-          if (tripId && expresswayActive) operationSucceeded = (await runExpresswayToggle('end')) === true;
+          if (tripId && expresswayActive) {
+            requestExpresswayToggle('end', 'voice');
+            followUpMessage = '高速道路を降りたか確認してください。';
+          } else unavailableReason = '終了できる高速区間がありません。';
           break;
         case 'boarding':
-          if (tripId && canStartFerry) operationSucceeded = (await handleAddFerry('boarding')) === true;
+          if (tripId && canStartFerry) {
+            operationAttempted = true;
+            operationSucceeded = (await handleAddFerry('boarding')) === true;
+          } else unavailableReason = tripId ? '現在の作業を終了してから乗船を記録してください。' : '開始中の運行がありません。';
           break;
         case 'disembark':
-          if (tripId && ferryActive) operationSucceeded = (await handleAddFerry('disembark')) === true;
+          if (tripId && ferryActive) {
+            operationAttempted = true;
+            operationSucceeded = (await handleAddFerry('disembark')) === true;
+          } else unavailableReason = '下船できるフェリー記録がありません。';
           break;
-        case 'geo_refresh':
-          await captureGeoOnce();
+        case 'geo_refresh': {
+          operationAttempted = true;
+          const result = await captureGeoOnce();
+          operationSucceeded = !!result.geo;
+          if (!operationSucceeded) unavailableReason = '位置情報を取得できませんでした。端末設定を確認してください。';
           break;
+        }
         case 'point_mark':
-          if (tripId) operationSucceeded = (await handleAddPointMark(parsed.raw)) === true;
+          if (tripId) {
+            operationAttempted = true;
+            operationSucceeded = (await handleAddPointMark(parsed.raw)) === true;
+          } else unavailableReason = '開始中の運行がありません。';
           break;
       }
-      if (operationSucceeded) setVoiceResult(`実行しました: ${parsed.raw}`);
+      if (followUpMessage) {
+        setVoiceResult(followUpMessage);
+        return;
+      }
+      if (unavailableReason) throw new Error(unavailableReason);
+      if (!operationAttempted) throw new Error('この操作は現在実行できません。');
+      if (!operationSucceeded) throw new Error('操作を完了できませんでした。画面の案内を確認してください。');
+      setVoiceResult(`実行しました: ${parsed.raw}`);
     } catch (e: any) {
       setVoiceError(e?.message ?? '音声操作に失敗しました。');
     } finally {
@@ -323,26 +551,151 @@ export default function HomeScreen() {
   };
 
   const copyLatestApkUrl = async () => {
+    setApkUrlCopying(true);
+    setApkUrlCopied(false);
+    setRouteTrackingError(null);
+    setQuickSetupMessage('最新APKの公開状況を確認しています…');
     try {
-      await navigator.clipboard.writeText(LATEST_APK_URL);
+      const result = await copyLatestAndroidApkUrl();
       setApkUrlCopied(true);
-      setTimeout(() => setApkUrlCopied(false), 2000);
+      setQuickSetupMessage(`公開版 v${result.release.latestVersion} のダウンロードURLをコピーしました`);
+      if (apkUrlCopyTimer.current != null) window.clearTimeout(apkUrlCopyTimer.current);
+      apkUrlCopyTimer.current = window.setTimeout(() => setApkUrlCopied(false), 2000);
+    } catch (error: any) {
+      setQuickSetupMessage(null);
+      setRouteTrackingError(error?.message ?? '最新版APKを確認できないためコピーを停止しました。通信状態を確認してください。');
+    } finally {
+      setApkUrlCopying(false);
+    }
+  };
+
+  const refreshNativeStatus = useCallback(async () => {
+    if (!isAndroidNative) {
+      setNativeLocationStatus(null);
+      return;
+    }
+    try {
+      const status = await getNativeResidentLocationStatus();
+      setNativeLocationStatus(status);
     } catch {
-      alert('コピーに失敗しました');
+      setRouteTrackingError('バックグラウンド記録の状態を確認できませんでした。再診断してください。');
+    }
+  }, [isAndroidNative]);
+
+  const refreshDiagnostics = useCallback(async () => {
+    setDiagnosticsLoading(true);
+    setRouteTrackingError(null);
+    const [diagnosticResult, nativeStatusResult] = await Promise.allSettled([
+      runStartupDiagnostics(),
+      isAndroidNative ? getNativeResidentLocationStatus() : Promise.resolve(null),
+    ]);
+    if (diagnosticResult.status === 'fulfilled') {
+      setStartupDiagnostics(diagnosticResult.value);
+    } else {
+      setStartupDiagnostics([]);
+      setRouteTrackingError('端末状態を診断できませんでした。もう一度お試しください。');
+    }
+    if (nativeStatusResult.status === 'fulfilled') {
+      setNativeLocationStatus(nativeStatusResult.value);
+    } else if (isAndroidNative) {
+      setRouteTrackingError('バックグラウンド記録の状態を確認できませんでした。再診断してください。');
+    }
+    setDiagnosticsLoading(false);
+  }, [isAndroidNative]);
+
+  const runQuickSetup = async () => {
+    if (!isAndroidNative || quickSetupRunning) return;
+    setQuickSetupRunning(true);
+    setQuickSetupMessage(null);
+    setRouteTrackingError(null);
+    try {
+      const result = await runNativeSetupWizard();
+      setQuickSetupMessage(
+        result.requiresManualFollowUp
+          ? '端末設定を開きました。必要な許可を確認したあと、再診断してください。'
+          : 'バックグラウンド記録の準備が整いました。',
+      );
+      requestRouteTrackingSync();
+      await refreshDiagnostics();
+    } catch {
+      setQuickSetupMessage('かんたん設定を完了できませんでした。端末設定から許可を確認してください。');
+      setRouteTrackingError('端末設定を確認してください。');
+    } finally {
+      setQuickSetupRunning(false);
+    }
+  };
+
+  const changeRouteTrackingMode = async (mode: RouteTrackingMode) => {
+    if (mode === routeTrackingMode) return;
+    setRouteTrackingError(null);
+    try {
+      const saved = await setRouteTrackingMode(mode);
+      setRouteTrackingModeState(saved);
+      requestRouteTrackingSync();
+      await refreshNativeStatus();
+    } catch {
+      setRouteTrackingError('位置記録モードを変更できませんでした。もう一度お試しください。');
     }
   };
 
   useEffect(() => {
     const init = async () => {
-      const mode = await getRouteTrackingMode();
-      setRouteTrackingModeState(mode);
-      if (isNative) {
-        setVoiceAvailable(await checkVoiceRecognitionAvailable());
+      try {
+        const mode = await getRouteTrackingMode();
+        setRouteTrackingModeState(mode);
+      } catch {
+        setRouteTrackingError('位置記録モードを読み込めませんでした。');
       }
-      runStartupDiagnostics().then(setStartupDiagnostics);
+      if (isNative) setVoiceAvailable(await checkVoiceRecognitionAvailable());
+      await refreshDiagnostics();
     };
-    init();
-  }, [isNative]);
+    void init();
+    return () => {
+      if (apkUrlCopyTimer.current != null) window.clearTimeout(apkUrlCopyTimer.current);
+    };
+  }, [isNative, refreshDiagnostics]);
+
+  useEffect(() => {
+    if (!isAndroidNative) return;
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === 'visible') void refreshDiagnostics();
+    };
+    const intervalId = window.setInterval(() => void refreshNativeStatus(), 15000);
+    document.addEventListener('visibilitychange', refreshWhenVisible);
+    return () => {
+      window.clearInterval(intervalId);
+      document.removeEventListener('visibilitychange', refreshWhenVisible);
+    };
+  }, [isAndroidNative, refreshDiagnostics, refreshNativeStatus]);
+
+  const diagnosticSummary = summarizeDiagnostics(startupDiagnostics, diagnosticsLoading);
+  const locationSummary = summarizeLocation(geoStatus, geoError);
+  const routeSummary = summarizeRouteTracking({
+    tripActive: !!tripId,
+    isAndroidNative,
+    nativeStatus: nativeLocationStatus,
+    routeTrackingError,
+  });
+  const expresswaySummary = useMemo(
+    () => summarizeExpressway(events, openToggleStarts.expressway),
+    [events, openToggleStarts.expressway],
+  );
+  const statusCard = (
+    <RunStatusCard
+      route={routeSummary}
+      expressway={expresswaySummary}
+      location={locationSummary}
+      diagnostics={diagnosticSummary}
+      diagnosticItems={startupDiagnostics}
+      compact={!!tripId && focusDriving}
+      isAndroidNative={isAndroidNative}
+      diagnosticsLoading={diagnosticsLoading}
+      quickSetupRunning={quickSetupRunning}
+      quickSetupMessage={quickSetupMessage}
+      onRefreshDiagnostics={() => void refreshDiagnostics()}
+      onQuickSetup={() => void runQuickSetup()}
+    />
+  );
 
   if (!tripId) {
     return (
@@ -380,6 +733,7 @@ export default function HomeScreen() {
                 />
               </div>
             </div>
+            {statusCard}
           </div>
           <OdoDialog
             open={odoDialog?.kind === 'trip_start' && !operationInProgress}
@@ -411,10 +765,15 @@ export default function HomeScreen() {
     : effectiveExpresswayActive
       ? '高速道路終了'
       : '高速道路開始';
+  const homeModalOpen = breakToRestModalOpen || expresswayEndConfirmation != null;
 
   return (
     <div className="home-backdrop">
-      <div className="home-shell">
+      <div
+        className="home-shell"
+        aria-hidden={homeModalOpen ? true : undefined}
+        style={homeModalOpen ? { pointerEvents: 'none', userSelect: 'none' } : undefined}
+      >
         <div className="home-topbar">
           <div className="home-topbar__main">
             <div className="home-topbar__eyebrow">TrackLog運行アシスト</div>
@@ -425,9 +784,17 @@ export default function HomeScreen() {
           </div>
           <div className="home-topbar__actions">
             {isNative && (
-              <button className="pill-link" onClick={() => setNativeSettingsOpen(true)}>⚙</button>
+              <button
+                type="button"
+                className="pill-link"
+                aria-label="端末と位置記録の設定を開く"
+                title="端末と位置記録の設定"
+                onClick={() => setNativeSettingsOpen(true)}
+              >
+                ⚙
+              </button>
             )}
-            <button className="pill-link" onClick={() => setFocusDriving(!focusDriving)}>
+            <button type="button" className="pill-link" onClick={() => setFocusDriving(!focusDriving)}>
               {focusDriving ? '通常表示' : '運転集中'}
             </button>
             <Link to="/admin" className="pill-link">管理</Link>
@@ -441,6 +808,8 @@ export default function HomeScreen() {
           <OperationErrorNotice message={operationError} onDismiss={clearOperationError} />
         )}
 
+        {statusCard}
+
         {!focusDriving && (
           <div className="home-expressway-quick">
             <BigButton
@@ -449,7 +818,7 @@ export default function HomeScreen() {
               variant="neutral"
               className={expresswayButtonClass}
               disabled={operationsDisabled}
-              onClick={() => runExpresswayToggle(expresswayAction)}
+              onClick={() => requestExpresswayToggle(expresswayAction)}
             />
           </div>
         )}
@@ -463,10 +832,14 @@ export default function HomeScreen() {
             <DrivingView
               liveDrive={liveDrive}
               onVoiceCommand={runVoiceCommand}
+              voiceAvailable={voiceAvailable}
               voiceListening={voiceListening}
+              voiceLastText={voiceLastText}
+              voiceResult={voiceResult}
+              voiceError={voiceError}
               expresswayActive={expresswayActive}
               expresswayPending={expresswayPending}
-              onExpresswayToggle={runExpresswayToggle}
+              onExpresswayToggle={action => requestExpresswayToggle(action)}
             />
           </fieldset>
         ) : (
@@ -602,26 +975,66 @@ export default function HomeScreen() {
 
         {nativeSettingsOpen && (
           <div className="auto-expressway-overlay" onClick={() => setNativeSettingsOpen(false)}>
-            <div className="card" style={{ width: '90%', padding: 20 }} onClick={e => e.stopPropagation()}>
+            <div
+              className="card"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="native-settings-title"
+              style={{ width: 'min(520px, 90%)', padding: 20 }}
+              onClick={e => e.stopPropagation()}
+            >
               <div className="home-section-label">ネイティブ設定</div>
+              <h2 id="native-settings-title" style={{ margin: '6px 0 14px' }}>位置記録の設定</h2>
               <div style={{ display: 'grid', gap: 12 }}>
-                <button className="trip-btn" onClick={() => openNativeSettings()}>OS設定を開く</button>
-                <button className="trip-btn" onClick={() => openAppPermissionSettings()}>アプリ権限設定</button>
-                <button className="trip-btn" onClick={copyLatestApkUrl}>
-                  {apkUrlCopied ? 'コピーしました' : 'APKダウンロードURLをコピー'}
+                <div className="home-native-mode" role="group" aria-label="位置記録モード">
+                  <button
+                    type="button"
+                    aria-pressed={routeTrackingMode === 'precision'}
+                    onClick={() => void changeRouteTrackingMode('precision')}
+                  >
+                    高精度
+                  </button>
+                  <button
+                    type="button"
+                    aria-pressed={routeTrackingMode === 'battery'}
+                    onClick={() => void changeRouteTrackingMode('battery')}
+                  >
+                    省電力
+                  </button>
+                </div>
+                <button type="button" className="trip-btn" onClick={() => void runQuickSetup()} disabled={quickSetupRunning}>
+                  {quickSetupRunning ? '設定を確認中…' : 'かんたん設定を実行'}
                 </button>
-                <button className="trip-btn" onClick={() => setNativeSettingsOpen(false)}>閉じる</button>
+                <button type="button" className="trip-btn" onClick={() => void openNativeSettings()}>位置記録のOS設定</button>
+                <button type="button" className="trip-btn" onClick={() => void openAppPermissionSettings()}>アプリ権限設定</button>
+                <button type="button" className="trip-btn" onClick={() => void openSystemLocationSettings()}>端末の位置情報設定</button>
+                <button type="button" className="trip-btn" onClick={copyLatestApkUrl} disabled={apkUrlCopying}>
+                  {apkUrlCopying ? '最新版を確認中…' : apkUrlCopied ? 'コピーしました' : '最新版APK URLをコピー'}
+                </button>
+                {routeTrackingError && <div className="home-inline-alert" role="alert">{routeTrackingError}</div>}
+                {quickSetupMessage && <div className="home-inline-success" role="status">{quickSetupMessage}</div>}
+                <button type="button" className="trip-btn" onClick={() => setNativeSettingsOpen(false)}>閉じる</button>
               </div>
             </div>
           </div>
         )}
       </div>
 
+      <ExpresswayEndConfirmDialog
+        open={expresswayEndConfirmation != null}
+        busy={expresswayEndBusy || operationInProgress}
+        detectedAutomatically={expresswayEndConfirmation?.source === 'automatic'}
+        errorMessage={expresswayEndError}
+        onContinue={() => void continueExpressway()}
+        onEnd={() => void confirmExpresswayEnd()}
+      />
+
       <OdoDialog
         open={odoDialog?.kind === 'rest_start' && !operationInProgress}
         title="休息開始"
         description="休息開始ODO（km）を入力してください"
         confirmText="休息開始"
+        allowZero
         onCancel={() => setOdoDialog(null)}
         onConfirm={odoKm => {
           setOdoDialog(null);

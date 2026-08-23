@@ -6,6 +6,8 @@ import java.net.URI;
 
 final class ResidentLocationUploadPolicy {
     static final long MIN_UPLOAD_INTERVAL_MS = 30_000L;
+    static final long INITIAL_REFRESH_BACKOFF_MS = 30_000L;
+    static final long MAX_REFRESH_BACKOFF_MS = 5L * 60L * 1000L;
 
     enum Action {
         SUCCESS,
@@ -18,6 +20,27 @@ final class ResidentLocationUploadPolicy {
 
     static boolean shouldAttempt(long nowMs, long lastAttemptMs) {
         return lastAttemptMs <= 0L || nowMs - lastAttemptMs >= MIN_UPLOAD_INTERVAL_MS;
+    }
+
+    static boolean shouldAttemptRefresh(long nowMs, long retryAfterMs) {
+        return retryAfterMs <= 0L || nowMs >= retryAfterMs;
+    }
+
+    static long refreshBackoffDelayMs(int consecutiveFailureCount) {
+        if (consecutiveFailureCount <= 1) return INITIAL_REFRESH_BACKOFF_MS;
+        long delayMs = INITIAL_REFRESH_BACKOFF_MS;
+        int doublings = Math.min(consecutiveFailureCount - 1, 4);
+        for (int index = 0; index < doublings; index += 1) {
+            delayMs = Math.min(delayMs * 2L, MAX_REFRESH_BACKOFF_MS);
+        }
+        return Math.min(delayMs, MAX_REFRESH_BACKOFF_MS);
+    }
+
+    static long refreshRetryAfterMs(long nowMs, int consecutiveFailureCount) {
+        long normalizedNowMs = Math.max(0L, nowMs);
+        long delayMs = refreshBackoffDelayMs(consecutiveFailureCount);
+        if (Long.MAX_VALUE - normalizedNowMs < delayMs) return Long.MAX_VALUE;
+        return normalizedNowMs + delayMs;
     }
 
     static Action classifyStatus(int statusCode, boolean refreshAlreadyAttempted) {

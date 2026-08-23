@@ -10,16 +10,17 @@ import {
 import { getDriverIdentity } from './remoteAuth';
 import { subscribeLocationUpdates } from './routeTracking';
 import type { LocationPayload } from './routeTracking';
+import { resolveLocationHeartbeatPayload } from './locationHeartbeatPolicy';
 import { updateTracklogDeviceLocationViaFunction } from './tracklogPrivilegedApi';
 
 const HEARTBEAT_INTERVAL_MS = 30 * 1000;
 const FORCE_HEARTBEAT_INTERVAL_MS = 5 * 1000;
-const MAX_LOCATION_AGE_MS = 5 * 60 * 1000;
 
 let unsubscribeLocation: (() => void) | null = null;
 let lastSentAt = 0;
 let inFlight: Promise<void> | null = null;
 let pendingLocation: LocationPayload | null = null;
+let lastAcceptedLocationAt: number | null = null;
 
 const STATUS_TOGGLE_DEFINITIONS: ReadonlyArray<{
   definition: TogglePairDefinition;
@@ -38,10 +39,6 @@ function nowIso() {
 
 function locationTimeMs(location: LocationPayload) {
   return typeof location.time === 'number' && Number.isFinite(location.time) ? location.time : Date.now();
-}
-
-function isFreshLocation(location: LocationPayload) {
-  return Date.now() - locationTimeMs(location) <= MAX_LOCATION_AGE_MS;
 }
 
 function inferLatestStatus(events: AppEvent[]) {
@@ -87,11 +84,10 @@ function drainPending() {
   if (!pendingLocation || inFlight) return;
   const next = pendingLocation;
   pendingLocation = null;
-  void handleLocationHeartbeat(next);
+  void sendEligibleLocationHeartbeat(next);
 }
 
-async function handleLocationHeartbeat(location: LocationPayload, force = false) {
-  if (!isFreshLocation(location)) return;
+async function sendEligibleLocationHeartbeat(location: LocationPayload, force = false) {
   if (typeof navigator !== 'undefined' && !navigator.onLine) return;
   const minInterval = force ? FORCE_HEARTBEAT_INTERVAL_MS : HEARTBEAT_INTERVAL_MS;
   if (Date.now() - lastSentAt < minInterval) {
@@ -104,8 +100,8 @@ async function handleLocationHeartbeat(location: LocationPayload, force = false)
   }
 
   inFlight = sendLocation(location)
-    .catch(error => {
-      console.warn('[locationHeartbeat] update failed', error);
+    .catch(() => {
+      console.warn('[locationHeartbeat] update failed');
     })
     .finally(() => {
       inFlight = null;
@@ -114,8 +110,16 @@ async function handleLocationHeartbeat(location: LocationPayload, force = false)
   await inFlight;
 }
 
+async function handleLocationHeartbeat(location: LocationPayload, force = false) {
+  const accepted = resolveLocationHeartbeatPayload(location, Date.now(), lastAcceptedLocationAt);
+  if (!accepted) return;
+  lastAcceptedLocationAt = accepted.time ?? null;
+  await sendEligibleLocationHeartbeat(accepted, force);
+}
+
 export function startLocationHeartbeat() {
   if (unsubscribeLocation) return;
+  lastAcceptedLocationAt = null;
   unsubscribeLocation = subscribeLocationUpdates(location => {
     void handleLocationHeartbeat(location);
   });
@@ -127,6 +131,7 @@ export function stopLocationHeartbeat() {
     unsubscribeLocation = null;
   }
   pendingLocation = null;
+  lastAcceptedLocationAt = null;
 }
 
 export async function requestLocationHeartbeatNow() {

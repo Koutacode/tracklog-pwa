@@ -7,14 +7,16 @@ import {
   clearPendingExpresswayEndPrompt,
   endExpressway,
   getActiveTripId,
+  getAutoExpresswayConfig,
+  getBreakToRestConfirmationState,
   getEventsByTripId,
   getPendingExpresswayEndDecision,
   getPendingExpresswayEndPrompt,
   getRouteTrackingMode,
-  reconcileBreakToRestThreshold,
 } from '../db/repositories';
 import type { AppEvent } from '../domain/types';
 import { getOpenBreakToRestThresholdTs } from '../domain/metrics';
+import { resolveBreakToRestRoutePauseAt } from '../domain/breakToRestConfirmation';
 import {
   EXPRESSWAY_TOGGLE_DEFINITION,
   PERSISTED_BASIC_TOGGLE_DEFINITIONS,
@@ -28,7 +30,13 @@ import {
 } from '../services/routeTracking';
 import { cancelNativeExpresswayEndPrompt } from '../services/nativeExpresswayPrompt';
 import { enqueueNotificationExpresswayEndIcResolution } from '../services/expresswayIcResolution';
+import {
+  resetNativeExpresswayDetection,
+  resumePendingNativeExpresswayDetection,
+} from '../services/nativeExpresswayDetection';
+import { drainNativeResidentExpresswayEventQueue } from '../services/nativeExpresswayEventHandoff';
 import { ROUTE_TRACKING_SYNC_EVENT } from './routeTrackingSignal';
+import { notifyTrackLogEventsChanged } from './breakToRestConfirmationSignal';
 import { getDriverIdentity } from '../services/remoteAuth';
 import { onDriverAuthStateChange } from '../services/remoteAuth';
 import { checkNativeSetupReadiness } from '../services/nativeSetup';
@@ -37,11 +45,15 @@ import {
   startLocationHeartbeat,
   stopLocationHeartbeat,
 } from '../services/locationHeartbeat';
-import { pollTracklogAdminMessages } from '../services/adminMessages';
+import {
+  pollTracklogAdminMessages,
+  retryPendingAdminMessageLocationRequests,
+} from '../services/adminMessages';
 import { ensureTracklogPushRegistration } from '../services/pushRegistration';
 import { isDriverExplicitSignOutRequested } from '../services/authStorageKeys';
 import {
   acknowledgeNativeResidentLocationPoints,
+  getNativeResidentLocationTrackingStateGeneration,
   peekNativeResidentLocationPoints,
   reconcileNativeResidentLocation,
   restoreNativeResidentLocationSession,
@@ -51,6 +63,12 @@ import {
   canUseNativeResidentLocation,
   drainNativeResidentRoutePointQueue,
 } from './nativeResidentLocationPolicy';
+import {
+  applyWebLocationTrackingIntent,
+  normalizeWebLocationPermissionState,
+  resolveWebLocationTrackingIntent,
+} from './webLocationPermissionPolicy';
+import type { WebLocationPermissionState } from './webLocationPermissionPolicy';
 
 function isAndroidNative() {
   return Capacitor.isNativePlatform() && Capacitor.getPlatform() === 'android';
@@ -80,6 +98,12 @@ function hasOpenFerry(events: AppEvent[]) {
   return findOpenToggleStart(events, FERRY_TOGGLE_DEFINITION) !== null;
 }
 
+// WebKit can expose an already-temporary-approved location permission as
+// `prompt` after reload. Permit one active-trip resume probe per document, not
+// one per React mount/sync, so StrictMode and lifecycle events cannot multiply
+// browser prompts.
+let pwaActiveTripResumeAttempted = false;
+
 export default function RouteTrackingSupervisor() {
   useEffect(() => {
     let disposed = false;
@@ -87,7 +111,72 @@ export default function RouteTrackingSupervisor() {
     let syncQueued = false;
     let lifecycleEpoch = 0;
     let foregroundHeartbeatRequestedAt = 0;
+    let webLocationPermissionStatus: PermissionStatus | null = null;
+    let webLocationPermissionState: WebLocationPermissionState = 'unknown';
     const native = isAndroidNative();
+    const webLocationTrackingActions = {
+      startResidentLocationUpdates,
+      startRouteTracking,
+      stopResidentLocationUpdates,
+      stopRouteTracking,
+    };
+
+    const updateWebLocationPermissionState = (state: string | null | undefined) => {
+      webLocationPermissionState = normalizeWebLocationPermissionState(state);
+    };
+
+    const onWebLocationPermissionChange = () => {
+      pwaActiveTripResumeAttempted = false;
+      updateWebLocationPermissionState(webLocationPermissionStatus?.state);
+      void sync();
+    };
+
+    const replaceWebLocationPermissionStatus = (status: PermissionStatus | null) => {
+      if (webLocationPermissionStatus === status) return;
+      webLocationPermissionStatus?.removeEventListener('change', onWebLocationPermissionChange);
+      webLocationPermissionStatus = status;
+      webLocationPermissionStatus?.addEventListener('change', onWebLocationPermissionChange);
+    };
+
+    const refreshWebLocationPermissionState = async () => {
+      if (native || !navigator.permissions?.query) {
+        replaceWebLocationPermissionStatus(null);
+        updateWebLocationPermissionState('unknown');
+        return webLocationPermissionState;
+      }
+      try {
+        const status = await navigator.permissions.query({
+          name: 'geolocation' as PermissionName,
+        });
+        if (disposed) return 'unknown' as const;
+        replaceWebLocationPermissionStatus(status);
+        updateWebLocationPermissionState(status.state);
+      } catch {
+        replaceWebLocationPermissionStatus(null);
+        updateWebLocationPermissionState('unknown');
+      }
+      return webLocationPermissionState;
+    };
+
+    const reconcileWebLocationTracking = async (
+      activeTripId: string | null,
+      routePaused: boolean,
+      mode?: Parameters<typeof startRouteTracking>[1],
+    ) => {
+      const intent = resolveWebLocationTrackingIntent({
+        permissionState: webLocationPermissionState,
+        activeTripId,
+        routePaused,
+        mode,
+        activeTripResumeAttemptAvailable: !pwaActiveTripResumeAttempted,
+      });
+      if (intent.kind === 'route' && intent.consumesActiveTripResumeAttempt) {
+        // Consume before invoking watchPosition. A synchronous failure or an
+        // unanswered prompt must not cause an automatic retry 15 seconds later.
+        pwaActiveTripResumeAttempted = true;
+      }
+      await applyWebLocationTrackingIntent(intent, webLocationTrackingActions);
+    };
 
     const stopAllLocationWork = async (
       nativeReason: 'manual' | 'permission-denied' | 'approval-rejected' | 'signed-out' = 'manual',
@@ -95,12 +184,14 @@ export default function RouteTrackingSupervisor() {
       // Clear native credentials first on sign-out so an in-flight WebView sync
       // cannot restore an account that the user has just left.
       if (native && nativeReason === 'signed-out') {
+        resetNativeExpresswayDetection();
         await stopNativeResidentLocation({ reason: nativeReason });
       }
       stopLocationHeartbeat();
       await stopResidentLocationUpdates();
       await stopRouteTracking();
       if (native && nativeReason !== 'signed-out') {
+        resetNativeExpresswayDetection();
         await stopNativeResidentLocation({ reason: nativeReason });
       }
     };
@@ -112,6 +203,11 @@ export default function RouteTrackingSupervisor() {
     };
 
     const maybeRequestForegroundHeartbeat = () => {
+      // When allowed, the PWA uses the supervisor-owned geolocation watcher.
+      // An additional getCurrentPosition request on every visibility change
+      // can create duplicate browser prompts. Android uses the app-owned
+      // foreground service, so it still needs this one-shot refresh.
+      if (!native) return;
       if (document.visibilityState !== 'visible') return;
       const now = Date.now();
       if (now - foregroundHeartbeatRequestedAt < 30000) return;
@@ -134,10 +230,6 @@ export default function RouteTrackingSupervisor() {
           } catch (error) {
             console.warn('[resident-location] session refresh handoff failed', error);
           }
-        }
-        const reconciliationTripId = await getActiveTripId();
-        if (reconciliationTripId) {
-          await reconcileBreakToRestThreshold({ tripId: reconciliationTripId });
         }
         const identity = await getDriverIdentity();
         const approved =
@@ -173,24 +265,50 @@ export default function RouteTrackingSupervisor() {
           // legacy watcher active here would record the same movement twice.
           await stopResidentLocationUpdates();
           await stopRouteTracking();
-          await persistNativeResidentLocationQueue();
+          try {
+            const expresswayDrain = await drainNativeResidentExpresswayEventQueue({ enabled: true });
+            if (expresswayDrain.materialized > 0) notifyTrackLogEventsChanged();
+          } catch {
+            // Leave the native transition unacknowledged for the next ordered
+            // replay, while still draining route points below.
+            console.warn('[resident-location] native expressway event handoff deferred');
+          }
+          const drained = await persistNativeResidentLocationQueue();
+          // Java ResidentLocationService is the sole detector/notification
+          // owner for newly captured Android points. This wake only retires
+          // durable work queued by an older WebView build.
+          resumePendingNativeExpresswayDetection();
+          if (drained.persisted > 0) notifyTrackLogEventsChanged();
         } else {
-          await startResidentLocationUpdates('battery');
+          await refreshWebLocationPermissionState();
+          if (disposed || syncEpoch !== lifecycleEpoch) return;
         }
         await ensureTracklogPushRegistration();
+        await retryPendingAdminMessageLocationRequests();
         maybeRequestForegroundHeartbeat();
         await pollTracklogAdminMessages();
 
+        // Capture before reading the trip/events snapshot. An explicit No or
+        // confirmed rest increments this generation, preventing an older sync
+        // from overwriting the driver's newer native tracking state.
+        const trackingStateGeneration = native
+          ? getNativeResidentLocationTrackingStateGeneration()
+          : undefined;
+        const expresswayConfig = native ? await getAutoExpresswayConfig() : undefined;
         const tripId = await getActiveTripId();
         if (!tripId) {
+          resetNativeExpresswayDetection();
           if (native) {
             await reconcileNativeResidentLocation({
               approved: true,
               setupComplete: true,
               activeTripId: null,
+              expectedTrackingStateGeneration: trackingStateGeneration,
+              expresswayOpen: false,
+              expresswayConfig,
             });
           } else {
-            await stopRouteTracking();
+            await reconcileWebLocationTracking(null, false);
           }
           const pendingPrompt = await getPendingExpresswayEndPrompt();
           const pendingDecision = await getPendingExpresswayEndDecision();
@@ -239,9 +357,12 @@ export default function RouteTrackingSupervisor() {
               approved: true,
               setupComplete: true,
               activeTripId: null,
+              expectedTrackingStateGeneration: trackingStateGeneration,
+              expresswayOpen: openExpressway,
+              expresswayConfig,
             });
           } else {
-            await stopRouteTracking();
+            await reconcileWebLocationTracking(tripId, true);
           }
           return;
         }
@@ -256,14 +377,27 @@ export default function RouteTrackingSupervisor() {
             return;
           }
           if (disposed || syncEpoch !== lifecycleEpoch) return;
+          const breakThresholdTs = getOpenBreakToRestThresholdTs(events);
+          const breakConfirmation = breakThresholdTs
+            ? await getBreakToRestConfirmationState({ tripId })
+            : null;
           await reconcileNativeResidentLocation({
             approved: true,
             setupComplete: true,
             activeTripId: tripId,
-            routePauseAt: getOpenBreakToRestThresholdTs(events),
+            expectedTrackingStateGeneration: trackingStateGeneration,
+            expresswayOpen: openExpressway,
+            expresswayConfig,
+            // While a decision is pending (or its ODO is still being entered),
+            // preserve the three-hour pause boundary. A declined conversion is
+            // still an active break, so resume future route points immediately.
+            routePauseAt: resolveBreakToRestRoutePauseAt(
+              breakThresholdTs,
+              breakConfirmation?.status ?? null,
+            ),
           });
         } else {
-          await startRouteTracking(tripId, mode);
+          await reconcileWebLocationTracking(tripId, false, mode);
         }
       } catch {
         // retry on next tick
@@ -284,6 +418,12 @@ export default function RouteTrackingSupervisor() {
       }
     };
     const onSyncRequest = () => {
+      if (!native) {
+        // These events follow explicit trip/record/setup operations. Unlike a
+        // timer or visibility sync, an explicit operation may have just proved
+        // or changed browser permission and is allowed to re-evaluate once.
+        pwaActiveTripResumeAttempted = false;
+      }
       void sync();
     };
     const unsubscribeAuth = onDriverAuthStateChange(event => {
@@ -333,6 +473,7 @@ export default function RouteTrackingSupervisor() {
       if (resumeListener) {
         void resumeListener.then(listener => listener.remove());
       }
+      replaceWebLocationPermissionStatus(null);
       stopLocationHeartbeat();
       void stopResidentLocationUpdates();
       void stopRouteTracking();

@@ -1,7 +1,13 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { listTrips, TripSummary } from '../../db/repositories';
+import { getAllEvents, listTrips, type TripSummary } from '../../db/repositories';
 import { deleteTripEverywhere } from '../../services/tripDeletion';
+import { TRACKLOG_EVENTS_CHANGED_EVENT } from '../../services/localEventsChanged';
+import {
+  buildTripExpresswayHistorySummaries,
+  formatTripExpresswayHistorySummary,
+  type TripExpresswayHistorySummary,
+} from './historyExpresswaySummary';
 
 function fmtLocal(ts?: string) {
   if (!ts) return '-';
@@ -35,20 +41,27 @@ function fmtDuration(mins?: number) {
 
 export default function HistoryScreen() {
   const [rows, setRows] = useState<TripSummary[]>([]);
+  const [expresswayByTrip, setExpresswayByTrip] = useState<Map<string, TripExpresswayHistorySummary>>(
+    () => new Map(),
+  );
   const [err, setErr] = useState<string | null>(null);
   const activeCount = rows.filter(row => row.status === 'active').length;
   const endedCount = rows.length - activeCount;
   async function load() {
     setErr(null);
     try {
-      const r = await listTrips();
-      setRows(r);
+      const [nextRows, events] = await Promise.all([listTrips(), getAllEvents()]);
+      setRows(nextRows);
+      setExpresswayByTrip(buildTripExpresswayHistorySummaries(events));
     } catch (e: any) {
       setErr(e?.message ?? '読み込みに失敗しました');
     }
   }
   useEffect(() => {
-    load();
+    void load();
+    const refresh = () => void load();
+    window.addEventListener(TRACKLOG_EVENTS_CHANGED_EVENT, refresh);
+    return () => window.removeEventListener(TRACKLOG_EVENTS_CHANGED_EVENT, refresh);
   }, []);
   async function handleDelete(tripId: string) {
     const ok = window.confirm('この運行を削除します。よろしいですか？');
@@ -92,60 +105,74 @@ export default function HistoryScreen() {
             まだ履歴がありません。運行開始から記録を作成してください。
           </div>
         )}
-        {rows.map(r => (
-          <Link
-            key={r.tripId}
-            to={`/trip/${r.tripId}`}
-            className="card history-card"
-          >
-            <div className="history-card__top">
-              <div className="history-card__copy">
-                <div className="history-card__range">
-                  {fmtLocal(r.startTs)} → {fmtLocal(r.endTs)}
-                </div>
-                <div className="history-card__meta">
-                  {r.endTs ? '所要' : '経過'}: {fmtDuration(diffMinutes(r.startTs, r.endTs))}
-                </div>
-              </div>
-              <div className="history-card__identity">
-                <div className={`history-card__status ${r.status === 'active' ? 'history-card__status--active' : ''}`}>
-                  {r.status === 'active' ? '運行中' : '運行終了'}
-                </div>
-                <div className="history-card__id">#{r.tripId.slice(0, 8)}</div>
-              </div>
-            </div>
-            <div className="history-card__stats">
-              <div className="history-card__stat">
-                <span>総距離</span>
-                <strong>{r.totalKm ?? '-'} km</strong>
-              </div>
-              <div className="history-card__stat">
-                <span>最終区間</span>
-                <strong>{r.lastLegKm ?? '-'} km</strong>
-              </div>
-              <div className="history-card__stat">
-                <span>ODO</span>
-                <strong>{r.odoStart} → {r.odoEnd ?? '-'}</strong>
-              </div>
-            </div>
-            <div className="history-card__metrics">
-              <div className="metric-chip"><span>開始</span> {fmtLocal(r.startTs)}</div>
-              <div className="metric-chip"><span>終了</span> {fmtLocal(r.endTs)}</div>
-            </div>
-            <div className="history-card__actions">
-              <button
-                onClick={e => {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  void handleDelete(r.tripId);
-                }}
-                className="trip-detail__button trip-detail__button--danger trip-detail__button--small"
+        {rows.map(r => {
+          const summary = expresswayByTrip.get(r.tripId);
+          const expressway = summary
+            ? formatTripExpresswayHistorySummary(summary, { tripActive: r.status === 'active' })
+            : null;
+          return (
+            <article key={r.tripId} className="card history-card history-card--interactive">
+              <Link
+                to={`/trip/${r.tripId}`}
+                className="history-card__link"
+                aria-label={`${fmtLocal(r.startTs)}開始の運行詳細を開く`}
               >
-                削除
-              </button>
-            </div>
-          </Link>
-        ))}
+                <div className="history-card__top">
+                  <div className="history-card__copy">
+                    <div className="history-card__range">
+                      {fmtLocal(r.startTs)} → {fmtLocal(r.endTs)}
+                    </div>
+                    <div className="history-card__meta">
+                      {r.endTs ? '所要' : '経過'}: {fmtDuration(diffMinutes(r.startTs, r.endTs))}
+                    </div>
+                  </div>
+                  <div className="history-card__identity">
+                    <div className={`history-card__status ${r.status === 'active' ? 'history-card__status--active' : ''}`}>
+                      {r.status === 'active' ? '運行中' : '運行終了'}
+                    </div>
+                    <div className="history-card__id">#{r.tripId.slice(0, 8)}</div>
+                  </div>
+                </div>
+                <div className="history-card__stats">
+                  <div className="history-card__stat">
+                    <span>総距離</span>
+                    <strong>{r.totalKm ?? '-'} km</strong>
+                  </div>
+                  <div className="history-card__stat">
+                    <span>最終区間</span>
+                    <strong>{r.lastLegKm ?? '-'} km</strong>
+                  </div>
+                  <div className="history-card__stat">
+                    <span>ODO</span>
+                    <strong>{r.odoStart} → {r.odoEnd ?? '-'}</strong>
+                  </div>
+                </div>
+                {expressway && (
+                  <div className={`history-card__expressway history-card__expressway--${expressway.state}`}>
+                    <span className="history-card__expressway-label">高速IC</span>
+                    <strong>{expressway.routeLabel}</strong>
+                    {expressway.countLabel && <span>{expressway.countLabel}</span>}
+                  </div>
+                )}
+                <div className="history-card__metrics">
+                  <div className="metric-chip"><span>開始</span> {fmtLocal(r.startTs)}</div>
+                  <div className="metric-chip"><span>終了</span> {fmtLocal(r.endTs)}</div>
+                </div>
+                <span className="history-card__open" aria-hidden="true">詳細を見る →</span>
+              </Link>
+              <div className="history-card__actions">
+                <button
+                  type="button"
+                  onClick={() => void handleDelete(r.tripId)}
+                  className="trip-detail__button trip-detail__button--danger trip-detail__button--small"
+                  aria-label={`${fmtLocal(r.startTs)}開始の運行を削除`}
+                >
+                  削除
+                </button>
+              </div>
+            </article>
+          );
+        })}
       </div>
     </div>
   );

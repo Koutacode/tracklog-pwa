@@ -6,7 +6,11 @@ import type { LiveDriveStatus } from '../../../domain/liveDriveStatus';
 type DrivingViewProps = {
   liveDrive: LiveDriveStatus;
   onVoiceCommand: () => void;
+  voiceAvailable: boolean;
   voiceListening: boolean;
+  voiceLastText: string | null;
+  voiceResult: string | null;
+  voiceError: string | null;
   expresswayActive: boolean;
   expresswayPending: 'start' | 'end' | null;
   onExpresswayToggle: (action: 'start' | 'end') => void;
@@ -15,7 +19,11 @@ type DrivingViewProps = {
 export const DrivingView: React.FC<DrivingViewProps> = ({
   liveDrive,
   onVoiceCommand,
+  voiceAvailable,
   voiceListening,
+  voiceLastText,
+  voiceResult,
+  voiceError,
   expresswayActive,
   expresswayPending,
   onExpresswayToggle,
@@ -40,6 +48,35 @@ export const DrivingView: React.FC<DrivingViewProps> = ({
 
   return (
     <div className="driving-view" style={{ display: 'grid', gap: 24, padding: '24px 0' }}>
+      <div className="driving-command-stack">
+        <BigButton
+          label={expresswayLabel}
+          hint={expresswayPending ? '位置情報とIC名を記録しています' : undefined}
+          variant="neutral"
+          className={`big-button--expressway-hero ${
+            effectiveExpresswayActive ? 'big-button--expressway-end' : 'big-button--expressway-start'
+          }${expresswayPending ? ' big-button--pending' : ''}`}
+          disabled={!!expresswayPending}
+          onClick={() => onExpresswayToggle(effectiveExpresswayActive ? 'end' : 'start')}
+        />
+        <button
+          type="button"
+          onClick={onVoiceCommand}
+          disabled={voiceListening || !voiceAvailable}
+          className="home-voice-button"
+          style={{ height: 100, fontSize: 24 }}
+        >
+          {voiceListening ? '聞き取り中…' : voiceAvailable ? '🎙 音声で操作' : '音声操作は利用できません'}
+        </button>
+        {(voiceLastText || voiceResult || voiceError) && (
+          <div className="driving-voice-feedback" aria-live="polite">
+            {voiceLastText && <span>認識: {voiceLastText}</span>}
+            {voiceResult && <strong>{voiceResult}</strong>}
+            {voiceError && <strong className="driving-voice-feedback__error">{voiceError}</strong>}
+          </div>
+        )}
+      </div>
+
       <div style={{ display: 'flex', justifyContent: 'center' }}>
         <ProgressGauge
           value={driveMinutes}
@@ -64,26 +101,6 @@ export const DrivingView: React.FC<DrivingViewProps> = ({
         </div>
       </div>
 
-      <div className="driving-command-stack">
-        <BigButton
-          label={expresswayLabel}
-          hint={expresswayPending ? '位置情報とIC名を記録しています' : undefined}
-          variant="neutral"
-          className={`big-button--expressway-hero ${
-            effectiveExpresswayActive ? 'big-button--expressway-end' : 'big-button--expressway-start'
-          }${expresswayPending ? ' big-button--pending' : ''}`}
-          disabled={!!expresswayPending}
-          onClick={() => onExpresswayToggle(effectiveExpresswayActive ? 'end' : 'start')}
-        />
-        <button
-          onClick={onVoiceCommand}
-          disabled={voiceListening}
-          className="home-voice-button"
-          style={{ height: 100, fontSize: 24 }}
-        >
-          {voiceListening ? '聞き取り中…' : '🎙 音声で操作'}
-        </button>
-      </div>
     </div>
   );
 };

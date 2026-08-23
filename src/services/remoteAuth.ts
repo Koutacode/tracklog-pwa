@@ -7,11 +7,26 @@ import type { AdminSession, DriverApprovalStatus, DriverIdentity } from '../doma
 import { getStableDeviceKey } from './deviceIdentity';
 import {
   clearPersistedDriverAuthSession,
+  clearAuthCodeVerifier,
   adminSupabase,
   driverAuthSupabase,
   driverSupabase,
+  restoreAuthCodeVerifier,
+  snapshotAuthCodeVerifier,
   SUPABASE_CONFIGURED,
 } from './supabase';
+import {
+  beginNativeAuthAttempt,
+  clearNativeAuthAttempt,
+  clearNativeAuthCallbackUrl,
+  getNativeAuthAttempt,
+  getPendingNativeAuthCallback,
+  markNativeAuthCallbackExchangeStarted,
+  markNativeAuthCallbackSessionEstablished,
+  peekNativeAuthAttemptRecord,
+  type NativeAuthAttempt,
+  type NativeAuthCallbackIntent,
+} from './nativeAuthCallbackPersistence';
 import {
   installNativeResidentLocationAuthorization,
   invalidateNativeResidentLocationSessionRestore,
@@ -56,6 +71,59 @@ const WEB_ADMIN_CALLBACK_PATH = '/auth/admin/callback';
 const WEB_DRIVER_CALLBACK_PATH = '/auth/driver/callback';
 const EMAIL_OTP_PATTERN = /^\d{6,10}$/;
 const EMAIL_OTP_ERROR_MESSAGE = 'メール本文に表示された認証コードをそのまま入力してください';
+
+export type NativeAuthStartOptions = {
+  restartNativeAttempt?: boolean;
+};
+
+export class NativeAuthOperationInProgressError extends Error {
+  readonly code = 'native_auth_operation_in_progress';
+
+  constructor() {
+    super('ログイン処理中です。完了後にもう一度お試しください。');
+    this.name = 'NativeAuthOperationInProgressError';
+  }
+}
+
+let nativeAuthStartInProgress = false;
+let nativeAuthExchangeInProgress = false;
+
+function acquireNativeAuthStartLock() {
+  if (nativeAuthStartInProgress || nativeAuthExchangeInProgress) {
+    throw new NativeAuthOperationInProgressError();
+  }
+  nativeAuthStartInProgress = true;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    nativeAuthStartInProgress = false;
+  };
+}
+
+function acquireNativeAuthExchangeLock() {
+  if (nativeAuthStartInProgress || nativeAuthExchangeInProgress) {
+    throw new NativeAuthOperationInProgressError();
+  }
+  nativeAuthExchangeInProgress = true;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    nativeAuthExchangeInProgress = false;
+  };
+}
+
+export type NormalizedNativeAuthNext = {
+  nextPath: string;
+  role: NativeAuthCallbackIntent;
+};
+
+const NATIVE_AUTH_NEXT_ROUTES = new Map<string, NativeAuthCallbackIntent>([
+  ['/admin', 'admin'],
+  ['/settings', 'driver'],
+  ['/', 'driver'],
+]);
 
 type DriverProfileSeed = {
   displayName: string;
@@ -542,16 +610,252 @@ export async function setRemoteLastSyncAt(ts: string | null): Promise<void> {
 
 export { claimTracklogDeviceProfile };
 
-export function getAdminRedirectUrl(override?: string) {
-  if (override?.trim()) return override.trim();
-  if (Capacitor.isNativePlatform()) return NATIVE_ADMIN_REDIRECT;
-  return `${window.location.origin}${WEB_ADMIN_CALLBACK_PATH}`;
+function decodeNativeNext(value: string) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
 }
 
-export function getDriverRedirectUrl(override?: string) {
-  if (override?.trim()) return override.trim();
-  if (Capacitor.isNativePlatform()) return NATIVE_DRIVER_REDIRECT;
-  return `${window.location.origin}${WEB_DRIVER_CALLBACK_PATH}`;
+export function normalizeNativeAuthNextPath(value: string | null | undefined): NormalizedNativeAuthNext | null {
+  if (!value) return null;
+  const decoded = decodeNativeNext(value).trim();
+  if (
+    !decoded.startsWith('/') ||
+    decoded.startsWith('//') ||
+    decoded.includes('\\') ||
+    /[\u0000-\u001f\u007f]/.test(decoded) ||
+    /(?:^|\/)(?:\.{1,2}|%2e(?:%2e)?)(?:\/|$)/i.test(decoded)
+  ) {
+    return null;
+  }
+  try {
+    const parsed = new URL(decoded, 'https://tracklog.local');
+    if (parsed.origin !== 'https://tracklog.local') return null;
+    const pathname = parsed.pathname.replace(/\/+$/, '') || '/';
+    const role = NATIVE_AUTH_NEXT_ROUTES.get(pathname);
+    if (!role) return null;
+    return { nextPath: `${pathname}${parsed.search}`, role };
+  } catch {
+    return null;
+  }
+}
+
+type BuildAuthRedirectOptions = {
+  role: NativeAuthCallbackIntent;
+  native: boolean;
+  currentOrigin: string;
+  override?: string;
+  attemptId?: string;
+};
+
+export function buildAuthRedirectUrl({
+  role,
+  native,
+  currentOrigin,
+  override,
+  attemptId,
+}: BuildAuthRedirectOptions) {
+  const expectedWebPath = role === 'admin' ? WEB_ADMIN_CALLBACK_PATH : WEB_DRIVER_CALLBACK_PATH;
+  const defaultNative = role === 'admin' ? NATIVE_ADMIN_REDIRECT : NATIVE_DRIVER_REDIRECT;
+  const raw = override?.trim() || (native ? defaultNative : `${currentOrigin}${expectedWebPath}`);
+  const parsed = native ? new URL(raw) : new URL(raw, currentOrigin);
+
+  if (native) {
+    if (
+      parsed.protocol !== 'com.tracklog.assist:' ||
+      parsed.host !== 'auth' ||
+      parsed.username ||
+      parsed.password ||
+      parsed.port ||
+      (parsed.pathname !== '' && parsed.pathname !== '/')
+    ) {
+      throw new Error('Android認証の戻り先が許可されていません。');
+    }
+    const requestedNext = normalizeNativeAuthNextPath(parsed.searchParams.get('next'));
+    if (override?.trim() && !requestedNext) {
+      throw new Error('Android認証後の画面が許可されていません。');
+    }
+    const fallbackNext = role === 'admin' ? '/admin' : '/settings';
+    const normalizedNext = requestedNext ?? normalizeNativeAuthNextPath(fallbackNext);
+    if (!normalizedNext || normalizedNext.role !== role) {
+      throw new Error('認証後の画面がログインの種類と一致しません。');
+    }
+    const result = new URL('com.tracklog.assist://auth');
+    result.searchParams.set('next', normalizedNext.nextPath);
+    if (attemptId) result.searchParams.set('attempt', attemptId);
+    return result.toString();
+  }
+
+  const origin = new URL(currentOrigin).origin;
+  if (
+    (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') ||
+    parsed.origin !== origin ||
+    parsed.username ||
+    parsed.password ||
+    normalizeCallbackPath(parsed.pathname) !== expectedWebPath
+  ) {
+    throw new Error('Web認証の戻り先が許可されていません。');
+  }
+  return `${origin}${expectedWebPath}`;
+}
+
+function getCurrentOrigin() {
+  if (typeof window === 'undefined') return 'https://tracklog.local';
+  return window.location.origin;
+}
+
+export function getAdminRedirectUrl(override?: string, attemptId?: string) {
+  return buildAuthRedirectUrl({
+    role: 'admin',
+    native: Capacitor.isNativePlatform(),
+    currentOrigin: getCurrentOrigin(),
+    override,
+    attemptId,
+  });
+}
+
+export function getDriverRedirectUrl(override?: string, attemptId?: string) {
+  return buildAuthRedirectUrl({
+    role: 'driver',
+    native: Capacitor.isNativePlatform(),
+    currentOrigin: getCurrentOrigin(),
+    override,
+    attemptId,
+  });
+}
+
+export async function withNativeAuthStartForNative<T>(
+  intent: NativeAuthCallbackIntent,
+  options: NativeAuthStartOptions,
+  start: (attempt: NativeAuthAttempt) => Promise<T>,
+): Promise<T> {
+  // Acquire synchronously, before verifier cleanup yields. This prevents a
+  // second start from claiming/replacing the attempt while cleanup or the
+  // provider request that writes the new verifier is pending.
+  const releaseStartLock = acquireNativeAuthStartLock();
+  try {
+    const storedAttempt = peekNativeAuthAttemptRecord();
+    const activeAttempt = getNativeAuthAttempt();
+    if (storedAttempt && !activeAttempt) {
+      await clearAuthCodeVerifier(storedAttempt.intent);
+    }
+    if (options.restartNativeAttempt === true) {
+      let previousIntent = activeAttempt?.intent ?? null;
+      if (!previousIntent) {
+        const pending = getPendingNativeAuthCallback();
+        try {
+          previousIntent = pending ? parseAuthCallbackUrl(pending.url).callbackRole : null;
+        } catch {
+          previousIntent = null;
+        }
+      }
+      await clearAuthCodeVerifier(previousIntent ?? intent);
+    }
+    const attempt = beginNativeAuthAttempt(intent, { restart: options.restartNativeAttempt === true });
+    return await start(attempt);
+  } finally {
+    releaseStartLock();
+  }
+}
+
+async function withNativeAuthStart<T>(
+  intent: NativeAuthCallbackIntent,
+  options: NativeAuthStartOptions,
+  start: (attempt: NativeAuthAttempt | null) => Promise<T>,
+): Promise<T> {
+  if (!Capacitor.isNativePlatform()) return start(null);
+  return withNativeAuthStartForNative(intent, options, start);
+}
+
+function getErrorStatus(error: unknown) {
+  if (typeof error !== 'object' || error == null) return null;
+  const value = (error as { status?: unknown }).status;
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+export type AuthExchangeFailureKind = 'transient' | 'permanent';
+
+export function classifyAuthExchangeFailure(error: unknown): AuthExchangeFailureKind {
+  const status = getErrorStatus(error);
+  if (status != null) {
+    if (status === 0 || status === 408 || status === 425 || status === 429 || status >= 500) {
+      return 'transient';
+    }
+    if (status >= 400 && status < 500) return 'permanent';
+  }
+  const details = typeof error === 'object' && error != null
+    ? `${(error as { code?: unknown }).code ?? ''} ${(error as { message?: unknown }).message ?? ''}`
+    : `${error ?? ''}`;
+  const normalized = details.toLowerCase();
+  if (
+    normalized.includes('failed to fetch') ||
+    normalized.includes('network') ||
+    normalized.includes('timeout') ||
+    normalized.includes('temporar') ||
+    normalized.includes('connection') ||
+    normalized.includes('rate limit')
+  ) {
+    return 'transient';
+  }
+  if (
+    normalized.includes('invalid_grant') ||
+    normalized.includes('bad_code_verifier') ||
+    normalized.includes('code verifier') ||
+    normalized.includes('pkce') ||
+    normalized.includes('access_denied') ||
+    normalized.includes('cancel') ||
+    normalized.includes('expired') ||
+    normalized.includes('already used') ||
+    normalized.includes('code has been used') ||
+    normalized.includes('invalid code') ||
+    normalized.includes('invalid') ||
+    normalized.includes('not enabled') ||
+    normalized.includes('unsupported provider') ||
+    normalized.includes('bad request')
+  ) {
+    return 'permanent';
+  }
+  return 'transient';
+}
+
+async function clearNativeAttemptAfterStartFailure(attempt: NativeAuthAttempt | null, error: unknown) {
+  if (attempt && classifyAuthExchangeFailure(error) === 'permanent') {
+    if (clearNativeAuthAttempt(attempt.id)) {
+      await clearAuthCodeVerifier(attempt.intent);
+    }
+  }
+}
+
+export async function clearNativeAuthStartStateForRole(
+  intent: NativeAuthCallbackIntent,
+  clearVerifier: (role: NativeAuthCallbackIntent) => Promise<void> = clearAuthCodeVerifier,
+) {
+  const attempt = getNativeAuthAttempt();
+  const pending = getPendingNativeAuthCallback();
+  let mayClearVerifier = true;
+  if (attempt?.intent === intent) {
+    const cleared = clearNativeAuthAttempt(attempt.id);
+    mayClearVerifier = cleared;
+    if (cleared && pending?.attemptId === attempt.id) clearNativeAuthCallbackUrl(pending.url);
+  } else if (!attempt && pending && pending.attemptId == null) {
+    try {
+      if (parseAuthCallbackUrl(pending.url).callbackRole === intent) {
+        clearNativeAuthCallbackUrl(pending.url);
+      }
+    } catch {
+      // An invalid callback is left for the bridge's permanent-failure policy.
+    }
+  }
+  if (mayClearVerifier) await clearVerifier(intent);
+}
+
+async function discardNativeAuthAttempt(attempt: NativeAuthAttempt | null) {
+  if (!attempt) return;
+  if (clearNativeAuthAttempt(attempt.id)) {
+    await clearAuthCodeVerifier(attempt.intent);
+  }
 }
 
 export async function getAdminSession(): Promise<AdminSession> {
@@ -588,19 +892,38 @@ export async function getAdminSession(): Promise<AdminSession> {
   };
 }
 
-export async function sendAdminMagicLink(email: string, redirectTo?: string): Promise<void> {
-  if (!SUPABASE_CONFIGURED || !adminSupabase) {
+export async function sendAdminMagicLink(
+  email: string,
+  redirectTo?: string,
+  options: NativeAuthStartOptions = {},
+): Promise<void> {
+  const client = adminSupabase;
+  if (!SUPABASE_CONFIGURED || !client) {
     throw new Error('Supabase が未設定です');
   }
   const normalized = normalizeEmail(email);
   if (!normalized) {
     throw new Error('メールアドレスを入力してください');
   }
-  const { error } = await adminSupabase.auth.signInWithOtp({
-    email: normalized,
-    options: { emailRedirectTo: getAdminRedirectUrl(redirectTo) },
+  await withNativeAuthStart('admin', options, async attempt => {
+    let callbackUrl: string;
+    try {
+      callbackUrl = getAdminRedirectUrl(redirectTo, attempt?.id);
+    } catch (error) {
+      await discardNativeAuthAttempt(attempt);
+      throw error;
+    }
+    try {
+      const { error } = await client.auth.signInWithOtp({
+        email: normalized,
+        options: { emailRedirectTo: callbackUrl },
+      });
+      if (error) throw error;
+    } catch (error) {
+      await clearNativeAttemptAfterStartFailure(attempt, error);
+      throw error;
+    }
   });
-  if (error) throw error;
 }
 
 export async function verifyAdminEmailOtp(email: string, token: string): Promise<AdminSession> {
@@ -621,11 +944,17 @@ export async function verifyAdminEmailOtp(email: string, token: string): Promise
     type: 'email',
   });
   if (error) throw error;
+  if (Capacitor.isNativePlatform()) await clearNativeAuthStartStateForRole('admin');
   return getAdminSession();
 }
 
-export async function sendDriverMagicLink(email: string, redirectTo?: string): Promise<void> {
-  if (!SUPABASE_CONFIGURED || !driverAuthSupabase) {
+export async function sendDriverMagicLink(
+  email: string,
+  redirectTo?: string,
+  options: NativeAuthStartOptions = {},
+): Promise<void> {
+  const client = driverAuthSupabase;
+  if (!SUPABASE_CONFIGURED || !client) {
     throw new Error('Supabase が未設定です');
   }
   const normalized = normalizeEmail(email);
@@ -640,18 +969,37 @@ export async function sendDriverMagicLink(email: string, redirectTo?: string): P
   if (lockedEmail && !sameEmailAddress(normalized, lockedEmail)) {
     throw new Error(`この端末は ${lockedEmail} のアカウントに紐づいています。同じメールで再認証してください。`);
   }
-  const { error } = await driverAuthSupabase.auth.signInWithOtp({
-    email: normalized,
-    options: {
-      emailRedirectTo: getDriverRedirectUrl(redirectTo),
-      shouldCreateUser: !lockedEmail,
-    },
+  await withNativeAuthStart('driver', options, async attempt => {
+    let callbackUrl: string;
+    try {
+      callbackUrl = getDriverRedirectUrl(redirectTo, attempt?.id);
+    } catch (error) {
+      await discardNativeAuthAttempt(attempt);
+      throw error;
+    }
+    try {
+      const { error } = await client.auth.signInWithOtp({
+        email: normalized,
+        options: {
+          emailRedirectTo: callbackUrl,
+          shouldCreateUser: !lockedEmail,
+        },
+      });
+      if (error) throw error;
+    } catch (error) {
+      await clearNativeAttemptAfterStartFailure(attempt, error);
+      throw error;
+    }
   });
-  if (error) throw error;
 }
 
-export async function sendDriverLoginLink(email: string, redirectTo?: string): Promise<void> {
-  if (!SUPABASE_CONFIGURED || !driverAuthSupabase) {
+export async function sendDriverLoginLink(
+  email: string,
+  redirectTo?: string,
+  options: NativeAuthStartOptions = {},
+): Promise<void> {
+  const client = driverAuthSupabase;
+  if (!SUPABASE_CONFIGURED || !client) {
     throw new Error('Supabase が未設定です');
   }
   const normalized = normalizeEmail(email);
@@ -666,14 +1014,28 @@ export async function sendDriverLoginLink(email: string, redirectTo?: string): P
   if (lockedEmail && !sameEmailAddress(normalized, lockedEmail)) {
     throw new Error(`この端末は ${lockedEmail} のアカウントに紐づいています。同じメールで再認証してください。`);
   }
-  const { error } = await driverAuthSupabase.auth.signInWithOtp({
-    email: normalized,
-    options: {
-      emailRedirectTo: getDriverRedirectUrl(redirectTo),
-      shouldCreateUser: false,
-    },
+  await withNativeAuthStart('driver', options, async attempt => {
+    let callbackUrl: string;
+    try {
+      callbackUrl = getDriverRedirectUrl(redirectTo, attempt?.id);
+    } catch (error) {
+      await discardNativeAuthAttempt(attempt);
+      throw error;
+    }
+    try {
+      const { error } = await client.auth.signInWithOtp({
+        email: normalized,
+        options: {
+          emailRedirectTo: callbackUrl,
+          shouldCreateUser: false,
+        },
+      });
+      if (error) throw error;
+    } catch (error) {
+      await clearNativeAttemptAfterStartFailure(attempt, error);
+      throw error;
+    }
   });
-  if (error) throw error;
 }
 
 export async function verifyDriverEmailOtp(email: string, token: string): Promise<DriverIdentity> {
@@ -724,12 +1086,14 @@ export async function verifyDriverEmailOtp(email: string, token: string): Promis
       throw new Error('認証処理は新しい操作により中止されました');
     }
   });
+  if (Capacitor.isNativePlatform()) await clearNativeAuthStartStateForRole('driver');
   return initializeDriverIdentity();
 }
 
 export async function signOutDriver(): Promise<void> {
   const client = driverAuthSupabase;
   if (!client) return;
+  if (Capacitor.isNativePlatform()) await clearNativeAuthStartStateForRole('driver');
   const authIntent = beginDriverAuthIntent();
   markDriverExplicitSignOut();
   invalidateNativeResidentLocationSessionRestore();
@@ -748,28 +1112,50 @@ export async function signOutDriver(): Promise<void> {
   });
 }
 
-export async function getAdminGoogleSignInUrl(redirectTo?: string): Promise<string> {
-  if (!SUPABASE_CONFIGURED || !adminSupabase) {
+export async function getAdminGoogleSignInUrl(
+  redirectTo?: string,
+  options: NativeAuthStartOptions = {},
+): Promise<string> {
+  const client = adminSupabase;
+  if (!SUPABASE_CONFIGURED || !client) {
     throw new Error('Supabase が未設定です');
   }
-  const { data, error } = await adminSupabase.auth.signInWithOAuth({
-    provider: 'google',
-    options: {
-      redirectTo: getAdminRedirectUrl(redirectTo),
-      queryParams: {
-        access_type: 'offline',
-        prompt: 'select_account',
-      },
-      skipBrowserRedirect: true,
-    },
+  return withNativeAuthStart('admin', options, async attempt => {
+    let callbackUrl: string;
+    try {
+      callbackUrl = getAdminRedirectUrl(redirectTo, attempt?.id);
+    } catch (error) {
+      await discardNativeAuthAttempt(attempt);
+      throw error;
+    }
+    try {
+      const { data, error } = await client.auth.signInWithOAuth({
+        provider: 'google',
+        options: {
+          redirectTo: callbackUrl,
+          queryParams: {
+            access_type: 'offline',
+            prompt: 'select_account',
+          },
+          skipBrowserRedirect: true,
+        },
+      });
+      if (error) throw error;
+      if (!data.url) {
+        await discardNativeAuthAttempt(attempt);
+        throw new Error('GoogleログインURLの取得に失敗しました');
+      }
+      return data.url;
+    } catch (error) {
+      await clearNativeAttemptAfterStartFailure(attempt, error);
+      throw error;
+    }
   });
-  if (error) throw error;
-  if (!data.url) throw new Error('GoogleログインURLの取得に失敗しました');
-  return data.url;
 }
 
 export async function signOutAdmin(): Promise<void> {
   if (!adminSupabase) return;
+  if (Capacitor.isNativePlatform()) await clearNativeAuthStartStateForRole('admin');
   const { error } = await adminSupabase.auth.signOut({ scope: 'local' });
   if (error) throw error;
 }
@@ -830,13 +1216,241 @@ function throwWebAuthCallbackError(parsed: ParsedWebAuthCallback) {
   }
 }
 
+type NativeCodeExchangeProtectionOptions = {
+  role: NativeAuthCallbackIntent;
+  callbackUrl: string;
+  attemptId: string | null;
+  exchange(): Promise<void>;
+};
+
+function callbackStillOwnsVerifier(callbackUrl: string, attemptId: string | null) {
+  const activeAttempt = getNativeAuthAttempt();
+  const pending = getPendingNativeAuthCallback();
+  if (!pending || pending.url !== callbackUrl || pending.attemptId !== attemptId) return false;
+  if (attemptId) return activeAttempt?.id === attemptId;
+  return activeAttempt == null;
+}
+
+export async function exchangeNativeAuthCodeWithRetryProtection({
+  role,
+  callbackUrl,
+  attemptId,
+  exchange,
+}: NativeCodeExchangeProtectionOptions) {
+  // Supabase auth-js removes the PKCE verifier when a response arrives, even
+  // for retryable failures. Do not let a restart write a new verifier until
+  // this entire exchange (including any restore) has settled.
+  const releaseExchangeLock = acquireNativeAuthExchangeLock();
+  try {
+    const verifierSnapshot = await snapshotAuthCodeVerifier(role);
+    try {
+      await exchange();
+      markNativeAuthCallbackSessionEstablished(callbackUrl);
+    } catch (error) {
+      if (
+        verifierSnapshot &&
+        classifyAuthExchangeFailure(error) === 'transient' &&
+        callbackStillOwnsVerifier(callbackUrl, attemptId)
+      ) {
+        await restoreAuthCodeVerifier(role, verifierSnapshot);
+      }
+      throw error;
+    }
+  } finally {
+    releaseExchangeLock();
+  }
+}
+
+export async function exchangeWebAuthCodeWithRetryProtection(
+  role: NativeAuthCallbackIntent,
+  exchange: () => Promise<void>,
+) {
+  const releaseExchangeLock = acquireNativeAuthExchangeLock();
+  try {
+    const verifierSnapshot = await snapshotAuthCodeVerifier(role);
+    try {
+      await exchange();
+    } catch (error) {
+      if (verifierSnapshot && classifyAuthExchangeFailure(error) === 'transient') {
+        await restoreAuthCodeVerifier(role, verifierSnapshot);
+        throw Object.assign(
+          new Error('通信の問題で認証コードを確認できませんでした。'),
+          { cause: error, webAuthCodeRetryable: true as const },
+        );
+      }
+      throw error;
+    }
+  } finally {
+    releaseExchangeLock();
+  }
+}
+
+function getSessionIssuedAtMs(session: Session) {
+  if (
+    typeof session.expires_at === 'number' &&
+    Number.isFinite(session.expires_at) &&
+    typeof session.expires_in === 'number' &&
+    Number.isFinite(session.expires_in)
+  ) {
+    return (session.expires_at - session.expires_in) * 1_000;
+  }
+  return null;
+}
+
+function getJwtSessionId(accessToken: unknown): string | null {
+  if (typeof accessToken !== 'string') return null;
+  const payload = accessToken.split('.')[1];
+  if (!payload) return null;
+  try {
+    const normalized = payload.replace(/-/g, '+').replace(/_/g, '/');
+    const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '=');
+    const decoded = globalThis.atob(padded);
+    const sessionId = (JSON.parse(decoded) as { session_id?: unknown }).session_id;
+    return typeof sessionId === 'string' && /^[A-Za-z0-9_-]{8,128}$/.test(sessionId)
+      ? sessionId
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function fallbackSessionFingerprint(material: string) {
+  let first = 0x811c9dc5;
+  let second = 0x9e3779b9;
+  for (let index = 0; index < material.length; index += 1) {
+    const code = material.charCodeAt(index);
+    first = Math.imul(first ^ code, 0x01000193);
+    second = Math.imul(second ^ code, 0x85ebca6b);
+  }
+  return `local:${(first >>> 0).toString(16).padStart(8, '0')}${(second >>> 0).toString(16).padStart(8, '0')}`;
+}
+
+async function getSessionFingerprint(session: Session | null): Promise<string | null> {
+  if (!session?.user) return null;
+  const accessToken = (session as { access_token?: unknown }).access_token;
+  const sessionId = getJwtSessionId(accessToken);
+  if (sessionId) return `sid:${sessionId}`;
+
+  // Persist only an irreversible digest/fallback fingerprint, never a token.
+  const material = typeof accessToken === 'string' && accessToken
+    ? accessToken
+    : `${session.user.id}:${getSessionIssuedAtMs(session) ?? ''}:${session.expires_at ?? ''}`;
+  try {
+    const digest = await globalThis.crypto?.subtle?.digest(
+      'SHA-256',
+      new TextEncoder().encode(material),
+    );
+    if (digest) {
+      const hex = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
+      return `sha256:${hex}`;
+    }
+  } catch {
+    // Older WebViews still get a bounded, non-secret comparison fingerprint.
+  }
+  return fallbackSessionFingerprint(material);
+}
+
+async function hasEstablishedNativeCallbackSession(
+  callbackUrl: string,
+  attemptId: string | null,
+  session: Session | null,
+) {
+  const pending = getPendingNativeAuthCallback();
+  if (!pending || pending.url !== callbackUrl || pending.attemptId !== attemptId) {
+    return false;
+  }
+  const attempt = getNativeAuthAttempt();
+  if (attemptId && attempt?.id !== attemptId) return false;
+  if (!attemptId && attempt) return false;
+  if (!session?.user) return false;
+  const issuedAt = getSessionIssuedAtMs(session);
+  const earliestExpectedSession = Math.max(
+    attempt?.startedAt ?? 0,
+    pending.exchangeStartedAt ?? pending.receivedAt,
+  ) - 60_000;
+  if (issuedAt != null && issuedAt < earliestExpectedSession) return false;
+
+  if (pending.sessionEstablishedAt) {
+    if (attempt && pending.sessionEstablishedAt < attempt.startedAt) return false;
+    return attempt == null || issuedAt != null;
+  }
+
+  // Process-death recovery: auth-js persists the new session before its
+  // exchange promise resolves. If the WebView dies in that small gap, the
+  // changed session proves the single-use code was already consumed.
+  if (!pending.exchangeStartedAt) return false;
+  const currentFingerprint = await getSessionFingerprint(session);
+  if (!currentFingerprint || currentFingerprint === pending.priorSessionFingerprint) return false;
+  markNativeAuthCallbackSessionEstablished(callbackUrl);
+  return true;
+}
+
+type ResumeOrExchangeNativeAuthOptions = NativeCodeExchangeProtectionOptions & {
+  getSession(): Promise<Session | null>;
+};
+
+export async function resumeOrExchangeNativeAuthCodeSession(
+  options: ResumeOrExchangeNativeAuthOptions,
+): Promise<'resumed' | 'exchanged'> {
+  const sessionBeforeExchange = await options.getSession();
+  if (await hasEstablishedNativeCallbackSession(
+    options.callbackUrl,
+    options.attemptId,
+    sessionBeforeExchange,
+  )) {
+    return 'resumed';
+  }
+  const priorSessionFingerprint = await getSessionFingerprint(sessionBeforeExchange);
+  if (!markNativeAuthCallbackExchangeStarted(
+    options.callbackUrl,
+    options.attemptId,
+    priorSessionFingerprint,
+  )) {
+    throw Object.assign(
+      new Error('ログイン試行が更新されています。最新のログインからやり直してください。'),
+      { status: 400, code: 'native_auth_callback_state_mismatch' },
+    );
+  }
+  await exchangeNativeAuthCodeWithRetryProtection(options);
+  return 'exchanged';
+}
+
+async function establishNativeAuthSession(
+  client: NonNullable<typeof driverAuthSupabase>,
+  parsed: ParsedWebAuthCallback & { attemptId?: string | null },
+  role: NativeAuthCallbackIntent,
+  callbackUrl: string,
+) {
+  if (!parsed.code) {
+    throw new Error('安全な認証コードが見つかりません。ログインを最初からやり直してください。');
+  }
+  const attemptId = parsed.attemptId ?? null;
+  await resumeOrExchangeNativeAuthCodeSession({
+    role,
+    callbackUrl,
+    attemptId,
+    getSession: async () => {
+      const { data, error } = await client.auth.getSession();
+      if (error) throw error;
+      return data.session;
+    },
+    exchange: async () => {
+      const { error } = await client.auth.exchangeCodeForSession(parsed.code!);
+      if (error) throw error;
+    },
+  });
+}
+
 async function establishWebAuthSession(
   client: NonNullable<typeof driverAuthSupabase>,
   parsed: ParsedWebAuthCallback,
+  role: NativeAuthCallbackIntent,
 ) {
   if (parsed.code) {
-    const { error } = await client.auth.exchangeCodeForSession(parsed.code);
-    if (error) throw error;
+    await exchangeWebAuthCodeWithRetryProtection(role, async () => {
+      const { error } = await client.auth.exchangeCodeForSession(parsed.code!);
+      if (error) throw error;
+    });
     return;
   }
 
@@ -885,7 +1499,7 @@ export async function handleAdminWebAuthCallbackUrl(url: string): Promise<{
   const parsed = parseWebAuthCallbackUrl(url, WEB_ADMIN_CALLBACK_PATH);
   if (!parsed) return { handled: false };
   throwWebAuthCallbackError(parsed);
-  await establishWebAuthSession(adminSupabase, parsed);
+  await establishWebAuthSession(adminSupabase, parsed, 'admin');
   return { handled: true };
 }
 
@@ -903,7 +1517,7 @@ export async function handleDriverWebAuthCallbackUrl(url: string): Promise<{
   const authIntent = beginDriverAuthIntent();
   invalidateNativeResidentLocationSessionRestore();
   await withDriverAuthMutation(async () => {
-    await establishWebAuthSession(client, parsed);
+    await establishWebAuthSession(client, parsed, 'driver');
     if (!isCurrentDriverAuthIntent(authIntent)) {
       throw new Error('認証処理は新しい操作により中止されました');
     }
@@ -925,33 +1539,53 @@ export async function handleDriverWebAuthCallbackUrl(url: string): Promise<{
   };
 }
 
-function parseAuthCallbackUrl(url: string) {
+export function parseAuthCallbackUrl(url: string) {
   const parsed = new URL(url);
   const query = new URLSearchParams(parsed.search);
   const hash = new URLSearchParams(parsed.hash.startsWith('#') ? parsed.hash.slice(1) : parsed.hash);
+  const code = query.get('code') ?? hash.get('code');
   const accessToken = hash.get('access_token') ?? query.get('access_token');
   const refreshToken = hash.get('refresh_token') ?? query.get('refresh_token');
-  const errorCode = hash.get('error_code') ?? query.get('error_code');
+  const errorCode =
+    hash.get('error_code') ??
+    query.get('error_code') ??
+    hash.get('error') ??
+    query.get('error');
   const errorDescription = hash.get('error_description') ?? query.get('error_description');
-  const nextRaw = query.get('next') || '/settings';
-  let nextPath = '/settings';
-  try {
-    nextPath = decodeURIComponent(nextRaw);
-  } catch {
-    nextPath = nextRaw;
-  }
+  const nextRaw = query.get('next') ?? hash.get('next');
+  const normalizedNext = normalizeNativeAuthNextPath(nextRaw);
+  const attemptRaw = query.get('attempt') ?? hash.get('attempt');
+  const attemptId = attemptRaw && /^[A-Za-z0-9_-]{8,128}$/.test(attemptRaw)
+    ? attemptRaw
+    : null;
   return {
     scheme: parsed.protocol,
     host: parsed.host,
+    pathname: parsed.pathname,
+    code,
     accessToken,
     refreshToken,
     errorCode,
     errorDescription,
-    nextPath,
+    nextPath: normalizedNext?.nextPath ?? '/settings',
+    callbackRole: normalizedNext?.role ?? null,
+    nextProvided: nextRaw != null,
+    nextAllowed: normalizedNext != null,
+    attemptProvided: attemptRaw != null,
+    attemptId,
   };
 }
 
-export async function handleAdminAuthCallbackUrl(url: string): Promise<{
+function throwNativeAuthCallbackError(errorCode: string, description: string | null) {
+  const error = Object.assign(new Error(description || errorCode), {
+    code: errorCode,
+    status: 400,
+    nativeAuthPermanent: true,
+  });
+  throw error;
+}
+
+export async function handleAdminAuthCallbackUrl(url: string, forceAdmin = false): Promise<{
   handled: boolean;
   nextPath?: string;
 }> {
@@ -959,30 +1593,27 @@ export async function handleAdminAuthCallbackUrl(url: string): Promise<{
     throw new Error('Supabase が未設定です');
   }
   const parsed = parseAuthCallbackUrl(url);
-  if (parsed.scheme !== 'com.tracklog.assist:' || parsed.host !== 'auth' || !parsed.nextPath.startsWith('/admin')) {
+  if (
+    parsed.scheme !== 'com.tracklog.assist:' ||
+    parsed.host !== 'auth' ||
+    (parsed.pathname !== '' && parsed.pathname !== '/') ||
+    (parsed.callbackRole !== 'admin' && !(forceAdmin && !parsed.nextProvided))
+  ) {
     return { handled: false };
   }
   if (parsed.errorCode) {
-    throw new Error(parsed.errorDescription || parsed.errorCode);
+    throwNativeAuthCallbackError(parsed.errorCode, parsed.errorDescription);
   }
-  if (!parsed.accessToken || !parsed.refreshToken) {
-    return {
-      handled: true,
-      nextPath: parsed.nextPath,
-    };
+  if (!parsed.code) {
+    return { handled: false };
   }
-  const { error } = await adminSupabase.auth.setSession({
-    access_token: parsed.accessToken,
-    refresh_token: parsed.refreshToken,
-  });
-  if (error) throw error;
+  await establishNativeAuthSession(adminSupabase, parsed, 'admin', url);
   return {
     handled: true,
-    nextPath: parsed.nextPath,
+    nextPath: parsed.callbackRole === 'admin' ? parsed.nextPath : '/admin',
   };
 }
-
-export async function handleDriverAuthCallbackUrl(url: string): Promise<{
+export async function handleDriverAuthCallbackUrl(url: string, forceDriver = false): Promise<{
   handled: boolean;
   nextPath?: string;
 }> {
@@ -991,28 +1622,27 @@ export async function handleDriverAuthCallbackUrl(url: string): Promise<{
     throw new Error('Supabase が未設定です');
   }
   const parsed = parseAuthCallbackUrl(url);
-  if (parsed.scheme !== 'com.tracklog.assist:' || parsed.host !== 'auth' || parsed.nextPath.startsWith('/admin')) {
+  if (
+    parsed.scheme !== 'com.tracklog.assist:' ||
+    parsed.host !== 'auth' ||
+    (parsed.pathname !== '' && parsed.pathname !== '/') ||
+    (parsed.callbackRole !== 'driver' && !(forceDriver && !parsed.nextProvided))
+  ) {
     return { handled: false };
   }
   if (parsed.errorCode) {
-    throw new Error(parsed.errorDescription || parsed.errorCode);
+    throwNativeAuthCallbackError(parsed.errorCode, parsed.errorDescription);
   }
-  if (!parsed.accessToken || !parsed.refreshToken) {
+  if (!parsed.code) {
     return {
-      handled: true,
+      handled: false,
       nextPath: parsed.nextPath,
     };
   }
-  const accessToken = parsed.accessToken;
-  const refreshToken = parsed.refreshToken;
   const authIntent = beginDriverAuthIntent();
   invalidateNativeResidentLocationSessionRestore();
   await withDriverAuthMutation(async () => {
-    const { error } = await client.auth.setSession({
-      access_token: accessToken,
-      refresh_token: refreshToken,
-    });
-    if (error) throw error;
+    await establishNativeAuthSession(client, parsed, 'driver', url);
     if (!isCurrentDriverAuthIntent(authIntent)) {
       throw new Error('認証処理は新しい操作により中止されました');
     }
@@ -1030,6 +1660,6 @@ export async function handleDriverAuthCallbackUrl(url: string): Promise<{
   });
   return {
     handled: true,
-    nextPath: parsed.nextPath,
+    nextPath: parsed.callbackRole === 'driver' ? parsed.nextPath : '/settings',
   };
 }

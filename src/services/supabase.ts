@@ -10,6 +10,11 @@ import {
 } from './authStorageKeys';
 import { selectPreferredPersistedAuthSession } from './nativeResidentSessionPolicy';
 import { ResidentLocation } from './residentLocationBridge';
+import {
+  deferNativeAuthRecovery,
+  getDeferredNativeAuthRecoveryError,
+  resetNativeAuthRecoveryBackoff,
+} from './nativeAuthRecoveryBackoff';
 
 const supabaseUrl = (import.meta.env?.VITE_SUPABASE_URL ?? '').trim();
 const supabaseAnonKey = (import.meta.env?.VITE_SUPABASE_ANON_KEY ?? '').trim();
@@ -22,6 +27,7 @@ export type AuthStorageAdapter = {
 
 export const SUPABASE_CONFIGURED = !!supabaseUrl && !!supabaseAnonKey;
 const ANDROID_NATIVE = Capacitor.isNativePlatform() && Capacitor.getPlatform() === 'android';
+export const ADMIN_AUTH_STORAGE_KEY = 'tracklog-admin-auth';
 
 let authDatabasePromise: Promise<IDBDatabase> | null = null;
 
@@ -98,6 +104,21 @@ function getBrowserLocalStorage(): AuthStorageAdapter | null {
   } catch {
     return null;
   }
+}
+
+function createMemoryAuthStorage(): AuthStorageAdapter {
+  const values = new Map<string, string>();
+  return {
+    getItem(key) {
+      return values.get(key) ?? null;
+    },
+    setItem(key, value) {
+      values.set(key, value);
+    },
+    removeItem(key) {
+      values.delete(key);
+    },
+  };
 }
 
 /** Keeps Supabase Auth compatible with existing localStorage while adding an IndexedDB copy. */
@@ -219,17 +240,40 @@ function buildClient(
       autoRefreshToken,
       persistSession: true,
       detectSessionInUrl: false,
+      // Custom-scheme callbacks must never carry long-lived refresh tokens on Android.
+      // PKCE keeps the verifier in this WebView and returns only a short-lived code.
+      flowType: ANDROID_NATIVE ? 'pkce' : 'implicit',
       storageKey,
       ...(storage ? { storage } : {}),
     },
   });
 }
 
+let nativeDriverAccessTokenInFlight: Promise<string | null> | null = null;
+
 async function getNativeDriverAccessToken(): Promise<string | null> {
   if (!ANDROID_NATIVE || isDriverExplicitSignOutRequested()) return null;
-  const authorization = await ResidentLocation.refreshAuthorization({ force: false });
-  if (!authorization.configured || authorization.blocked) return null;
-  return authorization.accessToken || null;
+  if (nativeDriverAccessTokenInFlight) return nativeDriverAccessTokenInFlight;
+  const deferredError = getDeferredNativeAuthRecoveryError();
+  if (deferredError) throw deferredError;
+
+  nativeDriverAccessTokenInFlight = (async () => {
+    try {
+      const authorization = await ResidentLocation.refreshAuthorization({ force: false });
+      resetNativeAuthRecoveryBackoff();
+      if (!authorization.configured || authorization.blocked) return null;
+      return authorization.accessToken || null;
+    } catch (error) {
+      deferNativeAuthRecovery(error);
+      throw error;
+    }
+  })();
+
+  try {
+    return await nativeDriverAccessTokenInFlight;
+  } finally {
+    nativeDriverAccessTokenInFlight = null;
+  }
 }
 
 function buildNativeDriverDataClient() {
@@ -244,10 +288,50 @@ function buildNativeDriverDataClient() {
   });
 }
 
+const adminAuthStorage = getBrowserLocalStorage() ?? createMemoryAuthStorage();
 const driverAuthStorage = createMirroredAuthStorage(
   getBrowserLocalStorage(),
   createIndexedDbAuthStorage(),
 );
+
+export type AuthCodeVerifierRole = 'admin' | 'driver';
+
+export function getAuthCodeVerifierStorageKey(role: AuthCodeVerifierRole) {
+  const storageKey = role === 'admin' ? ADMIN_AUTH_STORAGE_KEY : DRIVER_AUTH_STORAGE_KEY;
+  return `${storageKey}-code-verifier`;
+}
+
+export function createAuthCodeVerifierStorage(
+  adminStorage: AuthStorageAdapter,
+  driverStorage: AuthStorageAdapter,
+) {
+  const storageFor = (role: AuthCodeVerifierRole) => role === 'admin' ? adminStorage : driverStorage;
+  return {
+    async snapshot(role: AuthCodeVerifierRole): Promise<string | null> {
+      return await storageFor(role).getItem(getAuthCodeVerifierStorageKey(role));
+    },
+    async restore(role: AuthCodeVerifierRole, value: string): Promise<void> {
+      await storageFor(role).setItem(getAuthCodeVerifierStorageKey(role), value);
+    },
+    async clear(role: AuthCodeVerifierRole): Promise<void> {
+      await storageFor(role).removeItem(getAuthCodeVerifierStorageKey(role));
+    },
+  };
+}
+
+const authCodeVerifierStorage = createAuthCodeVerifierStorage(adminAuthStorage, driverAuthStorage);
+
+export function snapshotAuthCodeVerifier(role: AuthCodeVerifierRole) {
+  return authCodeVerifierStorage.snapshot(role);
+}
+
+export function restoreAuthCodeVerifier(role: AuthCodeVerifierRole, value: string) {
+  return authCodeVerifierStorage.restore(role, value);
+}
+
+export function clearAuthCodeVerifier(role: AuthCodeVerifierRole) {
+  return authCodeVerifierStorage.clear(role);
+}
 
 export type PersistedDriverAuthTokens = {
   accessToken: string;
@@ -300,4 +384,4 @@ export const driverAuthSupabase = buildClient(
 export const driverSupabase = ANDROID_NATIVE
   ? buildNativeDriverDataClient()
   : driverAuthSupabase;
-export const adminSupabase = buildClient('tracklog-admin-auth');
+export const adminSupabase = buildClient(ADMIN_AUTH_STORAGE_KEY, adminAuthStorage);

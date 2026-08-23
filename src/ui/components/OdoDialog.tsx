@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 
 interface OdoDialogProps {
   open: boolean;
@@ -6,18 +6,40 @@ interface OdoDialogProps {
   description?: string;
   initialValue?: number;
   confirmText?: string;
+  allowZero?: boolean;
+  cancelable?: boolean;
+  busy?: boolean;
+  errorMessage?: string | null;
+  zIndex?: number;
   onCancel: () => void;
   onConfirm: (odoKm: number) => void;
 }
 
 export default function OdoDialog(props: OdoDialogProps) {
-  const { open, title, description, initialValue, confirmText = '確定', onCancel, onConfirm } = props;
+  const {
+    open,
+    title,
+    description,
+    initialValue,
+    confirmText = '確定',
+    allowZero = false,
+    cancelable = true,
+    busy = false,
+    errorMessage,
+    zIndex = 9999,
+    onCancel,
+    onConfirm,
+  } = props;
   const [value, setValue] = useState('');
+  const titleId = useId();
+  const descriptionId = useId();
+  const firstDigitRef = useRef<HTMLButtonElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
 
   const handleSubmit = (e?: React.FormEvent) => {
     e?.preventDefault();
     const n = Number(value);
-    if (!Number.isFinite(n) || n <= 0) return;
+    if (!Number.isFinite(n) || n < 0 || (!allowZero && n === 0) || busy) return;
     onConfirm(n);
   };
 
@@ -39,9 +61,19 @@ export default function OdoDialog(props: OdoDialogProps) {
       setValue(initialValue != null ? String(initialValue) : '');
     }
   }, [open, initialValue]);
+  useEffect(() => {
+    if (open && !busy) window.setTimeout(() => firstDigitRef.current?.focus(), 0);
+  }, [busy, open]);
   if (!open) return null;
+  const parsedValue = Number(value);
+  const canConfirm = value !== ''
+    && Number.isFinite(parsedValue)
+    && parsedValue >= 0
+    && (allowZero || parsedValue > 0)
+    && !busy;
   return (
     <div
+      role="presentation"
       style={{
         position: 'fixed',
         inset: 0,
@@ -51,10 +83,41 @@ export default function OdoDialog(props: OdoDialogProps) {
         alignItems: 'flex-end',
         padding: '16px 12px 24px',
         overflowY: 'auto',
-        zIndex: 9999,
+        zIndex,
       }}
     >
       <div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        aria-describedby={description ? descriptionId : undefined}
+        aria-busy={busy}
+        onKeyDown={event => {
+          if (event.key === 'Escape') {
+            event.preventDefault();
+            event.stopPropagation();
+            if (cancelable && !busy) onCancel();
+            return;
+          }
+          if (event.key !== 'Tab') return;
+          const focusable = Array.from(
+            panelRef.current?.querySelectorAll<HTMLElement>('button:not([disabled])') ?? [],
+          );
+          if (focusable.length === 0) {
+            event.preventDefault();
+            return;
+          }
+          const first = focusable[0];
+          const last = focusable[focusable.length - 1];
+          if (event.shiftKey && document.activeElement === first) {
+            event.preventDefault();
+            last.focus();
+          } else if (!event.shiftKey && document.activeElement === last) {
+            event.preventDefault();
+            first.focus();
+          }
+        }}
         style={{
           width: 'min(520px, 100%)',
           background: '#111',
@@ -66,14 +129,25 @@ export default function OdoDialog(props: OdoDialogProps) {
           boxSizing: 'border-box',
         }}
       >
-        <div style={{ fontSize: 18, fontWeight: 800, marginBottom: 8 }}>{title}</div>
-        {description && <div style={{ opacity: 0.85, marginBottom: 12 }}>{description}</div>}
+        <div id={titleId} style={{ fontSize: 18, fontWeight: 800, marginBottom: 8 }}>{title}</div>
+        {description && <div id={descriptionId} style={{ opacity: 0.85, marginBottom: 12 }}>{description}</div>}
+        {allowZero && (
+          <div style={{ color: '#bfdbfe', fontSize: 13, marginBottom: 12 }}>
+            0 kmで確定した場合、休息は開始しますが距離は記録しません。
+          </div>
+        )}
+        {errorMessage && (
+          <div role="alert" style={{ color: '#fecaca', marginBottom: 12 }}>
+            {errorMessage}
+          </div>
+        )}
         <form onSubmit={handleSubmit}>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
             <input
               type="text"
               inputMode="none"
               readOnly
+              aria-label="オドメーター"
               onFocus={e => e.currentTarget.blur()}
               placeholder="ODO（km）"
               value={value}
@@ -96,7 +170,10 @@ export default function OdoDialog(props: OdoDialogProps) {
               {[1,2,3,4,5,6,7,8,9].map(n => (
                 <button
                   key={n}
+                  ref={n === 1 ? firstDigitRef : undefined}
                   type="button"
+                  aria-label={`${n}を入力`}
+                  disabled={busy}
                   onClick={() => handleDigit(String(n))}
                   style={{
                     height: 64,
@@ -114,6 +191,8 @@ export default function OdoDialog(props: OdoDialogProps) {
               ))}
               <button
                 type="button"
+                aria-label="入力をすべて消去"
+                disabled={busy}
                 onClick={handleClear}
                 style={{
                   height: 64,
@@ -130,6 +209,8 @@ export default function OdoDialog(props: OdoDialogProps) {
               </button>
               <button
                 type="button"
+                aria-label="0を入力"
+                disabled={busy}
                 onClick={() => handleDigit('0')}
                 style={{
                   height: 64,
@@ -146,6 +227,8 @@ export default function OdoDialog(props: OdoDialogProps) {
               </button>
               <button
                 type="button"
+                aria-label="1桁消去"
+                disabled={busy}
                 onClick={handleBackspace}
                 style={{
                   height: 64,
@@ -175,14 +258,22 @@ export default function OdoDialog(props: OdoDialogProps) {
               background: '#111',
             }}
           >
-            <button type="button" onClick={onCancel} style={{ padding: '10px 14px', borderRadius: 12 }}>
-              戻る
-            </button>
+            {cancelable && (
+              <button
+                type="button"
+                disabled={busy}
+                onClick={onCancel}
+                style={{ padding: '10px 14px', borderRadius: 12 }}
+              >
+                戻る
+              </button>
+            )}
             <button
               type="submit"
+              disabled={!canConfirm}
               style={{ padding: '10px 14px', borderRadius: 12, fontWeight: 800 }}
             >
-              {confirmText}
+              {busy ? '処理中…' : confirmText}
             </button>
           </div>
         </form>

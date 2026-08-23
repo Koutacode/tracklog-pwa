@@ -3,6 +3,8 @@ import { DAY_MS, getJstDateInfo } from './jst';
 import {
   findOpenToggleStart,
   PERSISTED_BASIC_TOGGLE_DEFINITIONS,
+  resolveTogglePairing,
+  type TogglePairingEvent,
 } from './togglePairing';
 
 export const BREAK_TO_REST_THRESHOLD_MS = 3 * 60 * 60 * 1000;
@@ -23,7 +25,7 @@ function sortByTs<T extends { ts: string }>(arr: T[]): T[] {
 }
 
 export function isRestStartOdoCheckpoint(event: RestStartEvent): event is RestStartOdoCheckpoint {
-  return Number.isFinite(event.extras.odoKm);
+  return Number.isFinite(event.extras.odoKm) && (event.extras.odoKm ?? 0) > 0;
 }
 
 function findOpenBreakStart(events: readonly AppEvent[]): AppEvent | null {
@@ -37,6 +39,134 @@ export function getOpenBreakToRestThresholdTs(events: readonly AppEvent[]): stri
   const breakStartMs = Date.parse(breakStart.ts);
   if (!Number.isFinite(breakStartMs)) return null;
   return new Date(breakStartMs + BREAK_TO_REST_THRESHOLD_MS).toISOString();
+}
+
+function getGeneratedFrom(event: TogglePairingEvent): string | null {
+  const value = event.extras?.generatedFrom;
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function isAutomaticBreakThresholdEvent(event: TogglePairingEvent): boolean {
+  return event.extras?.autoReason === AUTO_REST_REASON_BREAK_THRESHOLD;
+}
+
+function getBreakSessionId(event: TogglePairingEvent): string | null {
+  const value = event.extras?.breakSessionId;
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+export type AutomaticBreakRestProjection<T extends TogglePairingEvent> = {
+  events: T[];
+  sourcesByProjectedRest: ReadonlyMap<T, { breakStart: T; restStart: T }>;
+};
+
+function projectRestStartFromBreak<T extends TogglePairingEvent>(
+  restStart: T,
+  breakStart: T,
+): T {
+  const restDetails = restStart as T & { address?: unknown; geo?: unknown };
+  const breakDetails = breakStart as T & { address?: unknown; geo?: unknown };
+  const restAddressIsMissing = restDetails.address == null
+    || (typeof restDetails.address === 'string' && restDetails.address.trim() === '');
+  return {
+    ...restStart,
+    ts: breakStart.ts,
+    ...(restAddressIsMissing && breakDetails.address != null
+      ? { address: breakDetails.address }
+      : {}),
+    ...(restDetails.geo == null && breakDetails.geo != null
+      ? { geo: breakDetails.geo }
+      : {}),
+  } as T;
+}
+
+/**
+ * Project a confirmed three-hour break as rest from the original break start.
+ *
+ * The persisted automatic transition deliberately remains at the three-hour
+ * threshold. That timestamp is shared with older app versions and is also the
+ * native route-recording pause boundary. Product views instead hide the
+ * converted break pair and move only its generated rest start backwards. This
+ * keeps existing synced rows immutable while fixing both old and new history.
+ */
+export function projectAutomaticBreakAsRestWithSources<T extends TogglePairingEvent>(
+  events: readonly T[],
+): AutomaticBreakRestProjection<T> {
+  if (events.length === 0) {
+    return { events: [], sourcesByProjectedRest: new Map() };
+  }
+
+  const generatedRestStarts = new Map<string, T[]>();
+  for (const event of events) {
+    if (event.type !== 'rest_start' || !isAutomaticBreakThresholdEvent(event)) continue;
+    const generatedFrom = getGeneratedFrom(event);
+    if (!generatedFrom) continue;
+    const existing = generatedRestStarts.get(generatedFrom) ?? [];
+    existing.push(event);
+    generatedRestStarts.set(generatedFrom, existing);
+  }
+
+  if (generatedRestStarts.size === 0) {
+    return { events: [...events], sourcesByProjectedRest: new Map() };
+  }
+
+  const hiddenBreakEvents = new Set<T>();
+  const projectedRestBySource = new Map<T, T>();
+  const sourcesByProjectedRest = new Map<T, { breakStart: T; restStart: T }>();
+  const breakDefinition = PERSISTED_BASIC_TOGGLE_DEFINITIONS[1];
+  const breakPairs = resolveTogglePairing(events, [breakDefinition]).pairs;
+
+  for (const pair of breakPairs) {
+    if (!isAutomaticBreakThresholdEvent(pair.end)) continue;
+    const breakStartMs = Date.parse(pair.start.ts);
+    const breakEndMs = Date.parse(pair.end.ts);
+    if (
+      !Number.isFinite(breakStartMs)
+      || !Number.isFinite(breakEndMs)
+      || breakEndMs - breakStartMs < BREAK_TO_REST_THRESHOLD_MS
+    ) {
+      continue;
+    }
+    const generatedFrom = getGeneratedFrom(pair.end);
+    if (!generatedFrom) continue;
+    if (pair.start.id) {
+      if (pair.start.id !== generatedFrom) continue;
+    } else {
+      const startSessionId = getBreakSessionId(pair.start);
+      const endSessionId = getBreakSessionId(pair.end);
+      if (!startSessionId || startSessionId !== endSessionId) continue;
+    }
+
+    const restStarts = generatedRestStarts
+      .get(generatedFrom)
+      ?.filter(restStart => restStart.ts === pair.end.ts);
+    if (!restStarts?.length) continue;
+
+    hiddenBreakEvents.add(pair.start);
+    hiddenBreakEvents.add(pair.end);
+    for (const restStart of restStarts) {
+      const projectedRest = projectRestStartFromBreak(restStart, pair.start);
+      projectedRestBySource.set(restStart, projectedRest);
+      sourcesByProjectedRest.set(projectedRest, { breakStart: pair.start, restStart });
+    }
+  }
+
+  if (hiddenBreakEvents.size === 0) {
+    return { events: [...events], sourcesByProjectedRest: new Map() };
+  }
+
+  const projected: T[] = [];
+  for (const event of events) {
+    if (hiddenBreakEvents.has(event)) continue;
+    projected.push(projectedRestBySource.get(event) ?? event);
+  }
+  return { events: projected, sourcesByProjectedRest };
+}
+
+export function projectAutomaticBreakAsRest<T extends TogglePairingEvent>(
+  events: readonly T[],
+): T[] {
+  return projectAutomaticBreakAsRestWithSources(events).events;
 }
 
 /**

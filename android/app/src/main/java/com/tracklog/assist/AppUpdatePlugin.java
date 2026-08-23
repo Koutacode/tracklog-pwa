@@ -28,6 +28,13 @@ import java.util.Set;
 
 @CapacitorPlugin(name = "AppUpdate")
 public class AppUpdatePlugin extends Plugin {
+    static final String LATEST_APK_DOWNLOAD_URL =
+        "https://github.com/Koutacode/tracklog-pwa/releases/latest/download/tracklog-assist-debug.apk";
+
+    static boolean isAllowedUpdateUrl(String downloadUrl) {
+        return LATEST_APK_DOWNLOAD_URL.equals(downloadUrl);
+    }
+
     private static class ApkValidationResult {
         String packageName;
         String versionName;
@@ -222,6 +229,12 @@ public class AppUpdatePlugin extends Plugin {
             return;
         }
 
+        final String normalizedDownloadUrl = downloadUrl.trim();
+        if (!isAllowedUpdateUrl(normalizedDownloadUrl)) {
+            call.reject("最新版APKの公式配布URLだけを利用できます。");
+            return;
+        }
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !getContext().getPackageManager().canRequestPackageInstalls()) {
             openInstallPermissionSettings(call);
             return;
@@ -229,7 +242,7 @@ public class AppUpdatePlugin extends Plugin {
 
         new Thread(() -> {
             try {
-                File apkFile = downloadApk(downloadUrl.trim());
+                File apkFile = downloadApk(normalizedDownloadUrl);
                 ApkValidationResult validation = validateDownloadedApk(apkFile);
                 getActivity().runOnUiThread(() -> {
                     try {

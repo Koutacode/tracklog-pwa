@@ -5,10 +5,12 @@ import AuthCallbackScreen from './AuthCallbackScreen';
 import IcResolverJob from './IcResolverJob';
 import LocalRecoveryBootstrap from './LocalRecoveryBootstrap';
 import NativeUpdateNotice from './NativeUpdateNotice';
+import NativeExpresswayPromptBootstrap from './NativeExpresswayPromptBootstrap';
 import PwaBootstrap from './PwaBootstrap';
 import RequireDriverProfile from './RequireDriverProfile';
 import RemoteSyncBootstrap from './RemoteSyncBootstrap';
 import RouteTrackingSupervisor from './RouteTrackingSupervisor';
+import BreakToRestConfirmationGate from './BreakToRestConfirmationGate';
 import type { DriverIdentity } from '../domain/remoteTypes';
 import { initializeDriverIdentity, onDriverAuthStateChange } from '../services/remoteAuth';
 import { runRemoteSync } from '../services/remoteSync';
@@ -79,6 +81,7 @@ function AppShell() {
     <>
       <AdminAuthBridge />
       <PwaBootstrap />
+      <NativeExpresswayPromptBootstrap />
       {!authRoute && (
         <>
           <OfflineStatusBanner />
@@ -87,6 +90,7 @@ function AppShell() {
           <NativeUpdateNotice />
           <AdminMessageToastHost />
           <RouteTrackingSupervisor />
+          <BreakToRestConfirmationGate />
           <RemoteSyncBootstrap />
         </>
       )}

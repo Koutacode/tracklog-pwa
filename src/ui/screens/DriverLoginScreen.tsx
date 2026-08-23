@@ -1,5 +1,6 @@
+import { Capacitor } from '@capacitor/core';
 import { FormEvent, useEffect, useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import type { DriverIdentity } from '../../domain/remoteTypes';
 import {
   initializeDriverIdentity,
@@ -7,6 +8,10 @@ import {
   sendDriverLoginLink,
   verifyDriverEmailOtp,
 } from '../../services/remoteAuth';
+import {
+  getNativeAuthAttempt,
+  isNativeAuthFlowInProgressError,
+} from '../../services/nativeAuthCallbackPersistence';
 import { normalizeEmailInput, toHalfWidthDigits } from '../../services/driverProfileValidation';
 import { hydrateRemoteSyncState, runRemoteSync } from '../../services/remoteSync';
 
@@ -45,10 +50,26 @@ function isCloudSyncCheckError(error: any) {
 
 export default function DriverLoginScreen() {
   const navigate = useNavigate();
+  const location = useLocation();
   const [email, setEmail] = useState('');
   const [token, setToken] = useState('');
   const [status, setStatus] = useState<'idle' | 'checking' | 'sending' | 'verifying'>('checking');
   const [message, setMessage] = useState<string | null>(null);
+  const [messageIsError, setMessageIsError] = useState(false);
+  const [nativeRestartRequired, setNativeRestartRequired] = useState(false);
+
+  useEffect(() => {
+    const authError = (location.state as { authError?: unknown } | null)?.authError;
+    if (typeof authError !== 'string' || !authError.trim()) return;
+    setStatus('idle');
+    setMessageIsError(true);
+    setMessage(formatDriverLoginError(authError));
+    const retryPending = (location.state as { authRetryPending?: unknown } | null)?.authRetryPending === true;
+    if (retryPending) setNativeRestartRequired(false);
+    if (!retryPending && Capacitor.isNativePlatform() && getNativeAuthAttempt()?.intent === 'driver') {
+      setNativeRestartRequired(true);
+    }
+  }, [location.key, location.state]);
 
   const finishLogin = async (reason: string) => {
     const identity = await initializeDriverIdentity();
@@ -75,6 +96,7 @@ export default function DriverLoginScreen() {
         if (!active) return;
         setStatus('idle');
         if (!isCloudSyncCheckError(error)) {
+          setMessageIsError(true);
           setMessage(formatDriverLoginError(error));
         }
       });
@@ -83,6 +105,7 @@ export default function DriverLoginScreen() {
       void finishLogin('driver-login-auth').catch(error => {
         if (!active) return;
         setStatus('idle');
+        setMessageIsError(true);
         setMessage(formatDriverLoginError(error));
       });
     });
@@ -92,16 +115,25 @@ export default function DriverLoginScreen() {
     };
   }, [navigate]);
 
-  const handleSendLogin = async (event: FormEvent) => {
-    event.preventDefault();
+  const handleSendLogin = async (event?: FormEvent, restartNativeAttempt = false) => {
+    event?.preventDefault();
     setStatus('sending');
     setMessage(null);
+    if (restartNativeAttempt) setNativeRestartRequired(false);
     const normalizedEmail = normalizeEmailInput(email);
     setEmail(normalizedEmail);
     try {
-      await sendDriverLoginLink(normalizedEmail);
+      await sendDriverLoginLink(normalizedEmail, undefined, { restartNativeAttempt });
+      setMessageIsError(false);
       setMessage('ログインメールを送信しました。メール本文の認証コードをこの画面に入力してください。');
     } catch (error: any) {
+      setMessageIsError(true);
+      if (
+        Capacitor.isNativePlatform() &&
+        (isNativeAuthFlowInProgressError(error) || getNativeAuthAttempt()?.intent === 'driver')
+      ) {
+        setNativeRestartRequired(true);
+      }
       setMessage(formatDriverLoginError(error));
     } finally {
       setStatus('idle');
@@ -119,6 +151,7 @@ export default function DriverLoginScreen() {
       await verifyDriverEmailOtp(normalizedEmail, normalizedToken);
       await finishLogin('driver-otp-login');
     } catch (error: any) {
+      setMessageIsError(true);
       setMessage(formatDriverLoginError(error));
       setStatus('idle');
     }
@@ -128,7 +161,7 @@ export default function DriverLoginScreen() {
 
   return (
     <div className="screen-shell">
-      <div className="screen-card screen-card--narrow">
+      <div className="screen-card screen-card--narrow" aria-busy={busy}>
         <div className="screen-card__header">
           <div>
             <div className="screen-card__eyebrow">登録済みアカウント</div>
@@ -149,14 +182,17 @@ export default function DriverLoginScreen() {
           ログイン状態はブラウザごとに別ですが、運行履歴と承認状態はアカウント単位で同期されます。
         </div>
 
-        <form className="driver-registration" onSubmit={handleSendLogin}>
-          <label className="settings-field">
+        <form className="driver-registration" onSubmit={event => void handleSendLogin(event)}>
+          <label className="settings-field" htmlFor="driver-login-email">
             <span>メールアドレス</span>
             <input
+              id="driver-login-email"
               value={email}
               onChange={event => setEmail(event.target.value)}
               placeholder="driver@example.com"
               type="email"
+              autoComplete="email"
+              spellCheck={false}
               required
             />
           </label>
@@ -165,17 +201,36 @@ export default function DriverLoginScreen() {
           </button>
         </form>
 
+        {Capacitor.isNativePlatform() && nativeRestartRequired && (
+          <>
+            <div className="settings-note" id="driver-native-auth-restart-help">
+              前のログインを破棄すると、その認証メールのリンクは使えなくなります。
+            </div>
+            <button
+              className="trip-btn"
+              disabled={busy || !email.trim()}
+              type="button"
+              aria-describedby="driver-native-auth-restart-help"
+              onClick={() => void handleSendLogin(undefined, true)}
+            >
+              ログインを最初からやり直す
+            </button>
+          </>
+        )}
+
         <div className="settings-note" style={{ marginTop: 16 }}>
           メール本文の認証コードを入力すると、このPWA内でログインできます。
         </div>
         <div className="driver-registration">
-          <label className="settings-field">
+          <label className="settings-field" htmlFor="driver-login-token">
             <span>認証コード</span>
             <input
+              id="driver-login-token"
               value={token}
               onChange={event => setToken(toHalfWidthDigits(event.target.value).replace(/\D/g, '').slice(0, 10))}
               placeholder="40055812"
               inputMode="numeric"
+              autoComplete="one-time-code"
               maxLength={10}
             />
           </label>
@@ -184,7 +239,16 @@ export default function DriverLoginScreen() {
           </button>
         </div>
 
-        {message && <div className="settings-toast">{message}</div>}
+        {message && (
+          <div
+            className="settings-toast"
+            role={messageIsError ? 'alert' : 'status'}
+            aria-live={messageIsError ? 'assertive' : 'polite'}
+            aria-atomic="true"
+          >
+            {message}
+          </div>
+        )}
       </div>
     </div>
   );

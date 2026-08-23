@@ -1,8 +1,13 @@
 import { Capacitor } from '@capacitor/core';
-import { LocalNotifications } from '@capacitor/local-notifications';
+import { LocalNotifications, type ActionPerformed, type ActionType } from '@capacitor/local-notifications';
 import type { TracklogAdminMessage } from '../domain/remoteTypes';
 import { getDriverIdentity } from './remoteAuth';
 import { requestLocationHeartbeatNow } from './locationHeartbeat';
+import {
+  createMessageActionSingleFlight,
+  handleNativeAdminMessageNotificationAction,
+  parseNativeAdminMessageNotificationAction,
+} from './nativeAdminMessageActionPolicy';
 import {
   ackTracklogAdminMessagesViaFunction,
   listPendingTracklogAdminMessagesViaFunction,
@@ -18,6 +23,21 @@ const EXTRA_KIND = 'tracklog_admin_message_v1';
 const POLL_MIN_INTERVAL_MS = 10 * 1000;
 const STORED_MESSAGES_KEY = 'tracklog:admin-messages';
 const STORED_MESSAGES_LIMIT = 50;
+const COMPLETED_LOCATION_REQUESTS_KEY = 'tracklog:admin-message-location-completed';
+const COMPLETED_LOCATION_REQUESTS_LIMIT = 100;
+const PENDING_LOCATION_REQUESTS_KEY = 'tracklog:admin-message-location-pending';
+const PENDING_LOCATION_REQUESTS_LIMIT = 50;
+
+export const NATIVE_ADMIN_MESSAGE_NOTIFICATION_ACTION_TYPE: ActionType = {
+  id: NATIVE_ACTION_TYPE_ID,
+  actions: [
+    {
+      id: NATIVE_ACTION_UPDATE_LOCATION,
+      title: '現在地更新',
+      foreground: true,
+    },
+  ],
+};
 
 export type StoredAdminMessage = {
   id: string;
@@ -31,10 +51,78 @@ export type StoredAdminMessage = {
 };
 
 let nativeChannelReady = false;
-let nativeTapListenerReady = false;
+let nativeChannelInFlight: Promise<void> | null = null;
 let pollInFlight: Promise<void> | null = null;
 let lastPollAt = 0;
 const localSeenMessageIds = new Set<string>();
+
+function readCompletedLocationRequestIds() {
+  if (typeof localStorage === 'undefined') return new Set<string>();
+  try {
+    const parsed = JSON.parse(localStorage.getItem(COMPLETED_LOCATION_REQUESTS_KEY) ?? '[]');
+    if (!Array.isArray(parsed)) return new Set<string>();
+    return new Set(
+      parsed
+        .filter((id): id is string => typeof id === 'string' && Boolean(id.trim()))
+        .map(id => id.trim()),
+    );
+  } catch {
+    return new Set<string>();
+  }
+}
+
+function readPendingLocationRequestIds() {
+  if (typeof localStorage === 'undefined') return [] as string[];
+  try {
+    const parsed = JSON.parse(localStorage.getItem(PENDING_LOCATION_REQUESTS_KEY) ?? '[]');
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((id): id is string => typeof id === 'string' && Boolean(id.trim()))
+      .map(id => id.trim())
+      .slice(0, PENDING_LOCATION_REQUESTS_LIMIT);
+  } catch {
+    return [];
+  }
+}
+
+function writePendingLocationRequestIds(ids: string[]) {
+  if (typeof localStorage === 'undefined') return;
+  try {
+    localStorage.setItem(
+      PENDING_LOCATION_REQUESTS_KEY,
+      JSON.stringify(Array.from(new Set(ids)).slice(0, PENDING_LOCATION_REQUESTS_LIMIT)),
+    );
+  } catch {
+    // The process-lifetime single-flight remains active when storage is full.
+  }
+}
+
+function rememberPendingLocationRequest(messageId: string) {
+  const current = readPendingLocationRequestIds();
+  writePendingLocationRequestIds([messageId, ...current.filter(id => id !== messageId)]);
+}
+
+function removePendingLocationRequest(messageId: string) {
+  writePendingLocationRequestIds(readPendingLocationRequestIds().filter(id => id !== messageId));
+}
+
+function rememberCompletedLocationRequest(messageId: string) {
+  removePendingLocationRequest(messageId);
+  if (typeof localStorage === 'undefined') return;
+  const ids = readCompletedLocationRequestIds();
+  ids.delete(messageId);
+  const next = [messageId, ...ids].slice(0, COMPLETED_LOCATION_REQUESTS_LIMIT);
+  try {
+    localStorage.setItem(COMPLETED_LOCATION_REQUESTS_KEY, JSON.stringify(next));
+  } catch {
+    // Process-lifetime completion still prevents duplicate actions.
+  }
+}
+
+const locationRequestSingleFlight = createMessageActionSingleFlight({
+  isCompleted: messageId => readCompletedLocationRequestIds().has(messageId),
+  markCompleted: rememberCompletedLocationRequest,
+});
 
 function isNative() {
   return Capacitor.isNativePlatform();
@@ -199,61 +287,51 @@ function emitAdminMessage(message: TracklogAdminMessage) {
 
 async function ensureNativeMessageChannel() {
   if (!isNative() || nativeChannelReady) return;
-  await LocalNotifications.registerActionTypes({
-    types: [
-      {
-        id: NATIVE_ACTION_TYPE_ID,
-        actions: [
-          {
-            id: NATIVE_ACTION_UPDATE_LOCATION,
-            title: '現在地更新',
-            foreground: true,
-          },
-        ],
-      },
-    ],
+  if (nativeChannelInFlight) return nativeChannelInFlight;
+  const setup = (async () => {
+    try {
+      await LocalNotifications.createChannel({
+        id: NATIVE_CHANNEL_ID,
+        name: '管理者メッセージ',
+        description: '管理画面から送信されたメッセージ',
+        importance: 4,
+        visibility: 1,
+        vibration: true,
+        lights: true,
+        lightColor: '#38bdf8',
+      });
+    } catch {
+      // channel may already exist
+    }
+    nativeChannelReady = true;
+  })().finally(() => {
+    if (nativeChannelInFlight === setup) nativeChannelInFlight = null;
   });
-  try {
-    await LocalNotifications.createChannel({
-      id: NATIVE_CHANNEL_ID,
-      name: '管理者メッセージ',
-      description: '管理画面から送信されたメッセージ',
-      importance: 4,
-      visibility: 1,
-      vibration: true,
-      lights: true,
-      lightColor: '#38bdf8',
-    });
-  } catch {
-    // channel may already exist
-  }
-  nativeChannelReady = true;
+  nativeChannelInFlight = setup;
+  return setup;
 }
 
-async function ensureNativeTapListener() {
-  if (!isNative() || nativeTapListenerReady) return;
-  await LocalNotifications.addListener('localNotificationActionPerformed', event => {
-    const extra = event.notification?.extra;
-    if (!extra || extra.kind !== EXTRA_KIND || typeof extra.messageId !== 'string') return;
-    if (typeof extra.body === 'string' && extra.body.trim()) {
-      rememberAdminMessageFromPush({
-        id: extra.messageId,
-        body: extra.body,
-        requestLocation: extra.requestLocation !== false,
-      });
-    }
-    openAdminMessageInbox(extra.messageId);
-    if (extra.requestLocation === false) return;
-    if (event.actionId && event.actionId !== NATIVE_ACTION_UPDATE_LOCATION && event.actionId !== 'tap') return;
-    void requestLocationFromAdminMessage(extra.messageId);
+export function initNativeAdminMessageActions() {
+  return ensureNativeMessageChannel();
+}
+
+export async function handleNativeAdminMessageNotificationActionEvent(
+  event: ActionPerformed,
+): Promise<boolean> {
+  const action = parseNativeAdminMessageNotificationAction(event, EXTRA_KIND);
+  if (!action) return false;
+  await handleNativeAdminMessageNotificationAction(action, {
+    remember: message => rememberAdminMessageFromPush(message),
+    openInbox: openAdminMessageInbox,
+    requestLocation: requestLocationFromAdminMessage,
+    updateLocationActionId: NATIVE_ACTION_UPDATE_LOCATION,
   });
-  nativeTapListenerReady = true;
+  return true;
 }
 
 async function showNativeNotification(message: TracklogAdminMessage) {
   if (!isNative()) return false;
-  await ensureNativeMessageChannel();
-  await ensureNativeTapListener();
+  await initNativeAdminMessageActions();
   const permission = await LocalNotifications.checkPermissions();
   if (permission.display !== 'granted') return false;
   await LocalNotifications.schedule({
@@ -323,17 +401,43 @@ async function getApprovedDeviceId() {
   return identity.deviceId;
 }
 
-export async function requestLocationFromAdminMessage(messageId: string) {
-  const deviceId = await getApprovedDeviceId();
-  if (!deviceId) return false;
-  const locationRequestedAt = new Date().toISOString();
-  await requestLocationHeartbeatNow();
-  await ackTracklogAdminMessagesViaFunction({
-    deviceId,
-    messageIds: [messageId],
-    locationRequestedAt,
+export function requestLocationFromAdminMessage(messageId: string) {
+  const id = messageId.trim();
+  if (!id) return Promise.resolve(false);
+  if (readCompletedLocationRequestIds().has(id)) {
+    removePendingLocationRequest(id);
+    return Promise.resolve(true);
+  }
+  // Persist before touching auth/network so a retained cold-start action can
+  // resume after identity initialization or process death.
+  rememberPendingLocationRequest(id);
+  return locationRequestSingleFlight.run(id, async () => {
+    const deviceId = await getApprovedDeviceId();
+    if (!deviceId) return false;
+    const locationRequestedAt = new Date().toISOString();
+    await requestLocationHeartbeatNow();
+    await ackTracklogAdminMessagesViaFunction({
+      deviceId,
+      messageIds: [id],
+      locationRequestedAt,
+    });
+    return true;
+  }).then(success => {
+    if (success) removePendingLocationRequest(id);
+    return success;
   });
-  return true;
+}
+
+export async function retryPendingAdminMessageLocationRequests() {
+  let completed = 0;
+  for (const messageId of readPendingLocationRequestIds()) {
+    try {
+      if (await requestLocationFromAdminMessage(messageId)) completed += 1;
+    } catch {
+      // Keep the durable pending id for the next online/resume recovery.
+    }
+  }
+  return completed;
 }
 
 export async function pollTracklogAdminMessages(options?: { force?: boolean }) {
