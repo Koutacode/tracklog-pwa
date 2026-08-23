@@ -263,7 +263,19 @@ function Get-FileSha256 {
     [string]$Path
   )
 
-  return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToUpperInvariant()
+  $sha256 = [System.Security.Cryptography.SHA256]::Create()
+  try {
+    $stream = [System.IO.File]::OpenRead($Path)
+    try {
+      $hashBytes = $sha256.ComputeHash($stream)
+    } finally {
+      $stream.Dispose()
+    }
+  } finally {
+    $sha256.Dispose()
+  }
+
+  return ([System.BitConverter]::ToString($hashBytes)).Replace("-", "")
 }
 
 function Install-VerifiedReleaseArtifactAtomically {
