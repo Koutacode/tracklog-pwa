@@ -34,17 +34,6 @@ allprojects {
     }
 }
 
-subprojects { proj ->
-    afterEvaluate {
-        if (proj.hasProperty('android')) {
-            proj.android.compileOptions {
-                sourceCompatibility JavaVersion.VERSION_17
-                targetCompatibility JavaVersion.VERSION_17
-            }
-        }
-    }
-}
-
 task clean(type: Delete) {
     delete rootProject.buildDir
 }

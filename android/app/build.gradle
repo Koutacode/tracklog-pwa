@@ -65,14 +65,6 @@ dependencies {
 
 apply from: 'capacitor.build.gradle'
 
-// Override Capacitor's default Java 21 target so we can build with JDK 17.
-android {
-    compileOptions {
-        sourceCompatibility JavaVersion.VERSION_17
-        targetCompatibility JavaVersion.VERSION_17
-    }
-}
-
 try {
     def servicesJSON = file('google-services.json')
     if (servicesJSON.text) {
