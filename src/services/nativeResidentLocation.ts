@@ -31,6 +31,7 @@ import {
 } from './nativeResidentSessionPolicy';
 import {
   ResidentLocation,
+  type NativeResidentLocationAuthorization,
   type NativeResidentExpresswayEvent,
   type NativeResidentLocationPoint,
   type NativeResidentLocationSettings,
@@ -90,6 +91,25 @@ export function buildNativeResidentLocationReconcileRequest(
       endDurationSec: normalizeFiniteInteger(config.endDurationSec, DEFAULT_NATIVE_EXPRESSWAY_CONFIG.endDurationSec, 5, 300),
     },
   };
+}
+
+export function buildNativeApprovalSuspensionRequest() {
+  return buildNativeResidentLocationReconcileRequest({
+    approved: false,
+    setupComplete: false,
+    activeTripId: null,
+    expresswayOpen: false,
+  });
+}
+
+export function matchesInstalledNativeAuthorization(
+  installed: NativeResidentLocationAuthorization,
+  expected: { accessToken: string; refreshToken: string },
+) {
+  return installed.configured
+    && !installed.blocked
+    && installed.accessToken === expected.accessToken
+    && installed.refreshToken === expected.refreshToken;
 }
 
 const EMPTY_SETTINGS: NativeResidentLocationSettings = {
@@ -198,6 +218,14 @@ async function commitFastNativeResidentLocationTrackingState(
     expresswayOpen: request.expresswayOpen,
     expresswayConfig: request.expresswayConfig,
   }));
+}
+
+/** Stops all native tracking while preserving the enrollment authorization. */
+export async function suspendNativeResidentLocationForApproval(): Promise<NativeResidentLocationStatus> {
+  if (!isAndroidNative()) return EMPTY_STATUS;
+  trackingStateCoordinator.advanceGeneration();
+  const request = buildNativeApprovalSuspensionRequest();
+  return trackingStateCoordinator.enqueueCommit(() => ResidentLocation.reconcile(request));
 }
 
 const SUPABASE_URL = (import.meta.env?.VITE_SUPABASE_URL ?? '').trim();
@@ -370,13 +398,20 @@ export async function installNativeResidentLocationAuthorization(
   if (!session?.access_token || !session.refresh_token) return false;
   const { stableDeviceKey } = await getStableDeviceKey();
   if (!isResidentAuthIntentCurrent(expectedAuthIntent)) return false;
-  await ResidentLocation.installAuthorization({
+  const installedAuthorization = await ResidentLocation.installAuthorization({
     supabaseUrl: SUPABASE_URL,
     anonKey: SUPABASE_ANON_KEY,
     accessToken: session.access_token,
     refreshToken: session.refresh_token,
     deviceId: stableDeviceKey,
   });
+  if (!matchesInstalledNativeAuthorization(installedAuthorization, {
+    accessToken: session.access_token,
+    refreshToken: session.refresh_token,
+  })) {
+    throw new Error('端末の認証情報を更新できませんでした');
+  }
+  if (!isResidentAuthIntentCurrent(expectedAuthIntent)) return false;
   resetNativeAuthRecoveryBackoff();
   resetNativeAuthorizationVerificationBackoff();
   return isResidentAuthIntentCurrent(expectedAuthIntent);

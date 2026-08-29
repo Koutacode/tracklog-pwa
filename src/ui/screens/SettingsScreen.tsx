@@ -2,6 +2,10 @@ import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Capacitor } from '@capacitor/core';
 import { APP_VERSION, BUILD_DATE } from '../../app/version';
+import {
+  getDriverProfileEnrollmentErrorMessage,
+  getDriverRegistrationGateModel,
+} from '../../app/driverRegistrationGateModel';
 import { getDriverIdentity, sendDriverMagicLink, setDriverProfileLocal } from '../../services/remoteAuth';
 import { getRemoteSyncState, hydrateRemoteSyncState, runRemoteSync, subscribeRemoteSyncState } from '../../services/remoteSync';
 import {
@@ -77,14 +81,13 @@ export default function SettingsScreen() {
   const standalone = useMemo(() => isStandaloneMode(), []);
   const profileLocked = authInitialized && profileComplete && approvalStatus === 'approved';
   const authStatusLabel = authInitialized ? '認証済み' : email.trim() ? '認証待ち' : '未登録';
-  const approvalStatusLabel =
-    approvalStatus === 'approved'
-      ? '承認済み'
-      : approvalStatus === 'rejected'
-        ? '拒否済み'
-        : authInitialized
-          ? '管理者認証待ち'
-          : '未申請';
+  const registrationGate = getDriverRegistrationGateModel({
+    configured: syncState.configured,
+    authInitialized,
+    profileComplete,
+    approvalStatus,
+  });
+  const approvalStatusLabel = registrationGate.statusLabel;
   const syncAvailable = syncState.configured && authInitialized && profileComplete && approvalStatus === 'approved';
 
   const runVersionCheck = async () => {
@@ -256,14 +259,10 @@ export default function SettingsScreen() {
               <span>利用承認</span>
               <strong>{approvalStatusLabel}</strong>
             </div>
-            {authInitialized && profileComplete && approvalStatus !== 'approved' && (
-              <div className={`approval-wait-card approval-wait-card--${approvalStatus}`}>
+            {registrationGate.showStatusCard && (
+              <div className={`approval-wait-card approval-wait-card--${registrationGate.cardStatus ?? 'unregistered'}`}>
                 <strong>{approvalStatusLabel}</strong>
-                <span>
-                  {approvalStatus === 'rejected'
-                    ? '管理者により拒否されています。利用する場合は管理者へ確認してください。'
-                    : 'メール認証は完了しています。管理者が許可するまで、運行記録とクラウド同期は利用できません。'}
-                </span>
+                {registrationGate.statusMessage && <span>{registrationGate.statusMessage}</span>}
               </div>
             )}
             {profileLocked && (
@@ -326,13 +325,21 @@ export default function SettingsScreen() {
                   setApprovalStatus(identity.approvalStatus);
                   setMessage('端末プロフィールを保存しました');
                 } catch (error: any) {
-                  setMessage(error?.message ?? '保存に失敗しました');
+                  setMessage(
+                    getDriverProfileEnrollmentErrorMessage(error)
+                      ?? error?.message
+                      ?? '保存に失敗しました',
+                  );
                 } finally {
                   setSaving(false);
                 }
               }}
             >
-              {saving ? '保存中…' : '保存して同期'}
+              {saving
+                ? '保存中…'
+                : registrationGate.canRetryEnrollment
+                  ? '承認申請を再送'
+                  : '保存して同期'}
             </button>
           </article>
 
@@ -341,7 +348,13 @@ export default function SettingsScreen() {
             <div className="settings-note">クラウド同期は常時有効です。操作や記録のたびに自動で同期します。</div>
             <div className="settings-info-row">
               <span>状態</span>
-              <strong>{syncAvailable ? (syncState.syncing ? '同期中' : '常時同期') : syncState.configured ? '承認待ち' : '未設定'}</strong>
+              <strong>
+                {syncAvailable
+                  ? (syncState.syncing ? '同期中' : '常時同期')
+                  : syncState.configured
+                    ? registrationGate.statusLabel
+                    : '未設定'}
+              </strong>
             </div>
             <div className="settings-info-row">
               <span>最終同期</span>

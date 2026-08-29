@@ -22,6 +22,36 @@ assert.doesNotMatch(adminCheck, /\.ilike\s*\(/, 'admin email lookup must not use
 assert.match(adminCheck, /\.eq\('enabled', true\)/, 'admin lookup must only load enabled rows');
 assert.match(adminCheck, /sameEmailAddress/, 'admin lookup must use normalized exact email comparison');
 
+const requireUserHandler = functionSource('requireUser', 'isTracklogAdmin');
+assert.match(
+  requireUserHandler,
+  /req\.headers\.get\('Authorization'\)/,
+  'privileged claims must read authentication only from the Authorization header',
+);
+assert.match(
+  requireUserHandler,
+  /authorization\.toLowerCase\(\)\.startsWith\('bearer '\)/,
+  'privileged claims must require a Bearer authorization header',
+);
+
+const claimHandler = functionSource('claimDeviceProfile', 'updateDeviceLocation');
+assert.match(
+  claimHandler,
+  /textValue\(existing\?\.approval_status\) \|\| 'pending'/,
+  'a first device claim must start in pending approval',
+);
+assert.match(claimHandler, /auth_user_id: user\.id/, 'a first device claim must bind the authenticated user');
+assert.match(
+  claimHandler,
+  /approval_requested_at: approvalRequestedAt/,
+  'a first device claim must persist its approval request time',
+);
+assert.match(
+  claimHandler,
+  /\.upsert\(row, \{ onConflict: 'device_id' \}\)/,
+  'a first device claim must create the pending profile idempotently',
+);
+
 const migrationHandler = functionSource('migrateDeviceRecords', 'requireAdmin');
 assert.match(migrationHandler, /\.rpc\('tracklog_migrate_device_v2'/, 'device migration must call the v2 RPC');
 assert.equal((migrationHandler.match(/\.rpc\s*\(/g) ?? []).length, 1, 'device migration must make one RPC call');

@@ -58,10 +58,12 @@ import {
   reconcileNativeResidentLocation,
   restoreNativeResidentLocationSession,
   stopNativeResidentLocation,
+  suspendNativeResidentLocationForApproval,
 } from '../services/nativeResidentLocation';
 import {
   canUseNativeResidentLocation,
   drainNativeResidentRoutePointQueue,
+  resolveUnapprovedNativeLocationAction,
 } from './nativeResidentLocationPolicy';
 import {
   applyWebLocationTrackingIntent,
@@ -202,6 +204,13 @@ export default function RouteTrackingSupervisor() {
       await stopRouteTracking();
     };
 
+    const suspendAllLocationWorkForApproval = async () => {
+      await stopWebLocationWork();
+      if (!native) return;
+      resetNativeExpresswayDetection();
+      await suspendNativeResidentLocationForApproval();
+    };
+
     const maybeRequestForegroundHeartbeat = () => {
       // When allowed, the PWA uses the supervisor-owned geolocation watcher.
       // An additional getCurrentPosition request on every visibility change
@@ -238,15 +247,26 @@ export default function RouteTrackingSupervisor() {
           identity.profileComplete &&
           identity.approvalStatus === 'approved';
         if (!approved) {
-          if (native && !identity.authInitialized && !isDriverExplicitSignOutRequested()) {
+          if (!native) {
+            await stopAllLocationWork();
+            return;
+          }
+          const unapprovedAction = resolveUnapprovedNativeLocationAction({
+            authInitialized: identity.authInitialized,
+            approvalStatus: identity.approvalStatus,
+            explicitSignOutRequested: isDriverExplicitSignOutRequested(),
+          });
+          if (unapprovedAction === 'preserve-native-auth') {
             // A Supabase refresh can temporarily remove only the WebView
             // session. Keep the approved native enrollment available for the
             // startup handoff instead of converting it into a real sign-out.
             await stopWebLocationWork();
+          } else if (unapprovedAction === 'suspend-for-approval') {
+            await suspendAllLocationWorkForApproval();
+          } else if (unapprovedAction === 'clear-signed-out-auth') {
+            await stopAllLocationWork('signed-out');
           } else {
-            await stopAllLocationWork(
-              isDriverExplicitSignOutRequested() ? 'signed-out' : 'approval-rejected',
-            );
+            await stopAllLocationWork('approval-rejected');
           }
           return;
         }
@@ -373,7 +393,7 @@ export default function RouteTrackingSupervisor() {
             identity,
             setupReady: readiness.ready,
           })) {
-            await stopAllLocationWork('approval-rejected');
+            await suspendAllLocationWorkForApproval();
             return;
           }
           if (disposed || syncEpoch !== lifecycleEpoch) return;

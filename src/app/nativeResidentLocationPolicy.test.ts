@@ -4,6 +4,7 @@ import {
   canUseNativeResidentLocation,
   drainNativeResidentRoutePointQueue,
   orderNativeResidentRoutePoints,
+  resolveUnapprovedNativeLocationAction,
   uniqueNativeResidentRoutePoints,
 } from './nativeResidentLocationPolicy';
 
@@ -88,6 +89,52 @@ assertEqual(
   }),
   false,
   'incomplete native settings must stop native service',
+);
+
+assertEqual(
+  resolveUnapprovedNativeLocationAction({
+    authInitialized: true,
+    approvalStatus: 'pending',
+    explicitSignOutRequested: false,
+  }),
+  'suspend-for-approval',
+  'pending approval suspends tracking without clearing native authorization',
+);
+assertEqual(
+  resolveUnapprovedNativeLocationAction({
+    authInitialized: true,
+    approvalStatus: 'unregistered',
+    explicitSignOutRequested: false,
+  }),
+  'suspend-for-approval',
+  'unregistered enrollment suspends tracking without clearing native authorization',
+);
+assertEqual(
+  resolveUnapprovedNativeLocationAction({
+    authInitialized: true,
+    approvalStatus: 'rejected',
+    explicitSignOutRequested: false,
+  }),
+  'clear-rejected-auth',
+  'rejected approval clears native authorization',
+);
+assertEqual(
+  resolveUnapprovedNativeLocationAction({
+    authInitialized: false,
+    approvalStatus: 'unregistered',
+    explicitSignOutRequested: false,
+  }),
+  'preserve-native-auth',
+  'a transient missing WebView session preserves native enrollment for recovery',
+);
+assertEqual(
+  resolveUnapprovedNativeLocationAction({
+    authInitialized: true,
+    approvalStatus: 'pending',
+    explicitSignOutRequested: true,
+  }),
+  'clear-signed-out-auth',
+  'explicit sign-out clears authorization even while approval is pending',
 );
 
 const unique = uniqueNativeResidentRoutePoints([
@@ -274,7 +321,7 @@ async function runAsyncTests() {
   });
   assertEqual(pwaPeekCalled, false, 'PWA does not invoke the native queue bridge');
 
-  console.log('nativeResidentLocationPolicy: 22 tests passed');
+  console.log('nativeResidentLocationPolicy: 27 tests passed');
 }
 
 void runAsyncTests().catch(error => {

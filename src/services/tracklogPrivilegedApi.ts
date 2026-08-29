@@ -1,11 +1,21 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { RemoteDeviceProfile, TracklogAdminMessage, TracklogRuntimeConfig } from '../domain/remoteTypes';
-import { SUPABASE_CONFIGURED, adminSupabase, driverSupabase } from './supabase';
+import { SUPABASE_CONFIGURED, adminSupabase, driverAuthSupabase, driverSupabase } from './supabase';
 
 type FunctionResponse<T> = {
   ok?: boolean;
   data?: T;
   error?: string;
+};
+
+type DriverPrivilegedInvokeOptions = {
+  /**
+   * A freshly verified foreground Auth token may be used only for enrollment
+   * control-plane calls. Normal Android data traffic must keep using the
+   * native-owned driverSupabase client.
+   */
+  accessToken?: string | null;
+  client?: SupabaseClient | null;
 };
 
 export type TracklogWebPushSubscription = {
@@ -46,12 +56,17 @@ async function invokeTracklogPrivileged<T>(
   client: SupabaseClient,
   action: PrivilegedAction,
   payload: Record<string, unknown>,
+  accessToken?: string | null,
 ): Promise<T> {
+  const enrollmentAccessToken = accessToken?.trim() || '';
   const { data, error } = await client.functions.invoke<FunctionResponse<T>>('tracklog-privileged', {
     body: {
       action,
       ...payload,
     },
+    ...(enrollmentAccessToken
+      ? { headers: { Authorization: `Bearer ${enrollmentAccessToken}` } }
+      : {}),
   });
   if (error) {
     throw new Error(error.message || 'TrackLog サーバー処理に失敗しました');
@@ -76,9 +91,17 @@ export async function claimTracklogDeviceProfileViaFunction(input: {
   latestLng?: number | null;
   latestAccuracy?: number | null;
   lastSeenAt: string;
-}): Promise<RemoteDeviceProfile> {
-  const client = requireClient(driverSupabase);
-  return invokeTracklogPrivileged<RemoteDeviceProfile>(client, 'claimDeviceProfile', input);
+}, options?: DriverPrivilegedInvokeOptions): Promise<RemoteDeviceProfile> {
+  const enrollmentAccessToken = options?.accessToken?.trim() || '';
+  const client = requireClient(
+    options?.client ?? (enrollmentAccessToken ? driverAuthSupabase : driverSupabase),
+  );
+  return invokeTracklogPrivileged<RemoteDeviceProfile>(
+    client,
+    'claimDeviceProfile',
+    input,
+    enrollmentAccessToken,
+  );
 }
 
 export async function getTracklogAdminAccessStateViaFunction(): Promise<{
@@ -186,9 +209,17 @@ export async function ackTracklogAdminMessagesViaFunction(input: {
 export async function migrateTracklogDeviceRecordsViaFunction(input: {
   oldDeviceId: string;
   newDeviceId: string;
-}): Promise<void> {
-  const client = requireClient(driverSupabase);
-  await invokeTracklogPrivileged<{ migrated: boolean }>(client, 'migrateDeviceRecords', input);
+}, options?: DriverPrivilegedInvokeOptions): Promise<void> {
+  const enrollmentAccessToken = options?.accessToken?.trim() || '';
+  const client = requireClient(
+    options?.client ?? (enrollmentAccessToken ? driverAuthSupabase : driverSupabase),
+  );
+  await invokeTracklogPrivileged<{ migrated: boolean }>(
+    client,
+    'migrateDeviceRecords',
+    input,
+    enrollmentAccessToken,
+  );
 }
 
 export async function updateTracklogDeviceLocationViaFunction(input: {

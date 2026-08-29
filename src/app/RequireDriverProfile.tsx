@@ -28,6 +28,10 @@ import {
 } from '../services/nativeSetup';
 import type { NativeSetupReadiness } from '../services/nativeSetup';
 import { requestRouteTrackingSync } from './routeTrackingSignal';
+import {
+  getDriverProfileEnrollmentErrorMessage,
+  getDriverRegistrationGateModel,
+} from './driverRegistrationGateModel';
 
 type Props = {
   children: ReactElement;
@@ -39,16 +43,9 @@ function hasApprovedProfile(identity: DriverIdentity | null) {
   return identity.authInitialized && identity.profileComplete && identity.approvalStatus === 'approved';
 }
 
-function getApprovalLabel(identity: DriverIdentity) {
-  if (!identity.configured) return 'クラウド未設定';
-  if (!identity.authInitialized) return 'メール認証待ち';
-  if (!identity.profileComplete) return '登録情報不足';
-  if (identity.approvalStatus === 'approved') return '承認済み';
-  if (identity.approvalStatus === 'rejected') return '拒否済み';
-  return '管理者認証待ち';
-}
-
 function formatDriverAuthError(error: any) {
+  const enrollmentMessage = getDriverProfileEnrollmentErrorMessage(error);
+  if (enrollmentMessage) return enrollmentMessage;
   const raw = `${error?.message ?? error ?? ''}`.trim();
   if (!raw) return '認証に失敗しました';
   const normalized = raw.toLowerCase();
@@ -146,23 +143,28 @@ function DriverRegistrationGate(props: {
     try {
       await setDriverProfileLocal(validation.value);
       await hydrateRemoteSyncState();
-      await verifyDriverEmailOtp(validation.value.email, normalizedToken);
-      await runRemoteSync('profile-registration-otp');
-      setMessage('メール認証が完了しました。管理者の承認状態を確認します。');
+      const verifiedIdentity = await verifyDriverEmailOtp(validation.value.email, normalizedToken);
+      setMessage(
+        verifiedIdentity.approvalStatus === 'approved'
+          ? 'メール認証と管理者承認を確認しました。'
+          : verifiedIdentity.approvalStatus === 'pending'
+            ? 'メール認証と承認申請が完了しました。管理者の承認待ちです。'
+            : 'メール認証は完了しました。端末の承認申請を再送してください。',
+      );
       await onRefresh();
     } catch (error: any) {
-      setMessage(formatDriverAuthError(error));
+      const enrollmentMessage = getDriverProfileEnrollmentErrorMessage(error);
+      setMessage(enrollmentMessage ?? formatDriverAuthError(error));
+      if (enrollmentMessage) {
+        await onRefresh();
+      }
     } finally {
       setBusy(false);
     }
   };
 
-  const statusLabel = getApprovalLabel(identity);
-  const waitingForApproval =
-    identity.configured &&
-    identity.authInitialized &&
-    identity.profileComplete &&
-    identity.approvalStatus !== 'approved';
+  const gateModel = getDriverRegistrationGateModel(identity);
+  const statusLabel = gateModel.statusLabel;
   const showOtpPanel = identity.configured
     && !identity.authInitialized
     && (otpRequested || !!identity.email?.trim());
@@ -187,18 +189,14 @@ function DriverRegistrationGate(props: {
           {!identity.configured && ' 現在はクラウド設定を読み込めていないため、管理者承認を確認できません。'}
         </div>
 
-        {waitingForApproval && (
-          <div className={`approval-wait-card approval-wait-card--${identity.approvalStatus}`}>
+        {gateModel.showStatusCard && (
+          <div className={`approval-wait-card approval-wait-card--${gateModel.cardStatus ?? 'unregistered'}`}>
             <strong>{statusLabel}</strong>
-            <span>
-              {identity.approvalStatus === 'rejected'
-                ? 'この登録は管理者により拒否されています。内容を確認する場合は管理者へ連絡してください。'
-                : 'メール認証は完了しています。管理者が許可するとこの端末で機能を使えるようになります。'}
-            </span>
+            {gateModel.statusMessage && <span>{gateModel.statusMessage}</span>}
           </div>
         )}
 
-        {!waitingForApproval && <form className="driver-registration" onSubmit={handleSubmit}>
+        {gateModel.showRegistrationForm && <form className="driver-registration" onSubmit={handleSubmit}>
           <label className="settings-field">
             <span>名前</span>
             <input
@@ -252,7 +250,13 @@ function DriverRegistrationGate(props: {
           </div>
 
           <button className="trip-btn trip-btn--primary" disabled={busy || loading} type="submit">
-            {busy ? '処理中…' : identity.configured && !identity.authInitialized ? '登録して認証メールを送信' : '登録する'}
+            {busy
+              ? '処理中…'
+              : gateModel.canRetryEnrollment
+                ? '承認申請を再送'
+                : identity.configured && !identity.authInitialized
+                  ? '登録して認証メールを送信'
+                  : '登録する'}
           </button>
           <button
             className="trip-btn"
@@ -267,7 +271,7 @@ function DriverRegistrationGate(props: {
           </button>
         </form>}
 
-        {!waitingForApproval && showOtpPanel && (
+        {gateModel.showRegistrationForm && showOtpPanel && (
           <div className="driver-registration">
             <div className="settings-note">
               認証メールに表示された認証コードをここに入力すると、このPWA内でメール認証が完了します。
@@ -293,7 +297,7 @@ function DriverRegistrationGate(props: {
           </div>
         )}
 
-        {waitingForApproval && (
+        {gateModel.showApprovalRefresh && (
           <button
             className="trip-btn trip-btn--primary"
             disabled={busy || loading}
