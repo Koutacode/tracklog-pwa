@@ -1,7 +1,9 @@
 import {
+  buildNativeApprovalSuspensionRequest,
   buildNativeResidentLocationReconcileRequest,
   buildNativeResidentLocationStopRequest,
   createNativeTrackingStateCoordinator,
+  matchesInstalledNativeAuthorization,
 } from './nativeResidentLocation';
 import type { AppEvent } from '../domain/types';
 import {
@@ -56,6 +58,49 @@ async function runAsyncTests() {
     assertEqual(defaults.expresswayOpen, false, 'missing open state fails closed');
     assertEqual(defaults.expresswayConfig.speedKmh, 78, 'missing config uses detector default');
     assertEqual(defaults.routePauseAtMs, 0, 'invalid pause input is normalized');
+
+    const approvalSuspension = buildNativeApprovalSuspensionRequest();
+    assertEqual(approvalSuspension.approved, false, 'approval wait suspends approved native state');
+    assertEqual(approvalSuspension.setupComplete, false, 'approval wait suspends setup-complete native state');
+    assertEqual(approvalSuspension.activeTripId, '', 'approval wait clears the active native trip');
+    assertEqual(approvalSuspension.expresswayOpen, false, 'approval wait closes native expressway tracking');
+    assertEqual(
+      'clearAuthorization' in approvalSuspension,
+      false,
+      'approval wait uses reconcile and never clears enrollment authorization',
+    );
+
+    const currentAuthorization = {
+      configured: true,
+      blocked: false,
+      accessToken: 'verified-access-token',
+      refreshToken: 'verified-refresh-token',
+      updatedAt: 1,
+    };
+    assertEqual(
+      matchesInstalledNativeAuthorization(currentAuthorization, {
+        accessToken: 'verified-access-token',
+        refreshToken: 'verified-refresh-token',
+      }),
+      true,
+      'the native bridge must confirm that the freshly verified session was installed',
+    );
+    assertEqual(
+      matchesInstalledNativeAuthorization(
+        { ...currentAuthorization, accessToken: 'superseded-access-token' },
+        { accessToken: 'verified-access-token', refreshToken: 'verified-refresh-token' },
+      ),
+      false,
+      'a superseded native installation must not be accepted as the verified session',
+    );
+    assertEqual(
+      matchesInstalledNativeAuthorization(
+        { ...currentAuthorization, blocked: true },
+        { accessToken: 'verified-access-token', refreshToken: 'verified-refresh-token' },
+      ),
+      false,
+      'a blocked native authorization must not be accepted as installed',
+    );
 
     const permissionStop = buildNativeResidentLocationStopRequest('permission-denied');
     assertEqual(permissionStop.clearAuthorization, true, 'permission denial clears unusable auth');
@@ -311,7 +356,7 @@ async function runAsyncTests() {
     assertEqual(failed, true, 'fast apply failure is surfaced before UI success');
   }
 
-  console.log('nativeResidentLocation: 22 tests passed');
+  console.log('nativeResidentLocation: 25 tests passed');
 }
 
 void runAsyncTests().catch(error => {

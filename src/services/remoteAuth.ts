@@ -1,5 +1,5 @@
 import { Capacitor } from '@capacitor/core';
-import type { AuthChangeEvent, Session } from '@supabase/supabase-js';
+import type { AuthChangeEvent, Session, SupabaseClient } from '@supabase/supabase-js';
 import { APP_VERSION } from '../app/version';
 import { requestImmediateRemoteSync } from '../app/remoteSyncSignal';
 import { db } from '../db/db';
@@ -71,6 +71,17 @@ const WEB_ADMIN_CALLBACK_PATH = '/auth/admin/callback';
 const WEB_DRIVER_CALLBACK_PATH = '/auth/driver/callback';
 const EMAIL_OTP_PATTERN = /^\d{6,10}$/;
 const EMAIL_OTP_ERROR_MESSAGE = 'メール本文に表示された認証コードをそのまま入力してください';
+
+export class DriverProfileEnrollmentError extends Error {
+  readonly code = 'driver_profile_enrollment_failed';
+  readonly cause: unknown;
+
+  constructor(cause?: unknown) {
+    super('メール認証は完了しましたが、端末の承認申請を送信できませんでした。通信状態を確認して、承認申請を再送してください。');
+    this.name = 'DriverProfileEnrollmentError';
+    this.cause = cause;
+  }
+}
 
 export type NativeAuthStartOptions = {
   restartNativeAttempt?: boolean;
@@ -281,8 +292,12 @@ async function claimTracklogDeviceProfile(input: {
   latestLat?: number | null;
   latestLng?: number | null;
   latestAccuracy?: number | null;
+}, enrollment?: {
+  accessToken?: string | null;
+  client?: SupabaseClient | null;
 }) {
-  if (!driverSupabase) return null;
+  const client = enrollment?.client ?? driverSupabase;
+  if (!client) return null;
   return claimTracklogDeviceProfileViaFunction({
     deviceId: input.deviceId,
     displayName: input.displayName?.trim() || null,
@@ -297,12 +312,18 @@ async function claimTracklogDeviceProfile(input: {
     latestLng: input.latestLng ?? null,
     latestAccuracy: input.latestAccuracy ?? null,
     lastSeenAt: nowIso(),
+  }, {
+    client,
+    accessToken: enrollment?.accessToken,
   }) as Promise<ClaimedDeviceProfile | null>;
 }
 
-async function getCurrentCloudProfile(userId: string): Promise<DriverProfileSeed | null> {
-  if (!driverSupabase) return null;
-  const { data, error } = await driverSupabase
+async function getCurrentCloudProfile(
+  userId: string,
+  client: SupabaseClient | null = driverSupabase,
+): Promise<DriverProfileSeed | null> {
+  if (!client) return null;
+  const { data, error } = await client
     .from('device_profiles')
     .select('display_name, vehicle_label, driver_phone, driver_email, approval_status')
     .eq('auth_user_id', userId)
@@ -382,13 +403,28 @@ async function getProfileIdentity() {
   return {
     email: normalizeText(session.user.email),
     phone: normalizeText(session.user.phone),
+    accessToken: session.access_token,
   };
 }
 
-export async function initializeDriverIdentity(): Promise<DriverIdentity> {
+export async function initializeDriverIdentity(options?: {
+  enrollmentAccessToken?: string | null;
+  expectedAuthIntent?: number;
+  skipNativeSessionRestore?: boolean;
+}): Promise<DriverIdentity> {
   if (!SUPABASE_CONFIGURED || !driverAuthSupabase) {
     return getDriverIdentity();
   }
+
+  const assertCurrentAuthIntent = () => {
+    if (
+      options?.expectedAuthIntent != null &&
+      !isCurrentDriverAuthIntent(options.expectedAuthIntent)
+    ) {
+      throw new Error('認証処理は新しい操作により中止されました');
+    }
+  };
+  assertCurrentAuthIntent();
 
   const { stableDeviceKey } = await getStableDeviceKey();
   const persistedIdentity = await getPersistedDriverIdentity(stableDeviceKey, null, {
@@ -396,7 +432,10 @@ export async function initializeDriverIdentity(): Promise<DriverIdentity> {
   });
   let session: Session | null;
   try {
-    await restoreNativeResidentLocationSession();
+    if (!options?.skipNativeSessionRestore) {
+      await restoreNativeResidentLocationSession();
+    }
+    assertCurrentAuthIntent();
     const { data, error } = await driverAuthSupabase.auth.getSession();
     if (error) throw error;
     session = data.session;
@@ -420,6 +459,18 @@ export async function initializeDriverIdentity(): Promise<DriverIdentity> {
   if (!user) {
     throw new Error('ユーザー情報の初期化に失敗しました');
   }
+  const explicitEnrollmentAccessToken = options?.enrollmentAccessToken?.trim() || '';
+  if (explicitEnrollmentAccessToken && explicitEnrollmentAccessToken !== session.access_token) {
+    throw new Error('認証セッションが更新されたため、端末登録をやり直してください');
+  }
+  const shouldUseEnrollmentSession =
+    !!explicitEnrollmentAccessToken ||
+    persistedIdentity.approvalStatus === 'unregistered' ||
+    persistedIdentity.approvalStatus === 'pending';
+  const enrollmentAccessToken = shouldUseEnrollmentSession
+    ? explicitEnrollmentAccessToken || session.access_token
+    : '';
+  const enrollmentClient = enrollmentAccessToken ? driverAuthSupabase : driverSupabase;
 
   const [savedDisplayName, savedVehicleLabel, currentDeviceId, savedDriverPhone, savedDriverEmail] = await Promise.all([
     getMeta(META_DEVICE_DISPLAY_NAME),
@@ -428,13 +479,18 @@ export async function initializeDriverIdentity(): Promise<DriverIdentity> {
     getMeta(META_DRIVER_PHONE),
     getMeta(META_DRIVER_EMAIL),
   ]);
-  const cloudProfile = await getCurrentCloudProfile(user.id);
+  const cloudProfile = await getCurrentCloudProfile(user.id, enrollmentClient);
+  assertCurrentAuthIntent();
   const deviceId = stableDeviceKey;
   if (currentDeviceId && currentDeviceId !== deviceId && isLegacyAnonymousDeviceId(currentDeviceId)) {
     await migrateTracklogDeviceRecordsViaFunction({
       oldDeviceId: currentDeviceId,
       newDeviceId: deviceId,
+    }, {
+      client: enrollmentClient,
+      accessToken: enrollmentAccessToken,
     });
+    assertCurrentAuthIntent();
   }
 
   const mergedDisplayName = normalizeText(savedDisplayName) || cloudProfile?.displayName || getDriverDisplayNameFallback(user) || '';
@@ -479,7 +535,11 @@ export async function initializeDriverIdentity(): Promise<DriverIdentity> {
     vehicleLabel: mergedVehicleLabel,
     driverPhone: mergedDriverPhone,
     driverEmail: mergedDriverEmail,
+  }, {
+    client: enrollmentClient,
+    accessToken: enrollmentAccessToken,
   });
+  assertCurrentAuthIntent();
   const displayName = claimedProfile?.display_name?.trim() || mergedDisplayName || buildDefaultDisplayName(deviceId);
   const vehicleLabel = claimedProfile?.vehicle_label?.trim() || mergedVehicleLabel || '';
   const driverPhone = claimedProfile?.driver_phone?.trim() || mergedDriverPhone || '';
@@ -584,6 +644,9 @@ export async function setDriverProfileLocal(input: {
       vehicleLabel: normalized.vehicleLabel,
       driverPhone: normalized.phone,
       driverEmail: normalized.email,
+    }, {
+      client: sessionProfile?.accessToken ? driverAuthSupabase : driverSupabase,
+      accessToken: sessionProfile?.accessToken,
     });
     await setMeta(META_DRIVER_APPROVAL_STATUS, normalizeApprovalStatus(claimedProfile?.approval_status));
   }
@@ -1061,13 +1124,20 @@ export async function verifyDriverEmailOtp(email: string, token: string): Promis
   }
   const authIntent = beginDriverAuthIntent();
   invalidateNativeResidentLocationSessionRestore();
-  await withDriverAuthMutation(async () => {
-    const { error } = await client.auth.verifyOtp({
+  const verifiedSession = await withDriverAuthMutation(async (): Promise<Session> => {
+    const { data, error } = await client.auth.verifyOtp({
       email: normalized,
       token: normalizedToken,
       type: 'email',
     });
     if (error) throw error;
+    const session = data.session;
+    if (!session?.access_token || !session.refresh_token || !session.user) {
+      throw new Error('メール認証後のセッションを取得できませんでした');
+    }
+    if (!sameEmailAddress(normalizeEmail(session.user.email), normalized)) {
+      throw new Error('認証したメールアドレスが登録内容と一致しません');
+    }
     if (!isCurrentDriverAuthIntent(authIntent)) {
       throw new Error('認証処理は新しい操作により中止されました');
     }
@@ -1085,9 +1155,19 @@ export async function verifyDriverEmailOtp(email: string, token: string): Promis
     if (!isCurrentDriverAuthIntent(authIntent)) {
       throw new Error('認証処理は新しい操作により中止されました');
     }
+    return session;
   });
   if (Capacitor.isNativePlatform()) await clearNativeAuthStartStateForRole('driver');
-  return initializeDriverIdentity();
+  try {
+    return await initializeDriverIdentity({
+      enrollmentAccessToken: verifiedSession.access_token,
+      expectedAuthIntent: authIntent,
+      skipNativeSessionRestore: true,
+    });
+  } catch (error) {
+    if (error instanceof DriverProfileEnrollmentError) throw error;
+    throw new DriverProfileEnrollmentError(error);
+  }
 }
 
 export async function signOutDriver(): Promise<void> {

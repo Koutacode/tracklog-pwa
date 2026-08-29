@@ -2,6 +2,27 @@ import type { DriverIdentity } from '../domain/remoteTypes';
 import type { RoutePoint } from '../domain/types';
 import type { NativeResidentLocationPoint } from '../services/nativeResidentLocation';
 
+export type UnapprovedNativeLocationAction =
+  | 'preserve-native-auth'
+  | 'suspend-for-approval'
+  | 'clear-rejected-auth'
+  | 'clear-signed-out-auth';
+
+/**
+ * Keeps enrollment credentials available while a device is awaiting approval,
+ * but preserves the stronger clear-auth behavior for rejection and sign-out.
+ */
+export function resolveUnapprovedNativeLocationAction(input: {
+  authInitialized: boolean;
+  approvalStatus: DriverIdentity['approvalStatus'];
+  explicitSignOutRequested: boolean;
+}): UnapprovedNativeLocationAction {
+  if (input.explicitSignOutRequested) return 'clear-signed-out-auth';
+  if (!input.authInitialized) return 'preserve-native-auth';
+  if (input.approvalStatus === 'rejected') return 'clear-rejected-auth';
+  return 'suspend-for-approval';
+}
+
 export function canUseNativeResidentLocation(input: {
   isAndroidNative: boolean;
   identity: DriverIdentity;

@@ -120,7 +120,7 @@ type ResidentLocationPlugin = {
     accessToken: string;
     refreshToken: string;
     deviceId: string;
-  }): Promise<NativeResidentLocationStatus>;
+  }): Promise<NativeResidentLocationAuthorization>;
   stop(options: {
     clearAuthorization: boolean;
     clearActiveTrip: boolean;
