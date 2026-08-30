@@ -1,3 +1,4 @@
+import { Capacitor } from '@capacitor/core';
 import { Link, Navigate } from 'react-router-dom';
 import { signOutAdmin } from '../../services/remoteAuth';
 
@@ -7,6 +8,7 @@ type Props = {
 };
 
 export default function AdminAccessDenied({ authenticated, error }: Props) {
+  const usesDriverAccount = Capacitor.isNativePlatform() && Capacitor.getPlatform() === 'android';
   if (!authenticated) {
     return <Navigate to="/login" replace />;
   }
@@ -21,21 +23,25 @@ export default function AdminAccessDenied({ authenticated, error }: Props) {
           </div>
         </div>
         <div className="settings-note">
-          管理者として登録されているメールアドレスでログインしてください。
+          {usesDriverAccount
+            ? 'この端末で使用中のアカウントは、管理者として有効化されていません。'
+            : '管理者として登録されているメールアドレスでログインしてください。'}
         </div>
         {error && <div className="settings-toast">{error}</div>}
-        <button
-          className="trip-btn"
-          type="button"
-          onClick={async () => {
-            await signOutAdmin();
-            window.location.href = '/login';
-          }}
-        >
-          ログアウトしてログインし直す
-        </button>
+        {!usesDriverAccount && (
+          <button
+            className="trip-btn"
+            type="button"
+            onClick={async () => {
+              await signOutAdmin();
+              window.location.href = '/login';
+            }}
+          >
+            ログアウトしてログインし直す
+          </button>
+        )}
         <Link to="/" className="trip-btn" style={{ display: 'block', textAlign: 'center', textDecoration: 'none' }}>
-          ホームへ戻る
+          {usesDriverAccount ? '運転者画面へ戻る' : 'ホームへ戻る'}
         </Link>
       </div>
     </div>

@@ -1,4 +1,4 @@
-import type { AutoExpresswayDecisionReason } from '../db/repositories';
+import type { AutoExpresswayDecisionReason, endExpressway } from '../db/repositories';
 import type { AppEvent } from '../domain/types';
 import type { NativeResidentExpresswayEvent } from './nativeResidentLocation';
 import {
@@ -146,11 +146,13 @@ function createHarness(options?: {
       });
       return { expresswaySessionId: 'expressway-session', eventId, created: true };
     },
-    endExpressway: async (input: {
-      tripId: string;
-      occurredAt?: string;
-      autoDecision?: AutoExpresswayDecisionReason;
-    }) => {
+    endExpressway: async (input: Parameters<typeof endExpressway>[0]) => {
+      assertEqual(input.source, 'automatic_detection', 'native decision records its source');
+      assertEqual(
+        input.source === 'automatic_detection' ? input.automaticConfirmation : undefined,
+        'confirmed',
+        'native decision is explicitly confirmed',
+      );
       const nativeDetectionId = input.autoDecision?.nativeDetectionId;
       const existing = events.find(event => (
         event.type === 'expressway_end'

@@ -271,8 +271,12 @@ export default function RouteTrackingSupervisor() {
           return;
         }
 
-        const readiness = await checkNativeSetupReadiness();
-        if (!readiness.ready) {
+        const readiness = await checkNativeSetupReadiness({ fresh: native });
+        // The final setup step verifies that this supervisor actually started
+        // the resident service. Gate this bootstrap on the five physical
+        // settings only, otherwise `running` could never become true.
+        const setupCanStart = native ? readiness.permissionsReady : readiness.ready;
+        if (!setupCanStart) {
           await stopAllLocationWork('permission-denied');
           return;
         }
@@ -357,7 +361,12 @@ export default function RouteTrackingSupervisor() {
               pendingDecision.geo ??
               (pendingPrompt?.tripId === tripId ? pendingPrompt.geo : undefined);
             if (geo) {
-              const { eventId } = await endExpressway({ tripId, geo });
+              const { eventId } = await endExpressway({
+                tripId,
+                geo,
+                source: 'automatic_detection',
+                automaticConfirmation: 'confirmed',
+              });
               enqueueNotificationExpresswayEndIcResolution({ eventId, geo });
             }
             await clearPendingExpresswayEndPrompt(tripId);
@@ -391,7 +400,7 @@ export default function RouteTrackingSupervisor() {
           if (!canUseNativeResidentLocation({
             isAndroidNative: native,
             identity,
-            setupReady: readiness.ready,
+            setupReady: readiness.permissionsReady,
           })) {
             await suspendAllLocationWorkForApproval();
             return;

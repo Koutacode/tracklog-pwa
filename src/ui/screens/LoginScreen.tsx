@@ -1,7 +1,7 @@
 import { App as CapacitorApp } from '@capacitor/app';
 import { Capacitor } from '@capacitor/core';
 import { useEffect, useRef, useState } from 'react';
-import { Link, useLocation } from 'react-router-dom';
+import { Link, Navigate, useLocation } from 'react-router-dom';
 import { NATIVE_AUTH_CALLBACK_STATE_EVENT } from '../../app/AdminAuthBridge';
 import { PWA_URL } from '../../app/releaseInfo';
 import {
@@ -51,12 +51,14 @@ function formatLoginError(error: any) {
 
 export default function LoginScreen() {
   const location = useLocation();
+  const usesDriverAccount = Capacitor.isNativePlatform() && Capacitor.getPlatform() === 'android';
   const [email, setEmail] = useState('');
   const [token, setToken] = useState('');
   const [notice, setNotice] = useState<LoginNotice | null>(null);
   const [status, setStatus] = useState<'idle' | 'sending' | 'verifying' | 'google'>('idle');
   const [authenticated, setAuthenticated] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
+  const [sessionChecked, setSessionChecked] = useState(false);
   const [nativeRestartAction, setNativeRestartAction] = useState<NativeRestartAction | null>(null);
   const nativeGoogleLoginPending = useRef(false);
   const nativeAuthCallbackProcessing = useRef(false);
@@ -82,6 +84,7 @@ export default function LoginScreen() {
         if (!active) return;
         setAuthenticated(session.authenticated);
         setIsAdmin(session.isAdmin);
+        setNotice(current => current?.kind === 'error' ? null : current);
         if (session.authenticated) {
           nativeGoogleLoginPending.current = false;
           setNativeRestartAction(null);
@@ -91,6 +94,8 @@ export default function LoginScreen() {
         if (active) {
           setNotice({ kind: 'error', text: formatLoginError(error) });
         }
+      } finally {
+        if (active) setSessionChecked(true);
       }
     };
 
@@ -98,9 +103,12 @@ export default function LoginScreen() {
     const unsubscribe = onAdminAuthStateChange(() => {
       void refreshSession();
     });
+    const onOnline = () => void refreshSession();
+    window.addEventListener('online', onOnline);
     return () => {
       active = false;
       unsubscribe();
+      window.removeEventListener('online', onOnline);
     };
   }, []);
 
@@ -310,6 +318,87 @@ export default function LoginScreen() {
       setStatus('idle');
     }
   };
+
+  if (usesDriverAccount && sessionChecked && isAdmin) {
+    return <Navigate to="/admin" replace />;
+  }
+
+  if (usesDriverAccount) {
+    return (
+      <div className="screen-shell">
+        <div className="screen-card screen-card--narrow">
+          <div className="screen-card__header">
+            <div>
+              <div className="screen-card__eyebrow">管理者確認</div>
+              <h1 className="screen-card__title">現在のアカウントを確認</h1>
+            </div>
+          </div>
+          {!sessionChecked ? (
+            <div className="settings-note">管理者権限を確認しています…</div>
+          ) : (
+            <>
+              <div className="settings-note">
+                Androidアプリは、この端末で運行記録に使用中のアカウントで管理者権限を確認します。
+              </div>
+              {authenticated ? (
+                <div className="settings-toast" role="alert">
+                  このアカウントは管理者として有効化されていません。
+                </div>
+              ) : (
+                <div className="settings-toast" role="alert">
+                  運転者アカウントのログインが必要です。
+                </div>
+              )}
+              {notice && (
+                <div
+                  className={`settings-toast${notice.kind === 'success' ? ' settings-toast--success' : ''}`}
+                  role={notice.kind === 'error' ? 'alert' : 'status'}
+                >
+                  {notice.text}
+                </div>
+              )}
+              {!authenticated && (
+                <Link
+                  to="/driver-login"
+                  className="trip-btn trip-btn--primary"
+                  style={{ display: 'block', textAlign: 'center', textDecoration: 'none' }}
+                >
+                  運転者アカウントでログイン
+                </Link>
+              )}
+              <Link
+                to="/"
+                className="trip-btn"
+                style={{ display: 'block', textAlign: 'center', textDecoration: 'none' }}
+              >
+                運転者画面へ戻る
+              </Link>
+              <div className="settings-note" id="external-admin-session-note">
+                ブラウザの管理者ログインはアプリとは別に管理されます。
+              </div>
+              <button
+                type="button"
+                className="trip-btn"
+                aria-describedby="external-admin-session-note"
+                onClick={async () => {
+                  setNotice(null);
+                  try {
+                    const opened = await openExternalUrl(EXTERNAL_ADMIN_URL);
+                    if (!opened) throw new Error('ブラウザで管理画面を開けませんでした。');
+                    setNotice({ kind: 'info', text: 'ブラウザで管理画面を開きました。' });
+                  } catch (error: any) {
+                    setNotice({ kind: 'error', text: formatLoginError(error) });
+                  }
+                }}
+              >
+                ブラウザで管理画面を開く
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="screen-shell">

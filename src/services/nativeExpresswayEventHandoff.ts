@@ -397,6 +397,8 @@ async function materializeEvent(
       occurredAt: event.decidedAt ?? event.detectedAt,
       geo,
       autoDecision: reason,
+      source: 'automatic_detection',
+      automaticConfirmation: 'confirmed',
     });
     await dependencies.clearPendingPromptIfMatches({
       tripId: event.tripId,

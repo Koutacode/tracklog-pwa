@@ -1,16 +1,11 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import AdminMap from '../components/AdminMap';
-import AdminAccessDenied from '../components/AdminAccessDenied';
 import { getAdminTripBundle, deleteAdminTrip } from '../../services/remoteAdmin';
-import { getAdminSession } from '../../services/remoteAuth';
 
 export default function AdminTripDetail() {
   const { tripId = '' } = useParams();
   const navigate = useNavigate();
   const [ready, setReady] = useState(false);
-  const [authenticated, setAuthenticated] = useState(false);
-  const [isAdmin, setIsAdmin] = useState(false);
   const [bundle, setBundle] = useState<Awaited<ReturnType<typeof getAdminTripBundle>> | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
@@ -19,14 +14,6 @@ export default function AdminTripDetail() {
     let active = true;
     void (async () => {
       try {
-        const session = await getAdminSession();
-        if (!active) return;
-        setAuthenticated(session.authenticated);
-        setIsAdmin(session.isAdmin);
-        if (!session.authenticated || !session.isAdmin) {
-          setReady(true);
-          return;
-        }
         const nextBundle = await getAdminTripBundle(tripId);
         if (active) setBundle(nextBundle);
       } catch (err: any) {
@@ -40,14 +27,7 @@ export default function AdminTripDetail() {
     };
   }, [tripId]);
 
-  const route = useMemo(
-    () => (bundle?.routePoints ?? []).map(point => ({ lat: point.lat, lng: point.lng })),
-    [bundle],
-  );
-
   if (!ready) return <div className="screen-shell"><div className="screen-card">読み込み中…</div></div>;
-  if (!authenticated || !isAdmin) return <AdminAccessDenied authenticated={authenticated} error={error} />;
-
   return (
     <div className="screen-shell">
       <div className="screen-card">
@@ -57,11 +37,12 @@ export default function AdminTripDetail() {
             <h1 className="screen-card__title">{tripId}</h1>
           </div>
           <div className="screen-card__actions">
+            <Link to="/" className="pill-link">運転者画面へ戻る</Link>
             <button
               className="pill-link pill-link--danger"
               disabled={isDeleting}
               onClick={async () => {
-                if (!window.confirm('この運行履歴を完全に削除しますか？\n\n関連する走行ルートや日報データもすべて削除されます。\n※この操作は元に戻せません。')) {
+                if (!window.confirm('この運行履歴を完全に削除しますか？\n\n関連する運行記録と日報データも削除されます。\n※この操作は元に戻せません。')) {
                   return;
                 }
                 setIsDeleting(true);
@@ -81,10 +62,6 @@ export default function AdminTripDetail() {
         </div>
         {error && <div className="settings-toast">{error}</div>}
         <section className="settings-grid">
-          <article className="card settings-panel">
-            <div className="settings-panel__title">ルート</div>
-            <AdminMap route={route} markers={route.length > 0 ? [route[0], route[route.length - 1]] : []} />
-          </article>
           <article className="card settings-panel">
             <div className="settings-panel__title">概要</div>
             <div className="settings-info-row"><span>状態</span><strong>{bundle?.header?.status ?? '-'}</strong></div>

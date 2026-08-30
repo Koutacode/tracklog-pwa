@@ -118,6 +118,8 @@ export async function commitAutomaticExpresswayEnd(options: {
     tripId: options.prompt.tripId,
     geo: options.prompt.geo,
     autoDecision: decisionReason(options.prompt, nativeResolution),
+    source: 'automatic_detection',
+    automaticConfirmation: 'confirmed',
   });
   dependencies.enqueueEndIcResolution({ eventId, geo: options.prompt.geo });
   await dependencies.clearPendingPrompt(options.prompt.tripId);

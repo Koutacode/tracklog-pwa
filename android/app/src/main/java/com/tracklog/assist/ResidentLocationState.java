@@ -1,7 +1,6 @@
 package com.tracklog.assist;
 
 import android.Manifest;
-import android.app.AlarmManager;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
@@ -471,14 +470,12 @@ final class ResidentLocationState {
         boolean notifications = Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU
                 || hasPermission(context, Manifest.permission.POST_NOTIFICATIONS);
         boolean batteryOptimization = isIgnoringBatteryOptimizations(context);
-        boolean exactAlarm = canScheduleExactAlarms(context);
         boolean locationEnabled = isLocationEnabled(context);
         return new Readiness(
                 foregroundLocation,
                 backgroundLocation,
                 notifications,
                 batteryOptimization,
-                exactAlarm,
                 locationEnabled
         );
     }
@@ -491,12 +488,6 @@ final class ResidentLocationState {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return true;
         PowerManager manager = (PowerManager) context.getSystemService(Context.POWER_SERVICE);
         return manager != null && manager.isIgnoringBatteryOptimizations(context.getPackageName());
-    }
-
-    private static boolean canScheduleExactAlarms(Context context) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return true;
-        AlarmManager manager = (AlarmManager) context.getSystemService(Context.ALARM_SERVICE);
-        return manager != null && manager.canScheduleExactAlarms();
     }
 
     private static boolean isLocationEnabled(Context context) {
@@ -514,7 +505,6 @@ final class ResidentLocationState {
         final boolean backgroundLocation;
         final boolean notifications;
         final boolean batteryOptimization;
-        final boolean exactAlarm;
         final boolean locationEnabled;
 
         Readiness(
@@ -522,14 +512,12 @@ final class ResidentLocationState {
                 boolean backgroundLocation,
                 boolean notifications,
                 boolean batteryOptimization,
-                boolean exactAlarm,
                 boolean locationEnabled
         ) {
             this.foregroundLocation = foregroundLocation;
             this.backgroundLocation = backgroundLocation;
             this.notifications = notifications;
             this.batteryOptimization = batteryOptimization;
-            this.exactAlarm = exactAlarm;
             this.locationEnabled = locationEnabled;
         }
 

@@ -136,6 +136,8 @@ export async function handleNativeExpresswayPromptNotificationAction(
         tripId: prompt.tripId,
         geo: prompt.geo,
         autoDecision: prompt.reason,
+        source: 'automatic_detection',
+        automaticConfirmation: 'confirmed',
       });
       enqueueNotificationExpresswayEndIcResolution({ eventId, geo: prompt.geo });
       await clearHandledPrompt(prompt);
@@ -247,15 +249,7 @@ export async function cancelNativeExpresswayEndPrompt(tripId?: string) {
 export async function getNativeNotificationDiagnostic() {
   if (!isNative()) return null;
   const notificationPermission = await checkNotificationPermissionStatus();
-  let exactAlarm: 'granted' | 'denied' | 'prompt' | 'prompt-with-rationale' | 'unknown' = 'unknown';
-  try {
-    const exact = await LocalNotifications.checkExactNotificationSetting();
-    exactAlarm = exact.exact_alarm;
-  } catch {
-    exactAlarm = 'unknown';
-  }
   return {
     notificationPermission,
-    exactAlarm,
   };
 }

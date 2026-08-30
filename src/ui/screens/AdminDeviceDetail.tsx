@@ -1,9 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import AdminMap from '../components/AdminMap';
-import AdminAccessDenied from '../components/AdminAccessDenied';
 import { deleteAdminDevice, getAdminDeviceBundle, setAdminDeviceApproval } from '../../services/remoteAdmin';
-import { getAdminSession } from '../../services/remoteAuth';
 
 function getApprovalStatus(profile: NonNullable<Awaited<ReturnType<typeof getAdminDeviceBundle>>['profile']>) {
   if (profile.approval_status === 'approved' || profile.approval_status === 'rejected') return profile.approval_status;
@@ -31,8 +29,6 @@ export default function AdminDeviceDetail() {
   const { deviceId = '' } = useParams();
   const navigate = useNavigate();
   const [ready, setReady] = useState(false);
-  const [authenticated, setAuthenticated] = useState(false);
-  const [isAdmin, setIsAdmin] = useState(false);
   const [bundle, setBundle] = useState<Awaited<ReturnType<typeof getAdminDeviceBundle>> | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -45,14 +41,6 @@ export default function AdminDeviceDetail() {
     let active = true;
     void (async () => {
       try {
-        const session = await getAdminSession();
-        if (!active) return;
-        setAuthenticated(session.authenticated);
-        setIsAdmin(session.isAdmin);
-        if (!session.authenticated || !session.isAdmin) {
-          setReady(true);
-          return;
-        }
         const nextBundle = await getAdminDeviceBundle(deviceId);
         if (active) {
           setBundle(nextBundle);
@@ -70,7 +58,6 @@ export default function AdminDeviceDetail() {
   }, [deviceId]);
 
   useEffect(() => {
-    if (!authenticated || !isAdmin) return;
     let active = true;
 
     const refresh = async () => {
@@ -97,7 +84,7 @@ export default function AdminDeviceDetail() {
       window.clearInterval(timer);
       document.removeEventListener('visibilitychange', onVisible);
     };
-  }, [authenticated, isAdmin, deviceId]);
+  }, [deviceId]);
 
   const marker = useMemo(() => {
     if (bundle?.profile?.latest_lat == null || bundle?.profile?.latest_lng == null) return null;
@@ -170,8 +157,6 @@ export default function AdminDeviceDetail() {
   }
 
   if (!ready) return <div className="screen-shell"><div className="screen-card">読み込み中…</div></div>;
-  if (!authenticated || !isAdmin) return <AdminAccessDenied authenticated={authenticated} error={error} />;
-
   return (
     <div className="screen-shell">
       <div className="screen-card">
@@ -181,6 +166,7 @@ export default function AdminDeviceDetail() {
             <h1 className="screen-card__title">{bundle?.profile?.display_name || bundle?.profile?.driver_email || deviceId}</h1>
           </div>
           <div className="screen-card__actions">
+            <Link to="/" className="pill-link">運転者画面へ戻る</Link>
             <Link to="/admin" className="pill-link">一覧へ戻る</Link>
             <button
               type="button"

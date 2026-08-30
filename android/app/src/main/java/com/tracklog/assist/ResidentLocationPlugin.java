@@ -399,7 +399,6 @@ public final class ResidentLocationPlugin extends Plugin {
         settings.put("backgroundLocation", readiness.backgroundLocation);
         settings.put("notifications", readiness.notifications);
         settings.put("batteryOptimization", readiness.batteryOptimization);
-        settings.put("exactAlarm", readiness.exactAlarm);
         settings.put("locationEnabled", readiness.locationEnabled);
         result.put("settings", settings);
         return result;

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Capacitor } from '@capacitor/core';
+import { App as CapacitorApp } from '@capacitor/app';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import {
   deleteEvent,
@@ -17,8 +18,12 @@ import type { AppEvent, EventType } from '../../domain/types';
 import {
   buildImportableDayRunsFromAppEvents,
   buildReportTripFromAppEvents,
+  computeTripDayMetrics,
   formatMinutes,
+  projectTripReportTimelines,
+  type ProjectedReportTimelineEvent,
 } from '../../domain/reportLogic';
+import type { DayMetrics, DayRecord } from '../../domain/reportTypes';
 import {
   PERSISTED_TOGGLE_DEFINITIONS,
   resolveTogglePairing,
@@ -27,10 +32,25 @@ import {
 import { projectAutomaticBreakAsRest } from '../../domain/metrics';
 import { buildTripViewModel, TripViewModel } from '../../state/selectors';
 import { DAY_MS, getJstDateInfo } from '../../domain/jst';
+import { getEditableEventTypeOptions } from '../../domain/eventTypeConversion';
+import { requestRouteTrackingSync } from '../../app/routeTrackingSignal';
 import { buildAiShareText, splitAiShareText, type AiShareChunk } from '../../services/aiShareText';
 import { copyNativeText } from '../../services/nativeShare';
 import { deleteTripEverywhere } from '../../services/tripDeletion';
 import { resolveExpresswayIcManually } from '../../services/expresswayIcResolution';
+import {
+  buildTripDetailWorkTimelineForDay,
+  formatTripDetailWorkTimelineRow,
+  type TripDetailDayTimeline,
+} from './tripDetailTimeline';
+import { buildTripDetailLocationInfo } from './tripDetailLocationInfo';
+import { commitTripDetailOperationalMutation } from './tripDetailOperationalMutation';
+import {
+  millisecondsUntilNextTripDetailRefresh,
+  shouldRefreshTripDetailOnAppState,
+  shouldRefreshTripDetailOnVisibility,
+  shouldScheduleTripDetailRefresh,
+} from './tripDetailLiveRefresh';
 
 function fmtLocal(ts?: string) {
   if (!ts) return '-';
@@ -131,23 +151,139 @@ type AiCopySession = {
   status: string;
 };
 
-const EDITABLE_EVENT_TYPES: EventType[] = [
-  'rest_start',
-  'rest_end',
-  'break_start',
-  'break_end',
-  'load_start',
-  'load_end',
-  'unload_start',
-  'unload_end',
-  'expressway_start',
-  'expressway_end',
-  'expressway',
-  'refuel',
-  'boarding',
-  'disembark',
-  'point_mark',
-];
+export type DayDetailView = 'report' | 'timeline';
+
+function getBusinessMinutes(metrics: DayMetrics) {
+  return metrics.workMinutes + metrics.loadMinutes + metrics.unloadMinutes + metrics.waitMinutes;
+}
+
+export function DayReportSummary({
+  day,
+  metrics,
+  timeline,
+  dayTimelines,
+  view,
+  onViewChange,
+}: {
+  day: DayRecord;
+  metrics: DayMetrics;
+  timeline: ProjectedReportTimelineEvent[];
+  dayTimelines: TripDetailDayTimeline[];
+  view: DayDetailView;
+  onViewChange: (view: DayDetailView) => void;
+}) {
+  const businessMinutes = getBusinessMinutes(metrics);
+  const totalMinutes = metrics.driveMinutes
+    + businessMinutes
+    + metrics.breakMinutes
+    + metrics.ferryMinutes
+    + metrics.restMinutes;
+  const categories = [
+    { label: '運転', minutes: metrics.driveMinutes, tone: 'drive' },
+    { label: '業務', minutes: businessMinutes, tone: 'work' },
+    { label: '休憩', minutes: metrics.breakMinutes, tone: 'break' },
+    { label: 'フェリー', minutes: metrics.ferryMinutes, tone: 'ferry' },
+    { label: '休息', minutes: metrics.restMinutes, tone: 'rest' },
+  ];
+  const workTimeline = buildTripDetailWorkTimelineForDay(dayTimelines, day.dayIndex);
+  const locationInfo = buildTripDetailLocationInfo(timeline);
+
+  return (
+    <section className="trip-day-summary" aria-labelledby={`trip-day-${day.dayIndex}`}>
+      <div className="trip-day-summary__head">
+        <div>
+          <h2 id={`trip-day-${day.dayIndex}`} className="trip-day-summary__title">{day.dayIndex}日目</h2>
+          <div className="trip-day-summary__date">{day.dateKey}</div>
+        </div>
+        <div className="trip-day-summary__distance">{day.km} km</div>
+      </div>
+
+      <div className="trip-day-summary__tabs" role="group" aria-label={`${day.dayIndex}日目の表示切替`}>
+        <button
+          type="button"
+          className={`trip-day-summary__tab${view === 'report' ? ' trip-day-summary__tab--active' : ''}`}
+          aria-pressed={view === 'report'}
+          onClick={() => onViewChange('report')}
+        >
+          項目別時間
+        </button>
+        <button
+          type="button"
+          className={`trip-day-summary__tab${view === 'timeline' ? ' trip-day-summary__tab--active' : ''}`}
+          aria-pressed={view === 'timeline'}
+          onClick={() => onViewChange('timeline')}
+        >
+          TL
+        </button>
+      </div>
+
+      {view === 'report' ? (
+        <div className="trip-day-report">
+          <div className="trip-day-report__note">15分単位で丸め・日本時間24時締め</div>
+          <div className="trip-day-report__categories">
+            {categories.map(category => (
+              <div key={category.label} className={`trip-day-report__row trip-day-report__row--${category.tone}`}>
+                <span>{category.label}</span>
+                <strong>{formatMinutes(category.minutes)}</strong>
+              </div>
+            ))}
+            <div className="trip-day-report__row trip-day-report__row--total">
+              <span>合計</span>
+              <strong>{formatMinutes(totalMinutes)}</strong>
+            </div>
+          </div>
+        </div>
+      ) : (
+        <div className="trip-day-timeline">
+          {workTimeline.length > 0 ? workTimeline.map(row => {
+            const formatted = formatTripDetailWorkTimelineRow(row);
+            return (
+              <div key={row.key} className="trip-day-timeline__item">
+                <div className="trip-day-timeline__times">
+                  <time>{formatted.startLabel}</time>
+                  <time>{formatted.endLabel}</time>
+                </div>
+                <div>
+                  <div className="trip-day-timeline__label">{row.label}</div>
+                  <div className="trip-day-timeline__duration">{formatted.durationLabel}</div>
+                  {row.continuesFromPreviousDay && (
+                    <div className="trip-day-timeline__detail">前日から継続（当日は00:00から集計）</div>
+                  )}
+                  {row.continuesToNextDay && (
+                    <div className="trip-day-timeline__detail">翌日へ継続（当日は24:00まで集計）</div>
+                  )}
+                  {row.detail && <div className="trip-day-timeline__detail">{row.detail}</div>}
+                </div>
+              </div>
+            );
+          }) : (
+            <div className="trip-day-timeline__empty">この日の作業記録はありません</div>
+          )}
+        </div>
+      )}
+
+      {locationInfo.length > 0 && (
+        <section className="trip-day-locations" aria-labelledby={`trip-day-locations-${day.dayIndex}`}>
+          <h3 id={`trip-day-locations-${day.dayIndex}`} className="trip-day-locations__title">
+            高速道路・地点情報
+          </h3>
+          <div className="trip-day-locations__list">
+            {locationInfo.map(item => (
+              <div key={item.key} className={`trip-day-location${item.expressway ? ' trip-day-location--expressway' : ''}`}>
+                <div className="trip-day-location__head">
+                  <strong>{item.label}</strong>
+                  <time>{item.time}</time>
+                </div>
+                {item.icName && <div className="trip-day-location__ic">IC: {item.icName}</div>}
+                {item.address && <div className="trip-day-location__address">住所: {item.address}</div>}
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+    </section>
+  );
+}
 
 type DayGroup<T> = {
   dayIndex: number;
@@ -405,11 +541,12 @@ function buildAiPayload(tripId: string, vm: TripViewModel, events: AppEvent[]): 
     throw new Error('運行開始イベントが見つからないため共有できません');
   }
   const tripEnd = [...sorted].reverse().find(e => e.type === 'trip_end');
-  const dayRuns = buildImportableDayRunsFromAppEvents(events, vm.dayRuns);
+  const generatedAt = new Date().toISOString();
+  const dayRuns = buildImportableDayRunsFromAppEvents(events, vm.dayRuns, { currentTs: generatedAt });
   return {
     recordType: 'operation_log',
     tripId,
-    generatedAt: new Date().toISOString(),
+    generatedAt,
     dayRuns,
     summary: {
       hasTripEnd: vm.hasTripEnd,
@@ -577,6 +714,9 @@ export default function TripDetail() {
   const [reportOpening, setReportOpening] = useState(false);
   const [workingId, setWorkingId] = useState<string | null>(null);
   const [openEditorId, setOpenEditorId] = useState<string | null>(null);
+  const [selectedDayIndex, setSelectedDayIndex] = useState(0);
+  const [dayDetailView, setDayDetailView] = useState<DayDetailView>('report');
+  const [reportNow, setReportNow] = useState(() => Date.now());
 
   function toLocalInputValue(ts: string) {
     const d = new Date(ts);
@@ -605,6 +745,43 @@ export default function TripDetail() {
     load();
   }, [tripId]);
 
+  useEffect(() => {
+    if (!vm || !shouldScheduleTripDetailRefresh(vm.hasTripEnd)) return;
+
+    let disposed = false;
+    let minuteTimer: number | undefined;
+    let appStateHandle: { remove: () => Promise<void> } | undefined;
+    const refresh = () => setReportNow(Date.now());
+    const scheduleMinuteRefresh = () => {
+      minuteTimer = window.setTimeout(() => {
+        if (disposed) return;
+        refresh();
+        scheduleMinuteRefresh();
+      }, millisecondsUntilNextTripDetailRefresh(Date.now()));
+    };
+    const handleVisibilityChange = () => {
+      if (shouldRefreshTripDetailOnVisibility(document.visibilityState)) refresh();
+    };
+
+    scheduleMinuteRefresh();
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    if (Capacitor.isNativePlatform()) {
+      void CapacitorApp.addListener('appStateChange', ({ isActive }) => {
+        if (shouldRefreshTripDetailOnAppState(isActive) && !disposed) refresh();
+      }).then(handle => {
+        if (disposed) void handle.remove();
+        else appStateHandle = handle;
+      });
+    }
+
+    return () => {
+      disposed = true;
+      if (minuteTimer != null) window.clearTimeout(minuteTimer);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      if (appStateHandle) void appStateHandle.remove();
+    };
+  }, [vm?.hasTripEnd]);
+
   const togglePairing = useMemo(
     () => resolveTogglePairing(events, PERSISTED_TOGGLE_DEFINITIONS),
     [events],
@@ -626,6 +803,27 @@ export default function TripDetail() {
     () => vm ? buildTripReviewChecks(vm, togglePairing) : [],
     [vm, togglePairing],
   );
+  const reportOverview = useMemo(() => {
+    if (!tripId || !vm) return null;
+    const currentTs = new Date(reportNow).toISOString();
+    const trip = buildReportTripFromAppEvents({
+      tripId,
+      events,
+      dayRuns: vm.dayRuns,
+      label: vm.dayRuns[0]?.dateKey ? `${vm.dayRuns[0].dateKey} の運行` : '',
+      currentTs,
+    });
+    const timelines = projectTripReportTimelines(trip.days);
+    return {
+      trip,
+      metrics: computeTripDayMetrics(trip, { currentTs }),
+      timelines,
+      dayTimelines: trip.days.map(day => ({
+        dayIndex: day.dayIndex,
+        timeline: timelines.get(day.dayIndex)?.events ?? [],
+      })),
+    };
+  }, [events, reportNow, tripId, vm]);
 
   async function handleSaveTime() {
     if (!editing) return;
@@ -653,9 +851,12 @@ export default function TripDetail() {
     setSaving(true);
     setWorkingId(editing.id);
     try {
-      await updateEventTimestamp(editing.id, iso);
+      await commitTripDetailOperationalMutation({
+        mutate: () => updateEventTimestamp(editing.id, iso),
+        reload: load,
+        requestRouteTrackingSync,
+      });
       setEditing(null);
-      await load();
     } catch (e: any) {
       setErr(e?.message ?? '更新に失敗しました');
     } finally {
@@ -669,9 +870,12 @@ export default function TripDetail() {
     setSaving(true);
     setWorkingId(typeEditing.id);
     try {
-      await updateEventType(typeEditing.id, typeEditing.value);
+      await commitTripDetailOperationalMutation({
+        mutate: () => updateEventType(typeEditing.id, typeEditing.value),
+        reload: load,
+        requestRouteTrackingSync,
+      });
       setTypeEditing(null);
-      await load();
     } catch (e: any) {
       setErr(e?.message ?? '更新に失敗しました');
     } finally {
@@ -784,8 +988,11 @@ export default function TripDetail() {
     if (!ok) return;
     setWorkingId(eventId);
     try {
-      await deleteEvent(eventId);
-      await load();
+      await commitTripDetailOperationalMutation({
+        mutate: () => deleteEvent(eventId),
+        reload: load,
+        requestRouteTrackingSync,
+      });
     } catch (e: any) {
       setErr(e?.message ?? '削除に失敗しました');
     } finally {
@@ -845,6 +1052,7 @@ export default function TripDetail() {
         events,
         dayRuns: vm.dayRuns,
         label: existingLabel,
+        currentTs: new Date().toISOString(),
       });
         await saveReportTrip(reportTrip);
         navigate(`/report?tripId=${encodeURIComponent(tripId)}`, {
@@ -868,30 +1076,11 @@ export default function TripDetail() {
   return (
     <div className="page-shell trip-detail">
       <div className="trip-detail__header">
-        <div>
-          <div className="trip-detail__title">運行詳細・編集</div>
-          <div className="trip-detail__meta">運行ID: {tripId}</div>
-        </div>
         <div className="trip-detail__actions">
-          <Link to="/" className="trip-detail__button">ホーム</Link>
-          <Link to="/history" className="trip-detail__button">運行履歴</Link>
-          <Link to={`/trip/${tripId}/route`} className="trip-detail__button">ルート表示</Link>
-          <button
-            onClick={handleCopyAi}
-            disabled={sharing || !vm}
-            className="trip-detail__button trip-detail__button--accent"
-          >
-            {sharing ? 'コピー中…' : 'AI要約'}
-          </button>
-          <button
-            onClick={handleOpenReport}
-            disabled={reportOpening || !vm}
-            className="trip-detail__button trip-detail__button--accent"
-          >
-            {reportOpening ? '更新中…' : '日報を作成/更新'}
-          </button>
-          <button onClick={load} className="trip-detail__button">再読み込み</button>
+          <Link to="/history" className="trip-detail__button" aria-label="運行履歴へ戻る">←</Link>
         </div>
+        <div className="trip-detail__title">運行詳細</div>
+        <div className="trip-detail__header-spacer" aria-hidden="true" />
       </div>
       {err && (
         <div className="trip-detail__alert">{err}</div>
@@ -899,7 +1088,65 @@ export default function TripDetail() {
       {!vm && !err && <div>読み込み中…</div>}
       {vm && (
         <>
+          {reportOverview && (
+            <div className="trip-day-summaries">
+              {reportOverview.trip.days.length > 1 && (
+                <div className="trip-day-selector" role="group" aria-label="表示する運行日">
+                  {reportOverview.trip.days.map((day, index) => (
+                    <button
+                      key={day.dayIndex}
+                      type="button"
+                      aria-pressed={selectedDayIndex === index}
+                      className={`trip-day-selector__button${selectedDayIndex === index ? ' trip-day-selector__button--active' : ''}`}
+                      onClick={() => {
+                        setSelectedDayIndex(index);
+                        setDayDetailView('report');
+                      }}
+                    >
+                      {day.dayIndex}日目
+                    </button>
+                  ))}
+                </div>
+              )}
+              {(() => {
+                const safeIndex = Math.min(selectedDayIndex, reportOverview.trip.days.length - 1);
+                const day = reportOverview.trip.days[safeIndex];
+                const metrics = reportOverview.metrics[safeIndex];
+                if (!day || !metrics) return null;
+                return (
+                  <DayReportSummary
+                    key={day.dayIndex}
+                    day={day}
+                    metrics={metrics}
+                    timeline={reportOverview.timelines.get(day.dayIndex)?.events ?? []}
+                    dayTimelines={reportOverview.dayTimelines}
+                    view={dayDetailView}
+                    onViewChange={setDayDetailView}
+                  />
+                );
+              })()}
+            </div>
+          )}
+          <details className="trip-detail-more">
+            <summary className="trip-detail-more__summary">詳細・修正を開く</summary>
+            <div className="trip-detail-more__content">
+          <div className="trip-detail__meta">運行ID: {tripId}</div>
           <div className="trip-detail__toolbar">
+            <button
+              onClick={handleCopyAi}
+              disabled={sharing || !vm}
+              className="trip-detail__button trip-detail__button--accent"
+            >
+              {sharing ? 'コピー中…' : 'AI要約'}
+            </button>
+            <button
+              onClick={handleOpenReport}
+              disabled={reportOpening || !vm}
+              className="trip-detail__button trip-detail__button--accent"
+            >
+              {reportOpening ? '更新中…' : '日報を作成/更新'}
+            </button>
+            <button onClick={load} className="trip-detail__button">再読み込み</button>
             <button
               className="trip-detail__button trip-detail__button--danger"
               onClick={async () => {
@@ -1103,10 +1350,8 @@ export default function TripDetail() {
                       !!numDef && numberEditing?.id === ev.id && numberEditing.field === numDef.field;
                     const icEditingActive = icEditing?.id === ev.id;
                     const canDelete = ev.type !== 'trip_start';
-                    const canEditType = ev.type !== 'trip_start' && ev.type !== 'trip_end';
-                    const typeOptions = EDITABLE_EVENT_TYPES.includes(ev.type)
-                      ? EDITABLE_EVENT_TYPES
-                      : [ev.type, ...EDITABLE_EVENT_TYPES];
+                    const typeOptions = getEditableEventTypeOptions(events, ev.id);
+                    const canEditType = ev.type !== 'trip_start' && ev.type !== 'trip_end' && typeOptions.length > 1;
                     return (
                       <div key={ev.id} className="trip-item trip-edit trip-edit--compact">
                         <div className="trip-edit__summary">
@@ -1368,6 +1613,8 @@ export default function TripDetail() {
               </div>
             </div>
           </div>
+            </div>
+          </details>
         </>
       )}
       {aiCopySession && selectedAiChunk && (

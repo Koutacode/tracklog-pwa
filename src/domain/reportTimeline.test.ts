@@ -615,6 +615,108 @@ function testFerryUsesQuarterHourGridInDailyTotals() {
   assertEqual(totalMinutes, 24 * 60, 'full-day report remains exactly 24 hours');
 }
 
+function testActiveTripBuildsCurrentQuietDayAndCarriesOpenWork() {
+  const firstDateKey = '2026-08-10';
+  const secondDateKey = '2026-08-11';
+  const events: AppEvent[] = [
+    makeAppEvent('active-trip-start', 'trip_start', timestamp(firstDateKey, '23:00'), { odoKm: 100 }),
+    makeAppEvent('active-load-start', 'load_start', timestamp(firstDateKey, '23:30'), {
+      loadSessionId: 'active-load',
+      reportMinDurationMinutes: 15,
+    }),
+  ];
+  const currentTs = timestamp(secondDateKey, '02:00');
+  const trip = buildReportTripFromAppEvents({
+    tripId: 'trip-active-across-midnight',
+    events,
+    dayRuns: [{ dateKey: firstDateKey, km: 0 }],
+    currentTs,
+  });
+
+  assertEqual(trip.days.length, 2, 'active trip includes the current JST day without a new event');
+  assertEqual(trip.days[1]?.dateKey, secondDateKey, 'active quiet day date');
+  assertEqual(trip.days[1]?.dayIndex, 2, 'active quiet day keeps a contiguous day index');
+  assertEqual(trip.days[1]?.events.length, 0, 'active quiet day remains an empty event bucket');
+
+  const metrics = computeTripDayMetrics(trip, { currentTs });
+  assertEqual(metrics[1]?.loadMinutes, 120, 'open load state carries through midnight to currentTs');
+  assertEqual(metrics[1]?.driveMinutes, 0, 'quiet day is not reset to driving');
+  assertEqual(metrics[1]?.restMinutes, 0, 'quiet day is not reset to inactive rest');
+}
+
+function testCompletedTripBuildsCompletelyQuietMiddleDay() {
+  const firstDateKey = '2026-08-12';
+  const middleDateKey = '2026-08-13';
+  const finalDateKey = '2026-08-14';
+  const restSessionId = 'three-day-rest';
+  const events: AppEvent[] = [
+    makeAppEvent('three-day-trip-start', 'trip_start', timestamp(firstDateKey, '20:00'), { odoKm: 200 }),
+    makeAppEvent('three-day-rest-start', 'rest_start', timestamp(firstDateKey, '22:00'), {
+      restSessionId,
+      reportMinDurationMinutes: 15,
+    }),
+    makeAppEvent('three-day-rest-end', 'rest_end', timestamp(finalDateKey, '06:00'), { restSessionId }),
+    makeAppEvent('three-day-trip-end', 'trip_end', timestamp(finalDateKey, '08:00'), { odoKm: 300 }),
+  ];
+  const trip = buildReportTripFromAppEvents({
+    tripId: 'trip-completed-three-days',
+    events,
+    dayRuns: [
+      { dateKey: firstDateKey, km: 0 },
+      { dateKey: finalDateKey, km: 100 },
+    ],
+  });
+
+  assertEqual(
+    trip.days.map(day => day.dateKey).join(','),
+    `${firstDateKey},${middleDateKey},${finalDateKey}`,
+    'completed trip fills every JST calendar day through trip_end',
+  );
+  assertEqual(trip.days[1]?.events.length, 0, 'middle day has no synthetic persisted events');
+  assertEqual(trip.days[1]?.dayIndex, 2, 'middle day has a contiguous day index');
+
+  const metrics = computeTripDayMetrics(trip);
+  assertEqual(metrics[1]?.restMinutes, 24 * 60, 'open rest carries across the completely quiet middle day');
+  assertEqual(metrics[1]?.restEquivalentMinutes, 24 * 60, 'quiet middle day keeps the rest-equivalent total');
+  assertEqual(metrics[2]?.restMinutes, 6 * 60, 'carried rest ends at the final-day rest_end');
+  assertEqual(metrics[2]?.driveMinutes, 2 * 60, 'driving resumes through the final trip_end');
+}
+
+function testOpenFerryIsBoundedAtCurrentTimeAcrossMidnight() {
+  const firstDateKey = '2026-08-15';
+  const secondDateKey = '2026-08-16';
+  const events: AppEvent[] = [
+    makeAppEvent('open-ferry-trip-start', 'trip_start', timestamp(firstDateKey, '20:00'), { odoKm: 400 }),
+    makeAppEvent('open-ferry-rest-start', 'rest_start', timestamp(firstDateKey, '22:00'), {
+      restSessionId: 'open-ferry-rest',
+      reportMinDurationMinutes: 15,
+    }),
+    makeAppEvent('open-ferry-boarding', 'boarding', timestamp(firstDateKey, '23:00'), {
+      ferrySessionId: 'open-ferry',
+      reportMinDurationMinutes: 15,
+    }),
+  ];
+  const currentTs = timestamp(secondDateKey, '02:00');
+  const trip = buildReportTripFromAppEvents({
+    tripId: 'trip-open-ferry-across-midnight',
+    events,
+    dayRuns: [{ dateKey: firstDateKey, km: 0 }],
+    currentTs,
+  });
+  const metrics = computeTripDayMetrics(trip, { currentTs });
+
+  assertEqual(metrics[0]?.ferryMinutes, 60, 'open ferry is split at the first midnight');
+  assertEqual(metrics[1]?.ferryMinutes, 120, 'open ferry continues to currentTs on the quiet day');
+  assertEqual(metrics[1]?.ferrySegments[0]?.continuesFromPreviousDay, true, 'open ferry marks midnight carry-over');
+  assertEqual(metrics[1]?.restMinutes, 0, 'ferry overlap is removed from displayed rest minutes');
+  assertEqual(metrics[1]?.restEquivalentMinutes, 120, 'ferry overlap remains rest-equivalent exactly once');
+  assertEqual(
+    metrics[1]?.restMinutes + metrics[1]?.ferryMinutes,
+    metrics[1]?.restEquivalentMinutes,
+    'open ferry and rest are not double-added',
+  );
+}
+
 function testNotionLateLoadEndIsExcludedFromReports() {
   const loadA = '3ba22f48-load-a';
   const loadB = 'bcb3886a-load-b';
@@ -736,6 +838,9 @@ const tests: Array<[string, () => void]> = [
   ['cross-midnight minimum', testShortLoadAcrossMidnightKeepsMinimum],
   ['accepted unload and ferry pair details', testAcceptedPairsDriveUnloadAndFerryDetails],
   ['quarter-hour ferry totals', testFerryUsesQuarterHourGridInDailyTotals],
+  ['active quiet day carry-over', testActiveTripBuildsCurrentQuietDayAndCarriesOpenWork],
+  ['completed quiet middle day carry-over', testCompletedTripBuildsCompletelyQuietMiddleDay],
+  ['open ferry current-time bound', testOpenFerryIsBoundedAtCurrentTimeAcrossMidnight],
   ['Notion stale load end regression', testNotionLateLoadEndIsExcludedFromReports],
   ['cross-day expressway sessions', testExpresswaySessionsReconnectAcrossDays],
 ];

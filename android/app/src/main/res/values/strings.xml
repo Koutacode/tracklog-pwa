@@ -5,6 +5,6 @@
     <string name="package_name">com.tracklog.assist</string>
     <string name="custom_url_scheme">com.tracklog.assist</string>
     <string name="default_notification_channel_id">tracklog_admin_messages</string>
-    <string name="capacitor_background_geolocation_notification_channel_name">ルート記録</string>
+    <string name="capacitor_background_geolocation_notification_channel_name">位置記録</string>
     <string name="capacitor_background_geolocation_notification_icon">mipmap/ic_launcher</string>
 </resources>

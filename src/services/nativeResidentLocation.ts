@@ -117,7 +117,6 @@ const EMPTY_SETTINGS: NativeResidentLocationSettings = {
   backgroundLocation: false,
   notifications: false,
   batteryOptimization: false,
-  exactAlarm: false,
   locationEnabled: false,
 };
 

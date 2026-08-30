@@ -1,27 +1,39 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Capacitor } from '@capacitor/core';
+import { App as CapacitorApp } from '@capacitor/app';
 import BigButton from '../components/BigButton';
 import OdoDialog from '../components/OdoDialog';
 import FuelDialog from '../components/FuelDialog';
 import { useTripManager } from '../../hooks/useTripManager';
 import { useComplianceMetrics } from '../../hooks/useComplianceMetrics';
+import { useAdminEntryAvailability } from '../../hooks/useAdminEntryAvailability';
 import ProgressGauge from '../components/ProgressGauge';
-import DrivingView from './HomeScreen/DrivingView';
 import StoppedView from './HomeScreen/StoppedView';
 import ExpresswayEndConfirmDialog from './HomeScreen/ExpresswayEndConfirmDialog';
 import RunStatusCard from './HomeScreen/RunStatusCard';
+import HomeBottomNav from './HomeScreen/HomeBottomNav';
 import { subscribeHomeEventsChanged } from './HomeScreen/homeEventsRefresh';
 import {
+  findRecordingBlockingDiagnostic,
   selectPendingExpresswayEndPrompt,
   summarizeDiagnostics,
   summarizeExpressway,
   summarizeLocation,
   summarizeRouteTracking,
 } from './HomeScreen/homeStatusModel';
+import {
+  buildActiveOperationStatuses,
+  buildRestMilestones,
+  formatElapsedHoursMinutes,
+  formatStartedClock,
+} from './HomeScreen/activeOperationStatus';
 
 import {
   getPendingExpresswayEndPrompt,
+  getEventsByTripId,
+  clearPendingExpresswayEndDecision,
+  clearPendingExpresswayEndPrompt,
   getRouteTrackingMode,
   setRouteTrackingMode,
   DEFAULT_ROUTE_TRACKING_MODE,
@@ -37,11 +49,13 @@ import {
   commitAutomaticExpresswayEnd,
   commitAutomaticExpresswayKeep,
 } from '../../services/nativeExpresswayPromptDecision';
+import { cancelNativeExpresswayEndPrompt } from '../../services/nativeExpresswayPrompt';
 import { runStartupDiagnostics, type StartupDiagnosticItem } from '../../services/startupDiagnostics';
 import {
+  checkNativeSetupReadiness,
   openAppPermissionSettings,
   openSystemLocationSettings,
-  runNativeQuickSetup as runNativeSetupWizard,
+  runNativeSetupStep,
 } from '../../services/nativeSetup';
 import { copyLatestAndroidApkUrl } from '../../services/appDistribution';
 import { requestRouteTrackingSync } from '../../app/routeTrackingSignal';
@@ -60,15 +74,6 @@ import {
   findOpenToggleSessionId,
   findOpenToggleStart,
 } from '../../domain/togglePairing';
-
-function fmtDuration(ms: number) {
-  const totalSec = Math.max(0, Math.floor(ms / 1000));
-  const h = Math.floor(totalSec / 3600);
-  const m = Math.floor((totalSec % 3600) / 60);
-  const s = totalSec % 60;
-  const pad = (n: number) => String(n).padStart(2, '0');
-  return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
-}
 
 function fmtDateTime(ts?: string) {
   if (!ts) return '-';
@@ -137,6 +142,8 @@ export default function HomeScreen() {
     handleStartRest,
     handleEndRest,
     handleToggleEvent,
+    handleStartExpressway,
+    requestExpresswayEnd,
     handleAddRefuel,
     handleAddFerry,
     handleAddPointMark,
@@ -166,14 +173,17 @@ export default function HomeScreen() {
   const [voiceLastText, setVoiceLastText] = useState<string | null>(null);
   const [voiceResult, setVoiceResult] = useState<string | null>(null);
   const [voiceError, setVoiceError] = useState<string | null>(null);
-  const [focusDriving, setFocusDriving] = useState(false);
   const [breakToRestModalOpen, setBreakToRestModalOpen] = useState(isBreakToRestModalOpen);
-  const [expresswayEndConfirmation, setExpresswayEndConfirmation] = useState<null | { source: 'manual' | 'voice' | 'automatic' }>(null);
+  const [expresswayEndConfirmation, setExpresswayEndConfirmation] = useState<null | { source: 'automatic' }>(null);
   const [pendingExpresswayEndPrompt, setPendingExpresswayEndPromptState] = useState<PendingExpresswayEndPrompt | null>(null);
   const [expresswayEndBusy, setExpresswayEndBusy] = useState(false);
   const [expresswayEndError, setExpresswayEndError] = useState<string | null>(null);
+  const [expresswayActionMessage, setExpresswayActionMessage] = useState<string | null>(null);
+  const canOpenAdmin = useAdminEntryAvailability();
 
   const apkUrlCopyTimer = useRef<number | null>(null);
+  const setupAwaitingResume = useRef(false);
+  const setupResumeCheckRunning = useRef(false);
   const isNative = Capacitor.isNativePlatform();
   const isAndroidNative = isNative && Capacitor.getPlatform() === 'android';
 
@@ -217,6 +227,7 @@ export default function HomeScreen() {
   const ferryActive = openToggleStarts.ferry !== null;
   const operationsDisabled = loading
     || operationInProgress
+    || expresswayEndBusy
     || breakToRestModalOpen
     || expresswayEndConfirmation != null;
   const expresswayPending = activeOperation === 'expressway-start'
@@ -264,37 +275,15 @@ export default function HomeScreen() {
     };
   }, [breakToRestModalOpen, expresswayActive, tripId]);
 
-  const activeStatuses = useMemo(() => {
-    const list: { name: string; startTs: string; type: 'base' | 'expressway' | 'ferry' }[] = [];
-
-    // フェリーは基本状態なので、ほかの基本カテゴリと同時には表示しない。
-    if (ferryActive) {
-      const ts = openToggleStarts.ferry?.ts;
-      if (ts) {
-        list.push({ name: 'フェリー乗船', startTs: ts, type: 'base' });
-      }
-    } else if (liveDrive.currentCategory !== 'idle' && liveDrive.currentCategoryStartedAt) {
-      list.push({
-        name: liveDrive.currentCategoryLabel,
-        startTs: liveDrive.currentCategoryStartedAt,
-        type: 'base',
-      });
-    }
-
-    // 2. 高速道路
-    if (expresswayActive) {
-      const ts = openToggleStarts.expressway?.ts;
-      if (ts) {
-        list.push({
-          name: '高速道路走行',
-          startTs: ts,
-          type: 'expressway',
-        });
-      }
-    }
-
-    return list;
-  }, [liveDrive, expresswayActive, ferryActive, openToggleStarts]);
+  const activeStatuses = useMemo(
+    () => buildActiveOperationStatuses(events, liveDrive),
+    [events, liveDrive],
+  );
+  const activeRestStatus = activeStatuses.find(status => status.kind === 'rest');
+  const restMilestones = useMemo(
+    () => activeRestStatus ? buildRestMilestones(activeRestStatus.startedAt) : [],
+    [activeRestStatus],
+  );
 
   const canStartBasicOperation = !ferryActive && !loadActive && !breakActive && !restActive && !unloadActive;
   const canStartRest = canStartBasicOperation;
@@ -303,23 +292,70 @@ export default function HomeScreen() {
   const canStartBreak = canStartBasicOperation;
   const canStartFerry = !ferryActive && !loadActive && !breakActive && !unloadActive;
 
-  const runExpresswayToggle = async (action: 'start' | 'end') => {
+  const runExpresswayStart = async () => {
     if (operationInProgress) return;
-    return handleToggleEvent('expressway', action);
+    return handleStartExpressway();
   };
 
-  const requestExpresswayToggle = (action: 'start' | 'end', source: 'manual' | 'voice' = 'manual') => {
+  const invalidateAutomaticExpresswayPrompt = async () => {
+    if (!tripId) return;
+    setPendingExpresswayEndPromptState(null);
+    setExpresswayEndConfirmation(null);
+    await Promise.allSettled([
+      cancelNativeExpresswayEndPrompt(tripId),
+      clearPendingExpresswayEndDecision(tripId),
+      clearPendingExpresswayEndPrompt(tripId),
+    ]);
+  };
+
+  const runImmediateExpresswayEnd = async (source: 'manual_button' | 'voice') => {
+    if (!tripId || operationInProgress || expresswayEndBusy) return false;
+    setExpresswayEndBusy(true);
+    setExpresswayEndError(null);
+    setExpresswayActionMessage(null);
+    const completed = (await requestExpresswayEnd(source))?.status === 'completed';
+    if (completed) {
+      await invalidateAutomaticExpresswayPrompt();
+      setExpresswayActionMessage('高速道路を終了しました。出口ICを確認しています。');
+      if (source === 'voice') setVoiceResult('実行しました: 高速道路終了');
+      setExpresswayEndBusy(false);
+      return true;
+    }
+
+    // The local event is authoritative. Native fast-apply can fail after the
+    // event was committed, so re-read before offering a dangerous duplicate.
+    try {
+      const latestEvents = await getEventsByTripId(tripId);
+      const stillOpen = findOpenToggleStart(latestEvents, EXPRESSWAY_TOGGLE_DEFINITION) !== null;
+      await refresh();
+      if (!stillOpen) {
+        await invalidateAutomaticExpresswayPrompt();
+        clearOperationError();
+        requestRouteTrackingSync();
+        setExpresswayActionMessage('高速道路の終了は保存済みです。端末同期を再試行します。');
+        if (source === 'voice') setVoiceResult('高速道路の終了は保存済みです。端末同期を再試行します。');
+        setExpresswayEndBusy(false);
+        return true;
+      }
+    } catch {
+      // Keep the open-state error below when authoritative state cannot be read.
+    }
+    const message = '高速道路の終了を記録できませんでした。通信と位置情報を確認して、もう一度お試しください。';
+    setExpresswayEndError(message);
+    if (source === 'voice') setVoiceError(message);
+    setExpresswayEndBusy(false);
+    return false;
+  };
+
+  const requestExpresswayToggle = (action: 'start' | 'end') => {
     if (operationInProgress || breakToRestModalOpen) return;
     if (action === 'end') {
       if (!expresswayActive) return;
-      setExpresswayEndError(null);
-      setExpresswayEndConfirmation({ source });
-      if (source === 'voice') {
-        setVoiceResult('高速道路を降りたか確認しています。');
-      }
+      void runImmediateExpresswayEnd('manual_button');
       return;
     }
-    void runExpresswayToggle('start');
+    setExpresswayActionMessage(null);
+    void runExpresswayStart();
   };
 
   const continueExpressway = async () => {
@@ -344,7 +380,6 @@ export default function HomeScreen() {
     }
     setExpresswayEndConfirmation(null);
     setExpresswayEndError(null);
-    if (source === 'voice') setVoiceResult('高速道路の記録を継続します。');
     setExpresswayEndBusy(false);
   };
 
@@ -367,28 +402,15 @@ export default function HomeScreen() {
       } catch {
         completed = false;
       }
-    } else {
-      completed = (await runExpresswayToggle('end')) === true;
     }
     if (completed) {
       setExpresswayEndConfirmation(null);
-      if (source === 'voice') setVoiceResult('実行しました: 高速道路終了');
     } else {
       const message = '高速道路の終了を記録できませんでした。通信と位置情報を確認して、もう一度お試しください。';
       setExpresswayEndError(message);
-      if (source === 'voice') setVoiceError(message);
     }
     setExpresswayEndBusy(false);
   };
-
-  // Auto-switch focus when driving starts
-  useEffect(() => {
-    if (liveDrive.currentCategory === 'drive') {
-      setFocusDriving(true);
-    } else {
-      setFocusDriving(false);
-    }
-  }, [liveDrive.currentCategory]);
 
   const runVoiceCommand = async () => {
     if (breakToRestModalOpen) {
@@ -500,13 +522,13 @@ export default function HomeScreen() {
         case 'expressway_start':
           if (tripId && !expresswayActive) {
             operationAttempted = true;
-            operationSucceeded = (await runExpresswayToggle('start')) === true;
+            operationSucceeded = (await runExpresswayStart()) === true;
           } else unavailableReason = tripId ? 'すでに高速道路を記録中です。' : '開始中の運行がありません。';
           break;
         case 'expressway_end':
           if (tripId && expresswayActive) {
-            requestExpresswayToggle('end', 'voice');
-            followUpMessage = '高速道路を降りたか確認してください。';
+            operationAttempted = true;
+            operationSucceeded = await runImmediateExpresswayEnd('voice');
           } else unavailableReason = '終了できる高速区間がありません。';
           break;
         case 'boarding':
@@ -603,27 +625,84 @@ export default function HomeScreen() {
     setDiagnosticsLoading(false);
   }, [isAndroidNative]);
 
+  const verifySetupAfterReturn = useCallback(async () => {
+    if (!isAndroidNative || setupResumeCheckRunning.current) return;
+    setupResumeCheckRunning.current = true;
+    setupAwaitingResume.current = false;
+    try {
+      const readiness = await checkNativeSetupReadiness({ fresh: true });
+      requestRouteTrackingSync();
+      await refreshDiagnostics();
+      if (readiness.ready) {
+        setQuickSetupMessage('位置記録の設定と常駐サービスを確認しました。');
+      } else if (readiness.activeStep) {
+        setQuickSetupMessage(`${readiness.activeStep.label}: ${readiness.activeStep.detail}`);
+      }
+    } catch {
+      setRouteTrackingError('端末設定の最新状態を確認できませんでした。もう一度お試しください。');
+    } finally {
+      setupResumeCheckRunning.current = false;
+    }
+  }, [isAndroidNative, refreshDiagnostics]);
+
   const runQuickSetup = async () => {
     if (!isAndroidNative || quickSetupRunning) return;
     setQuickSetupRunning(true);
     setQuickSetupMessage(null);
     setRouteTrackingError(null);
     try {
-      const result = await runNativeSetupWizard();
-      setQuickSetupMessage(
-        result.requiresManualFollowUp
-          ? '端末設定を開きました。必要な許可を確認したあと、再診断してください。'
-          : 'バックグラウンド記録の準備が整いました。',
-      );
-      requestRouteTrackingSync();
-      await refreshDiagnostics();
+      const readiness = await checkNativeSetupReadiness({ fresh: true });
+      const step = readiness.activeStep;
+      if (!step || step.id === 'native-only') {
+        await verifySetupAfterReturn();
+        return;
+      }
+      setQuickSetupMessage(`${step.label}: ${step.instruction ?? step.detail}`);
+      const result = await runNativeSetupStep(step.id);
+      if (result.opened) {
+        setupAwaitingResume.current = true;
+        setQuickSetupMessage(`${step.label}の設定画面を開きました。設定後にTrackLogへ戻ると自動確認します。`);
+        return;
+      }
+      await verifySetupAfterReturn();
     } catch {
-      setQuickSetupMessage('かんたん設定を完了できませんでした。端末設定から許可を確認してください。');
+      setQuickSetupMessage('端末設定を開けませんでした。もう一度お試しください。');
       setRouteTrackingError('端末設定を確認してください。');
     } finally {
       setQuickSetupRunning(false);
     }
   };
+
+  useEffect(() => {
+    if (!isAndroidNative) return;
+    let active = true;
+    let resumeListener: { remove(): void } | null = null;
+    let stateListener: { remove(): void } | null = null;
+    const handleReturn = () => {
+      if (!active || !setupAwaitingResume.current) return;
+      void verifySetupAfterReturn();
+    };
+    void CapacitorApp.addListener('resume', handleReturn).then(listener => {
+      if (active) resumeListener = listener;
+      else void listener.remove();
+    });
+    void CapacitorApp.addListener('appStateChange', ({ isActive }) => {
+      if (isActive) handleReturn();
+    }).then(listener => {
+      if (active) stateListener = listener;
+      else void listener.remove();
+    });
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') handleReturn();
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => {
+      active = false;
+      document.removeEventListener('visibilitychange', handleVisibility);
+      void resumeListener?.remove();
+      void stateListener?.remove();
+    };
+  }, [isAndroidNative, verifySetupAfterReturn]);
 
   const changeRouteTrackingMode = async (mode: RouteTrackingMode) => {
     if (mode === routeTrackingMode) return;
@@ -680,6 +759,13 @@ export default function HomeScreen() {
     () => summarizeExpressway(events, openToggleStarts.expressway),
     [events, openToggleStarts.expressway],
   );
+  const recordingBlockingDiagnostic = findRecordingBlockingDiagnostic(startupDiagnostics);
+  const routeRecordingUnhealthy = routeSummary.recordingBlocked
+    || recordingBlockingDiagnostic != null;
+  const routeRecordingDegraded = !routeRecordingUnhealthy && routeSummary.degraded;
+  const routeRecordingCause = routeSummary.recordingBlocked
+    ? routeSummary.detail
+    : recordingBlockingDiagnostic?.detail ?? '位置記録の端末設定を確認してください。';
   const statusCard = (
     <RunStatusCard
       route={routeSummary}
@@ -687,7 +773,7 @@ export default function HomeScreen() {
       location={locationSummary}
       diagnostics={diagnosticSummary}
       diagnosticItems={startupDiagnostics}
-      compact={!!tripId && focusDriving}
+      compact={false}
       isAndroidNative={isAndroidNative}
       diagnosticsLoading={diagnosticsLoading}
       quickSetupRunning={quickSetupRunning}
@@ -709,12 +795,6 @@ export default function HomeScreen() {
                 <div className="start-hero__brand-sub">運行記録</div>
               </div>
             </div>
-            <div className="start-hero__nav-actions">
-              <Link to="/messages" className="pill-link">メッセージ</Link>
-              <Link to="/settings" className="pill-link">同期/端末</Link>
-              <Link to="/history" className="pill-link">運行履歴</Link>
-              <Link to="/report" className="pill-link">運行日報</Link>
-            </div>
           </div>
           <div className="start-hero__content">
             <div className="start-hero__panel start-hero__panel--hero">
@@ -735,6 +815,14 @@ export default function HomeScreen() {
             </div>
             {statusCard}
           </div>
+          <details id="home-stopped-more" className="home-detail-drawer home-stopped-more">
+            <summary>その他</summary>
+            <div className="home-detail-drawer__links">
+              <Link to="/report">運行日報</Link>
+              <Link to="/settings">同期・端末設定</Link>
+              {canOpenAdmin && <Link to="/admin">管理画面</Link>}
+            </div>
+          </details>
           <OdoDialog
             open={odoDialog?.kind === 'trip_start' && !operationInProgress}
             title="運行開始"
@@ -746,6 +834,7 @@ export default function HomeScreen() {
               handleStartTrip(odoKm);
             }}
           />
+          <HomeBottomNav moreTarget="home-stopped-more" />
         </div>
       </div>
     );
@@ -774,204 +863,168 @@ export default function HomeScreen() {
         aria-hidden={homeModalOpen ? true : undefined}
         style={homeModalOpen ? { pointerEvents: 'none', userSelect: 'none' } : undefined}
       >
-        <div className="home-topbar">
-          <div className="home-topbar__main">
-            <div className="home-topbar__eyebrow">TrackLog運行アシスト</div>
-            <div className="home-topbar__title">{focusDriving ? '運転中' : '運行中'}</div>
-            <div className="home-topbar__meta">
-              開始 {fmtDateTime(tripStart?.ts)} / 経過 {tripElapsed != null ? fmtDuration(tripElapsed) : '-'}
-            </div>
+        <header className="home-unified-header">
+          <div className="home-unified-header__brand">TrackLog</div>
+          <div className={`home-recording-health home-recording-health--${routeRecordingUnhealthy ? 'error' : routeRecordingDegraded ? 'warning' : routeSummary.tone}`}>
+            <span aria-hidden="true" />
+            {routeRecordingUnhealthy ? '記録を確認' : routeRecordingDegraded ? '記録に注意' : '記録正常'}
           </div>
-          <div className="home-topbar__actions">
-            {isNative && (
-              <button
-                type="button"
-                className="pill-link"
-                aria-label="端末と位置記録の設定を開く"
-                title="端末と位置記録の設定"
-                onClick={() => setNativeSettingsOpen(true)}
-              >
-                ⚙
-              </button>
-            )}
-            <button type="button" className="pill-link" onClick={() => setFocusDriving(!focusDriving)}>
-              {focusDriving ? '通常表示' : '運転集中'}
-            </button>
-            <Link to="/admin" className="pill-link">管理</Link>
-            <Link to="/messages" className="pill-link">メッセージ</Link>
-            <Link to="/settings" className="pill-link">設定</Link>
-            <Link to={`/trip/${tripId}`} className="pill-link">詳細</Link>
+        </header>
+
+        <section className="home-trip-heading" aria-labelledby="trip-heading-title">
+          <div className="home-trip-heading__icon" aria-hidden="true">◉</div>
+          <div>
+            <h1 id="trip-heading-title">運行中</h1>
+            <span>開始 {fmtDateTime(tripStart?.ts)}</span>
           </div>
-        </div>
+          <strong>{tripElapsed != null ? formatElapsedHoursMinutes(tripStart.ts, now) : '-'}</strong>
+        </section>
 
         {operationError && (
           <OperationErrorNotice message={operationError} onDismiss={clearOperationError} />
         )}
 
-        {statusCard}
-
-        {!focusDriving && (
-          <div className="home-expressway-quick">
-            <BigButton
-              label={expresswayButtonLabel}
-              hint={expresswayPending ? '位置情報とIC名を記録しています' : undefined}
-              variant="neutral"
-              className={expresswayButtonClass}
-              disabled={operationsDisabled}
-              onClick={() => requestExpresswayToggle(expresswayAction)}
-            />
-          </div>
+        {routeRecordingUnhealthy && (
+          <section className="home-recording-stopped" role="alert" aria-labelledby="recording-stopped-title">
+            <div className="home-recording-stopped__icon" aria-hidden="true">!</div>
+            <div className="home-recording-stopped__copy">
+              <h2 id="recording-stopped-title">位置記録が停止しています</h2>
+              <p>{routeRecordingCause}</p>
+              {quickSetupMessage && <span>{quickSetupMessage}</span>}
+            </div>
+            <button
+              type="button"
+              onClick={() => isAndroidNative ? void runQuickSetup() : void refreshDiagnostics()}
+              disabled={quickSetupRunning || diagnosticsLoading}
+            >
+              {quickSetupRunning || diagnosticsLoading ? '確認中…' : '設定を確認して復旧'}
+            </button>
+          </section>
         )}
 
-        {focusDriving ? (
-          <fieldset
-            disabled={operationsDisabled}
-            aria-busy={operationInProgress}
-            style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}
-          >
-            <DrivingView
-              liveDrive={liveDrive}
-              onVoiceCommand={runVoiceCommand}
-              voiceAvailable={voiceAvailable}
-              voiceListening={voiceListening}
-              voiceLastText={voiceLastText}
-              voiceResult={voiceResult}
-              voiceError={voiceError}
-              expresswayActive={expresswayActive}
-              expresswayPending={expresswayPending}
-              onExpresswayToggle={action => requestExpresswayToggle(action)}
-            />
-          </fieldset>
-        ) : (
-          <div className="home-grid">
-            <div className="home-primary">
-              <div className="card" style={{ padding: 16 }}>
-                <div className="home-section-label">現在の作業状態</div>
-                <div style={{ display: 'grid', gap: 8, marginTop: 8 }}>
-                  {activeStatuses.map((status, idx) => {
-                    const elapsedMs = now - new Date(status.startTs).getTime();
-                    return (
-                      <div
-                        key={idx}
-                        style={{
-                          display: 'flex',
-                          justifyContent: 'space-between',
-                          alignItems: 'center',
-                          background: 'rgba(255,255,255,0.05)',
-                          padding: '10px 14px',
-                          borderRadius: 8,
-                        }}
-                      >
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                          <span
-                            style={{
-                              display: 'inline-block',
-                              width: 8,
-                              height: 8,
-                              borderRadius: '50%',
-                              background:
-                                status.type === 'base'
-                                  ? '#3b82f6'
-                                  : status.type === 'expressway'
-                                  ? '#f59e0b'
-                                  : '#10b981',
-                            }}
-                          />
-                          <span style={{ fontSize: 15, fontWeight: 'bold' }}>
-                            {status.type === 'base' ? `${status.name}中` : status.name}
-                          </span>
-                        </div>
-                        <div style={{ textAlign: 'right' }}>
-                          <div style={{ fontSize: 16, fontWeight: 900, fontFamily: 'monospace' }}>
-                            {fmtDuration(elapsedMs)}
-                          </div>
-                          <div style={{ fontSize: 10, opacity: 0.5 }}>
-                            開始 {fmtDateTime(status.startTs).split(' ')[1] /* 時刻部分のみ */}
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })}
-                  {activeStatuses.length === 0 && (
-                    <div style={{ fontSize: 13, color: 'rgba(255,255,255,0.5)', textAlign: 'center', padding: '8px 0' }}>
-                      稼働中の作業はありません
-                    </div>
-                  )}
+        <section className="home-current-status" aria-labelledby="current-status-title">
+          <h2 id="current-status-title" className="home-panel-title">現在の状態</h2>
+          <div className="home-active-status-list">
+            {activeStatuses.map(status => (
+              <div key={status.channel} className={`home-active-status home-active-status--${status.channel}`}>
+                <div className="home-active-status__icon" aria-hidden="true">
+                  {status.kind === 'rest' ? '▰' : status.channel === 'ferry' ? '⛴' : status.channel === 'expressway' ? '⌁' : '●'}
+                </div>
+                <div className="home-active-status__copy">
+                  <strong>{status.label}</strong>
+                  {status.annotation && <span>{status.annotation}</span>}
+                </div>
+                <div className="home-active-status__time">
+                  <strong>{formatElapsedHoursMinutes(status.startedAt, now)}</strong>
+                  <span>{formatStartedClock(status.startedAt)}{status.startedLabel}</span>
                 </div>
               </div>
+            ))}
+            {activeStatuses.length === 0 && <div className="home-empty-status">稼働中の作業はありません</div>}
+          </div>
 
-              <div className="card" style={{ padding: 16 }}>
-                <div className="home-section-label">法令チェック</div>
-                <div style={{ display: 'flex', justifyContent: 'space-around', padding: '10px 0' }}>
-                  <ProgressGauge
-                    value={liveDrive.driveSinceResetMinutes}
-                    max={240}
-                    label="連続運転"
-                    color={liveDrive.continuousDriveExceeded ? '#ef4444' : '#3b82f6'}
-                    size={100}
-                  />
-                  <ProgressGauge
-                    value={activeDayMetrics?.constraintMinutes ?? 0}
-                    max={activeDayMetrics?.effectiveConstraintLimitMinutes ?? 780}
-                    label="拘束時間"
-                    unit="分"
-                    color="#10b981"
-                    size={100}
-                  />
-                </div>
-              </div>
-
-              <div className="card" style={{ padding: 16 }}>
-                <div className="home-section-label">運行セグメント（休息・休憩間）</div>
-                <div className="home-status-list">
-                  {liveVm?.segments.slice(-3).reverse().map((seg, idx) => (
-                    <div key={idx} className="home-status-row">
-                      <span style={{ fontSize: 12 }}>{seg.fromLabel} → {seg.toLabel}</span>
-                      <strong>{seg.km} km</strong>
-                    </div>
-                  ))}
-                  {liveVm?.segments.length === 0 && (
-                    <div style={{ fontSize: 13, color: 'rgba(255,255,255,0.5)', textAlign: 'center' }}>
-                      記録されたセグメントはありません
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              <div className="card home-info-card">
-                <div className="home-section-label">現在地</div>
-                {geoStatus ? (
-                  <div className="home-info-card__address">{geoStatus.address || '住所取得中...'}</div>
-                ) : (
-                  <div className="home-info-card__meta">位置情報を取得しています...</div>
-                )}
-                <button className="trip-btn" disabled={operationsDisabled} onClick={captureGeoOnce}>更新</button>
+          {activeRestStatus && (
+            <div className="home-rest-guide" aria-label="休息開始からの目安">
+              <span className="home-rest-guide__label">休息開始からの目安</span>
+              <div className="home-rest-guide__times">
+                {restMilestones.map(item => (
+                  <span key={item.hours}><small>{item.hours}時間後</small><strong>{item.clock}</strong></span>
+                ))}
               </div>
             </div>
+          )}
 
-            <div className="home-action-stack">
-              <StoppedView
-                disabled={operationsDisabled}
-                loadActive={loadActive}
-                unloadActive={unloadActive}
-                breakActive={breakActive}
-                restActive={restActive}
-                ferryActive={ferryActive}
-                canStartLoad={canStartLoad}
-                canStartUnload={canStartUnload}
-                canStartBreak={canStartBreak}
-                canStartRest={canStartRest}
-                canStartFerry={canStartFerry}
-                onOdoDialog={kind => setOdoDialog({ kind })}
-                onToggle={handleToggleEvent}
-                onRestEnd={() => openRestSessionId && handleEndRest(openRestSessionId)}
-                onFerry={handleAddFerry}
-                onRefuel={() => setFuelOpen(true)}
-                onPointMark={() => handleAddPointMark('手動')}
-              />
+          <div className={`home-continuous-drive ${liveDrive.continuousDriveExceeded ? 'home-continuous-drive--warning' : ''}`}>
+            <div>
+              <span>連続運転</span>
+              <strong>{liveDrive.driveSinceResetMinutes}分</strong>
+            </div>
+            <div>
+              <span>{liveDrive.continuousDriveExceeded ? '4時間を超過' : '次の休憩まで'}</span>
+              <strong>
+                {liveDrive.continuousDriveExceeded
+                  ? `${liveDrive.driveSinceResetMinutes - 240}分超過`
+                  : `残り${liveDrive.remainingUntilLimitMinutes}分`}
+              </strong>
+            </div>
+            <small>4時間30分まで残り {liveDrive.remainingUntilEmergencyLimitMinutes}分</small>
+          </div>
+        </section>
+
+        <section className="home-expressway-section" aria-label="高速道路操作">
+          <BigButton
+            label={expresswayButtonLabel}
+            hint={expresswayPending ? '位置情報とIC名を記録しています' : effectiveExpresswayActive ? '押すと確認なしで終了します' : undefined}
+            variant="neutral"
+            className={expresswayButtonClass}
+            disabled={operationsDisabled || expresswayEndBusy}
+            onClick={() => requestExpresswayToggle(expresswayAction)}
+          />
+          {expresswayActionMessage && <div className="home-inline-success" role="status">{expresswayActionMessage}</div>}
+          {expresswayEndError && !expresswayEndConfirmation && <div className="home-inline-alert" role="alert">{expresswayEndError}</div>}
+        </section>
+
+        <StoppedView
+          disabled={operationsDisabled}
+          loadActive={loadActive}
+          unloadActive={unloadActive}
+          breakActive={breakActive}
+          restActive={restActive}
+          ferryActive={ferryActive}
+          canStartLoad={canStartLoad}
+          canStartUnload={canStartUnload}
+          canStartBreak={canStartBreak}
+          canStartRest={canStartRest}
+          canStartFerry={canStartFerry}
+          onOdoDialog={kind => setOdoDialog({ kind })}
+          onToggle={handleToggleEvent}
+          onRestEnd={() => openRestSessionId && handleEndRest(openRestSessionId)}
+          onFerry={handleAddFerry}
+          onRefuel={() => setFuelOpen(true)}
+          onPointMark={() => handleAddPointMark('手動')}
+          onVoiceCommand={runVoiceCommand}
+          voiceAvailable={voiceAvailable}
+          voiceListening={voiceListening}
+          voiceLastText={voiceLastText}
+          voiceResult={voiceResult}
+          voiceError={voiceError}
+        />
+
+        <details id="home-more" className="home-detail-drawer">
+          <summary>詳細・設定</summary>
+          <div className="home-detail-drawer__links">
+            <Link to={`/trip/${tripId}`}>運行詳細</Link>
+            <Link to="/report">運行日報</Link>
+            {canOpenAdmin && <Link to="/admin">管理画面</Link>}
+            <Link to="/settings">同期・端末設定</Link>
+            {isNative && <button type="button" onClick={() => setNativeSettingsOpen(true)}>位置記録の設定</button>}
+          </div>
+          {statusCard}
+          <div className="home-detail-grid">
+            <div className="card home-info-card">
+              <div className="home-section-label">法令チェック</div>
+              <div className="home-gauge-row">
+                <ProgressGauge value={liveDrive.driveSinceResetMinutes} max={240} label="連続運転" color={liveDrive.continuousDriveExceeded ? '#ef4444' : '#3b82f6'} size={100} />
+                <ProgressGauge value={activeDayMetrics?.constraintMinutes ?? 0} max={activeDayMetrics?.effectiveConstraintLimitMinutes ?? 780} label="拘束時間" unit="分" color="#10b981" size={100} />
+              </div>
+            </div>
+            <div className="card home-info-card">
+              <div className="home-section-label">現在地</div>
+              <div className="home-info-card__address">{geoStatus?.address || '位置情報を取得しています...'}</div>
+              <button className="trip-btn" disabled={operationsDisabled} onClick={captureGeoOnce}>現在地を更新</button>
             </div>
           </div>
-        )}
+          {liveVm?.segments.length ? (
+            <div className="card home-info-card">
+              <div className="home-section-label">最近の運行セグメント</div>
+              {liveVm.segments.slice(-3).reverse().map((seg, idx) => (
+                <div key={idx} className="home-status-row"><span>{seg.fromLabel} → {seg.toLabel}</span><strong>{seg.km} km</strong></div>
+              ))}
+            </div>
+          ) : null}
+        </details>
+
+        <HomeBottomNav />
 
         {nativeSettingsOpen && (
           <div className="auto-expressway-overlay" onClick={() => setNativeSettingsOpen(false)}>

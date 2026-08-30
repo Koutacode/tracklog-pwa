@@ -1,11 +1,11 @@
+import { Capacitor } from '@capacitor/core';
 import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { RemoteDeviceProfile } from '../../domain/remoteTypes';
 import { deleteAdminDevice, listAdminDevices, sendAdminMessage, setAdminDeviceApproval } from '../../services/remoteAdmin';
-import { getAdminSession, signOutAdmin } from '../../services/remoteAuth';
+import { signOutAdmin } from '../../services/remoteAuth';
 import { shareLatestAndroidApk } from '../../services/appDistribution';
 import AdminMap from '../components/AdminMap';
-import AdminAccessDenied from '../components/AdminAccessDenied';
 import {
   filterAdminDevices,
   getAdminDeviceApprovalStatus as getApprovalStatus,
@@ -194,9 +194,8 @@ function AdminDeviceCard({
 }
 
 export default function AdminDashboard() {
+  const usesDriverAccount = Capacitor.isNativePlatform() && Capacitor.getPlatform() === 'android';
   const [ready, setReady] = useState(false);
-  const [authenticated, setAuthenticated] = useState(false);
-  const [isAdmin, setIsAdmin] = useState(false);
   const [devices, setDevices] = useState<RemoteDeviceProfile[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -216,14 +215,6 @@ export default function AdminDashboard() {
     let active = true;
     void (async () => {
       try {
-        const session = await getAdminSession();
-        if (!active) return;
-        setAuthenticated(session.authenticated);
-        setIsAdmin(session.isAdmin);
-        if (!session.authenticated || !session.isAdmin) {
-          setReady(true);
-          return;
-        }
         const nextDevices = await listAdminDevices();
         if (!active) return;
         setDevices(nextDevices);
@@ -240,7 +231,6 @@ export default function AdminDashboard() {
   }, []);
 
   useEffect(() => {
-    if (!authenticated || !isAdmin) return;
     let active = true;
 
     const refresh = async () => {
@@ -267,7 +257,7 @@ export default function AdminDashboard() {
       window.clearInterval(timer);
       document.removeEventListener('visibilitychange', onVisible);
     };
-  }, [authenticated, isAdmin]);
+  }, []);
 
   const statusSnapshotAt = useMemo(() => Date.now(), [devices]);
 
@@ -473,10 +463,6 @@ export default function AdminDashboard() {
   if (!ready) {
     return <div className="screen-shell"><div className="screen-card">読み込み中…</div></div>;
   }
-  if (!authenticated || !isAdmin) {
-    return <AdminAccessDenied authenticated={authenticated} error={error} />;
-  }
-
   return (
     <div className="screen-shell">
       <div className="screen-card">
@@ -503,18 +489,20 @@ export default function AdminDashboard() {
               {apkSharing ? '最新版を確認中…' : 'Android APKを共有'}
             </button>
             <Link to="/" className="pill-link">
-              ホーム
+              {usesDriverAccount ? '運転者画面へ戻る' : 'ホーム'}
             </Link>
-            <button
-              className="pill-link"
-              type="button"
-              onClick={async () => {
-                await signOutAdmin();
-                window.location.href = '/login';
-              }}
-            >
-              ログアウト
-            </button>
+            {!usesDriverAccount && (
+              <button
+                className="pill-link"
+                type="button"
+                onClick={async () => {
+                  await signOutAdmin();
+                  window.location.href = '/login';
+                }}
+              >
+                ログアウト
+              </button>
+            )}
           </div>
         </div>
         <div className="settings-note">端末一覧は15秒ごとに自動更新します。最終再取得: {fmtDateTime(lastLoadedAt)}</div>

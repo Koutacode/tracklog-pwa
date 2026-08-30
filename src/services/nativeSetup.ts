@@ -12,39 +12,78 @@ type NativeSetupPlugin = {
     background?: boolean;
     backgroundRelevant?: boolean;
   }>;
-  openAppSettings(): Promise<{ opened: boolean }>;
-  openLocationSettings(): Promise<{ opened: boolean }>;
+  requestBackgroundLocationPermission(): Promise<{ requested: boolean; granted: boolean }>;
+  getSetupSnapshot(options?: { fresh?: boolean }): Promise<NativeSetupSnapshot>;
+  openAppSettings(): Promise<NativeSettingsOpenResult>;
+  openLocationSettings(): Promise<NativeSettingsOpenResult>;
+  openNotificationSettings(): Promise<NativeSettingsOpenResult>;
+  openResidentNotificationSettings(): Promise<NativeSettingsOpenResult>;
   requestBatteryOptimizationExemption(): Promise<{
     supported: boolean;
     granted: boolean;
     opened: boolean;
     fallback?: boolean;
-  }>;
-  getPlatformInfo(): Promise<{
-    androidSdkInt?: number;
-    exactAlarmRelevant?: boolean;
+    destination?: string;
+    fallbackLevel?: number;
   }>;
 };
 
 const NativeSetup = registerPlugin<NativeSetupPlugin>('NativeSetup');
 
 export type SimplePermissionState = 'granted' | 'denied' | 'unknown';
+export type NativeNotificationPermissionState =
+  | SimplePermissionState
+  | 'prompt'
+  | 'prompt-with-rationale';
 
 export type NativeSetupStep = {
-  id: string;
+  id: NativeSetupStepId | 'native-only';
   label: string;
   level: 'ok' | 'warn' | 'error';
   detail: string;
+  instruction?: string;
 };
 
-export type NativePlatformInfo = {
+export type NativeSetupStepId =
+  | 'location-enabled'
+  | 'location-precise'
+  | 'location-background'
+  | 'notification'
+  | 'battery-opt'
+  | 'resident-service';
+
+export type NativeSettingsOpenResult = {
+  opened: boolean;
+  destination: string;
+  fallbackLevel: number;
+};
+
+export type NativeSetupSnapshot = {
   androidSdkInt: number | null;
-  exactAlarmRelevant: boolean | null;
+  locationEnabled: boolean;
+  fine: boolean;
+  coarse: boolean;
+  foreground: boolean;
+  background: boolean;
+  backgroundRelevant: boolean;
+  backgroundPermissionOptionLabel: string;
+  notifications: boolean;
+  residentNotificationChannelExists: boolean;
+  residentNotificationChannelEnabled: boolean;
+  batteryOptimization: boolean;
+  residentRunning: boolean;
+  approved: boolean;
+  setupComplete: boolean;
+  authorizationConfigured: boolean;
 };
 
 export type NativeSetupReadiness = {
   ready: boolean;
+  permissionsReady: boolean;
   steps: NativeSetupStep[];
+  activeStep: NativeSetupStep | null;
+  remaining: number;
+  snapshot: NativeSetupSnapshot | null;
 };
 
 export type NativeLocationPermissionDetail = {
@@ -58,7 +97,6 @@ export type NativeLocationPermissionDetail = {
 const LOCATION_STATUS_CACHE_MS = 60000;
 let locationStatusCache: { value: SimplePermissionState; at: number } | null = null;
 let locationDetailCache: { value: NativeLocationPermissionDetail; at: number } | null = null;
-let nativePlatformInfoCache: { value: NativePlatformInfo; at: number } | null = null;
 
 function isNative() {
   return Capacitor.isNativePlatform();
@@ -74,13 +112,23 @@ function toSimpleState(input: unknown): SimplePermissionState {
   return 'unknown';
 }
 
-function toNotificationPermissionState(input: unknown): SimplePermissionState {
+function toNotificationPermissionState(input: unknown): NativeNotificationPermissionState {
   if (!input || typeof input !== 'object') return 'unknown';
   const value =
     (input as { display?: unknown; receive?: unknown; status?: unknown }).display ??
     (input as { receive?: unknown }).receive ??
     (input as { status?: unknown }).status;
+  if (value === 'prompt' || value === 'prompt-with-rationale') return value;
   return toSimpleState(value);
+}
+
+async function checkNativeNotificationPermissionState(): Promise<NativeNotificationPermissionState> {
+  try {
+    const current = await LocalNotifications.checkPermissions();
+    return toNotificationPermissionState(current);
+  } catch {
+    return 'unknown';
+  }
 }
 
 function toLocationPermissionDetail(input: Awaited<ReturnType<NativeSetupPlugin['checkLocationPermissions']>>): NativeLocationPermissionDetail {
@@ -294,14 +342,9 @@ export async function checkNotificationPermissionStatus(): Promise<SimplePermiss
     if (typeof Notification === 'undefined') return 'unknown';
     return toSimpleState(Notification.permission);
   }
-  let state: SimplePermissionState = 'unknown';
-  try {
-    const current = await LocalNotifications.checkPermissions();
-    state = toNotificationPermissionState(current);
-  } catch {
-    state = 'unknown';
-  }
-  if (state !== 'unknown') return state;
+  const state = await checkNativeNotificationPermissionState();
+  if (state === 'granted' || state === 'denied') return state;
+  if (state === 'prompt' || state === 'prompt-with-rationale') return 'unknown';
   try {
     const enabled = await LocalNotifications.areEnabled();
     if (typeof enabled?.value === 'boolean') {
@@ -329,62 +372,19 @@ export async function requestNotificationPermission(): Promise<SimplePermissionS
       return checkNotificationPermissionStatus();
     }
   }
-  const currentState = await checkNotificationPermissionStatus();
-  if (currentState === 'granted' || currentState === 'denied') {
-    return currentState;
-  }
+  const currentState = await checkNativeNotificationPermissionState();
+  if (currentState === 'granted') return 'granted';
+  // The explicit setup button must always reach requestPermissions for every
+  // non-granted native state. In particular, Android 13's initial `prompt`
+  // must not be collapsed through areEnabled() into a synthetic denial.
   try {
     const requested = await LocalNotifications.requestPermissions();
     const requestedState = toNotificationPermissionState(requested);
-    if (requestedState !== 'unknown') return requestedState;
+    if (requestedState === 'granted' || requestedState === 'denied') return requestedState;
   } catch {
     // ignore and retry below
   }
   return checkNotificationPermissionStatus();
-}
-
-export async function checkExactAlarmStatus(): Promise<SimplePermissionState> {
-  if (!isNative()) return 'unknown';
-  try {
-    const status = await LocalNotifications.checkExactNotificationSetting();
-    if (status.exact_alarm === 'granted') return 'granted';
-    if (status.exact_alarm === 'denied') return 'denied';
-    return 'unknown';
-  } catch {
-    return 'unknown';
-  }
-}
-
-export async function getNativePlatformInfo(): Promise<NativePlatformInfo> {
-  if (!isNative()) return { androidSdkInt: null, exactAlarmRelevant: null };
-  const now = Date.now();
-  if (nativePlatformInfoCache && now - nativePlatformInfoCache.at < 5 * 60 * 1000) {
-    return nativePlatformInfoCache.value;
-  }
-  try {
-    const info = await NativeSetup.getPlatformInfo();
-    const parsed: NativePlatformInfo = {
-      androidSdkInt: Number.isFinite(Number(info.androidSdkInt)) ? Number(info.androidSdkInt) : null,
-      exactAlarmRelevant:
-        typeof info.exactAlarmRelevant === 'boolean' ? info.exactAlarmRelevant : null,
-    };
-    nativePlatformInfoCache = { value: parsed, at: now };
-    return parsed;
-  } catch {
-    const fallback = { androidSdkInt: null, exactAlarmRelevant: null };
-    nativePlatformInfoCache = { value: fallback, at: now };
-    return fallback;
-  }
-}
-
-export async function openExactAlarmSettings(): Promise<boolean> {
-  if (!isNative()) return false;
-  try {
-    await LocalNotifications.changeExactNotificationSetting();
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 export async function openAppPermissionSettings(): Promise<boolean> {
@@ -398,6 +398,32 @@ export async function openAppPermissionSettings(): Promise<boolean> {
   }
 }
 
+function normalizeSettingsOpenResult(
+  input: Partial<NativeSettingsOpenResult> | null | undefined,
+  destination: string,
+): NativeSettingsOpenResult {
+  return {
+    opened: input?.opened === true,
+    destination: typeof input?.destination === 'string' && input.destination
+      ? input.destination
+      : destination,
+    fallbackLevel: Number.isFinite(Number(input?.fallbackLevel))
+      ? Math.max(0, Math.trunc(Number(input?.fallbackLevel)))
+      : 0,
+  };
+}
+
+async function openAppPermissionSettingsResult(): Promise<NativeSettingsOpenResult> {
+  if (!isNative()) return { opened: false, destination: 'unsupported', fallbackLevel: 0 };
+  try {
+    const result = normalizeSettingsOpenResult(await NativeSetup.openAppSettings(), 'app-details');
+    clearLocationPermissionCache();
+    return result;
+  } catch {
+    return { opened: false, destination: 'app-details', fallbackLevel: 0 };
+  }
+}
+
 export async function openSystemLocationSettings(): Promise<boolean> {
   if (!isNative()) return false;
   try {
@@ -405,6 +431,24 @@ export async function openSystemLocationSettings(): Promise<boolean> {
     return !!result.opened;
   } catch {
     return false;
+  }
+}
+
+async function openSystemLocationSettingsResult(): Promise<NativeSettingsOpenResult> {
+  if (!isNative()) return { opened: false, destination: 'unsupported', fallbackLevel: 0 };
+  try {
+    return normalizeSettingsOpenResult(await NativeSetup.openLocationSettings(), 'location-services');
+  } catch {
+    return { opened: false, destination: 'location-services', fallbackLevel: 0 };
+  }
+}
+
+export async function openNotificationSettings(): Promise<NativeSettingsOpenResult> {
+  if (!isNative()) return { opened: false, destination: 'unsupported', fallbackLevel: 0 };
+  try {
+    return normalizeSettingsOpenResult(await NativeSetup.openNotificationSettings(), 'app-notifications');
+  } catch {
+    return { opened: false, destination: 'app-notifications', fallbackLevel: 0 };
   }
 }
 
@@ -419,22 +463,157 @@ export async function checkBatteryOptimizationStatus(): Promise<SimplePermission
   }
 }
 
-function permissionLevel(state: SimplePermissionState): NativeSetupStep['level'] {
-  if (state === 'granted') return 'ok';
-  if (state === 'denied') return 'error';
-  return 'warn';
+const EMPTY_NATIVE_SETUP_SNAPSHOT: NativeSetupSnapshot = {
+  androidSdkInt: null,
+  locationEnabled: false,
+  fine: false,
+  coarse: false,
+  foreground: false,
+  background: false,
+  backgroundRelevant: true,
+  backgroundPermissionOptionLabel: '常に許可',
+  notifications: false,
+  residentNotificationChannelExists: false,
+  residentNotificationChannelEnabled: false,
+  batteryOptimization: false,
+  residentRunning: false,
+  approved: false,
+  setupComplete: false,
+  authorizationConfigured: false,
+};
+
+function normalizeSetupSnapshot(input: Partial<NativeSetupSnapshot>): NativeSetupSnapshot {
+  return {
+    androidSdkInt: Number.isFinite(Number(input.androidSdkInt)) ? Number(input.androidSdkInt) : null,
+    locationEnabled: input.locationEnabled === true,
+    fine: input.fine === true,
+    coarse: input.coarse === true,
+    foreground: input.foreground === true || input.fine === true || input.coarse === true,
+    background: input.background === true,
+    backgroundRelevant: input.backgroundRelevant !== false,
+    backgroundPermissionOptionLabel: typeof input.backgroundPermissionOptionLabel === 'string'
+      && input.backgroundPermissionOptionLabel.trim()
+      ? input.backgroundPermissionOptionLabel.trim()
+      : '常に許可',
+    notifications: input.notifications === true,
+    residentNotificationChannelExists: input.residentNotificationChannelExists === true,
+    residentNotificationChannelEnabled: input.residentNotificationChannelEnabled === true,
+    batteryOptimization: input.batteryOptimization === true,
+    residentRunning: input.residentRunning === true,
+    approved: input.approved === true,
+    setupComplete: input.setupComplete === true,
+    authorizationConfigured: input.authorizationConfigured === true,
+  };
 }
 
-function permissionDetail(state: SimplePermissionState, ok: string, denied: string, unknown: string) {
-  if (state === 'granted') return ok;
-  if (state === 'denied') return denied;
-  return unknown;
+export function buildNativeSetupReadiness(snapshot: NativeSetupSnapshot): NativeSetupReadiness {
+  const backgroundReady = !snapshot.backgroundRelevant || snapshot.background;
+  const notificationChannelsSupported = snapshot.androidSdkInt !== null
+    && snapshot.androidSdkInt >= 26;
+  const residentNotificationChannelDisabled = notificationChannelsSupported
+    && snapshot.residentNotificationChannelExists
+    && !snapshot.residentNotificationChannelEnabled;
+  // A missing channel is intentionally allowed through the physical settings
+  // phase. Starting the resident service creates it, then the final fresh
+  // snapshot must observe the enabled channel before setup is complete.
+  const notificationReady = snapshot.notifications && !residentNotificationChannelDisabled;
+  const residentForegroundNotificationReady = !notificationChannelsSupported
+    || snapshot.residentNotificationChannelEnabled;
+  const residentServiceReady = snapshot.residentRunning
+    && snapshot.approved
+    && snapshot.setupComplete
+    && snapshot.authorizationConfigured
+    && snapshot.notifications
+    && residentForegroundNotificationReady;
+  const steps: NativeSetupStep[] = [
+    {
+      id: 'location-enabled',
+      label: '端末の位置情報',
+      level: snapshot.locationEnabled ? 'ok' : 'error',
+      detail: snapshot.locationEnabled ? 'オンです。' : '端末の位置情報がオフです。',
+      instruction: '開いた画面で「位置情報を使用」をオンにしてTrackLogへ戻ってください。',
+    },
+    {
+      id: 'location-precise',
+      label: '正確な位置情報',
+      level: snapshot.fine ? 'ok' : 'error',
+      detail: snapshot.fine
+        ? '正確な位置情報を許可済みです。'
+        : snapshot.coarse
+          ? '概算の位置情報のみです。'
+          : '位置情報が許可されていません。',
+      instruction: '権限画面で「正確な位置情報を使用」をオンにし、位置情報を許可してください。',
+    },
+    {
+      id: 'location-background',
+      label: '常時位置情報',
+      level: backgroundReady ? 'ok' : 'error',
+      detail: backgroundReady
+        ? snapshot.backgroundRelevant ? '「常に許可」済みです。' : 'このAndroidでは追加設定は不要です。'
+        : 'アプリ使用中のみ許可されています。',
+      instruction: snapshot.androidSdkInt !== null && snapshot.androidSdkInt >= 30
+        ? `「権限」→「位置情報」を開き、「${snapshot.backgroundPermissionOptionLabel}」を選んでください。`
+        : '位置情報で「常に許可」を選んでください。',
+    },
+    {
+      id: 'notification',
+      label: '通知',
+      level: notificationReady ? 'ok' : 'error',
+      detail: !snapshot.notifications
+        ? '通知が無効です。'
+        : residentNotificationChannelDisabled
+          ? '「位置記録中」の常駐通知が無効です。'
+          : '通知を許可済みです。',
+      instruction: residentNotificationChannelDisabled
+        ? '通知設定で「位置記録中」をオンにしてください。'
+        : '通知を許可してください。高速終了確認と記録中の常駐通知に必要です。',
+    },
+    {
+      id: 'battery-opt',
+      label: '電池最適化',
+      level: snapshot.batteryOptimization ? 'ok' : 'error',
+      detail: snapshot.batteryOptimization ? '「最適化しない」設定済みです。' : '電池最適化の対象です。',
+      instruction: '表示された確認で「許可」または「最適化しない」を選んでください。',
+    },
+    {
+      id: 'resident-service',
+      label: '位置記録サービス',
+      level: residentServiceReady ? 'ok' : 'warn',
+      detail: residentServiceReady
+        ? 'バックグラウンド記録は正常に動作中です。'
+        : '端末設定完了後に起動テストを行います。',
+      instruction: 'この画面のまま少し待ってください。起動できない場合は「動作確認をやり直す」を押します。',
+    },
+  ];
+  const permissionsReady = steps.slice(0, 5).every(step => step.level === 'ok');
+  const activeStep = steps.find(step => step.level !== 'ok') ?? null;
+  return {
+    ready: permissionsReady && steps[5]?.level === 'ok',
+    permissionsReady,
+    steps,
+    activeStep,
+    remaining: steps.filter(step => step.level !== 'ok').length,
+    snapshot,
+  };
 }
 
-export async function checkNativeSetupReadiness(): Promise<NativeSetupReadiness> {
+export async function getNativeSetupSnapshot(options: { fresh?: boolean } = {}): Promise<NativeSetupSnapshot | null> {
+  if (!isNative()) return null;
+  if (options.fresh) clearLocationPermissionCache();
+  try {
+    return normalizeSetupSnapshot(await NativeSetup.getSetupSnapshot({ fresh: options.fresh === true }));
+  } catch {
+    return null;
+  }
+}
+
+export async function checkNativeSetupReadiness(
+  options: { fresh?: boolean } = {},
+): Promise<NativeSetupReadiness> {
   if (!isNative()) {
     return {
       ready: true,
+      permissionsReady: true,
       steps: [
         {
           id: 'native-only',
@@ -443,206 +622,181 @@ export async function checkNativeSetupReadiness(): Promise<NativeSetupReadiness>
           detail: 'PWA/ブラウザではAndroid権限チェック対象外です。',
         },
       ],
+      activeStep: null,
+      remaining: 0,
+      snapshot: null,
     };
   }
+  const snapshot = await getNativeSetupSnapshot(options);
+  return buildNativeSetupReadiness(snapshot ?? EMPTY_NATIVE_SETUP_SNAPSHOT);
+}
 
-  const [locationDetail, notification, battery, exact, platformInfo] = await Promise.all([
-    checkNativeLocationPermissionDetail(),
-    checkNotificationPermissionStatus(),
-    checkBatteryOptimizationStatus(),
-    checkExactAlarmStatus(),
-    getNativePlatformInfo(),
-  ]);
+export function shouldRequestBackgroundLocationDirectly(snapshot: NativeSetupSnapshot | null): boolean {
+  return snapshot?.androidSdkInt === 29
+    && snapshot.fine
+    && snapshot.backgroundRelevant
+    && !snapshot.background;
+}
 
-  const foreground = locationDetail.foreground;
-  const background = locationDetail.backgroundRelevant ? locationDetail.background : 'granted';
-  const exactRelevant = platformInfo.exactAlarmRelevant !== false;
-  const exactState = exactRelevant ? exact : 'granted';
+export function classifyNativeSetupStepReturn(
+  previousStepId: NativeSetupStepId,
+  currentStepId: NativeSetupStepId | null,
+): 'unchanged' | 'advanced' | 'complete' {
+  if (currentStepId === previousStepId) return 'unchanged';
+  if (currentStepId == null) return 'complete';
+  return 'advanced';
+}
 
-  const steps: NativeSetupStep[] = [
-    {
-      id: 'location-foreground',
-      label: '位置情報',
-      level: permissionLevel(foreground),
-      detail: permissionDetail(
-        foreground,
-        '許可済み',
-        '拒否されています。端末設定で位置情報を許可してください。',
-        '状態を確認できません。端末設定で位置情報を確認してください。',
-      ),
-    },
-    {
-      id: 'location-background',
-      label: '常時位置情報',
-      level: permissionLevel(background),
-      detail: permissionDetail(
-        background,
-        locationDetail.backgroundRelevant ? '常に許可済み' : 'この端末では常時許可チェック対象外です。',
-        '前景のみ許可されています。端末設定で「常に許可」に変更してください。',
-        '状態を確認できません。端末設定で「常に許可」になっているか確認してください。',
-      ),
-    },
-    {
-      id: 'notification',
-      label: '通知',
-      level: permissionLevel(notification),
-      detail: permissionDetail(
-        notification,
-        '許可済み',
-        '拒否されています。通知を許可してください。',
-        '状態を確認できません。通知設定を確認してください。',
-      ),
-    },
-    {
-      id: 'battery-opt',
-      label: '電池最適化',
-      level: permissionLevel(battery),
-      detail: permissionDetail(
-        battery,
-        '最適化除外済み',
-        '最適化対象です。バックグラウンド記録のため除外してください。',
-        '状態を確認できません。電池最適化設定を確認してください。',
-      ),
-    },
-    {
-      id: 'exact-alarm',
-      label: 'Exact Alarm',
-      level: permissionLevel(exactState),
-      detail: permissionDetail(
-        exactState,
-        exactRelevant ? '有効' : 'このAndroidバージョンでは対象外です。',
-        '無効です。正確な通知の許可を有効にしてください。',
-        '状態を確認できません。正確な通知の許可を確認してください。',
-      ),
-    },
-  ];
+export function selectNativeNotificationSetupAction(input: {
+  permission: NativeNotificationPermissionState;
+  notificationsEnabled: boolean;
+  requestAttempted: boolean;
+}): 'complete' | 'request-permission' | 'open-settings' {
+  if (input.notificationsEnabled) return 'complete';
+  if (input.permission === 'granted') return 'open-settings';
+  if (!input.requestAttempted) return 'request-permission';
+  return 'open-settings';
+}
 
-  return {
-    ready: steps.every(step => step.level === 'ok'),
-    steps,
-  };
+export async function completeNativeNotificationSetup(input: {
+  readState(): Promise<{
+    permission: NativeNotificationPermissionState;
+    notificationsEnabled: boolean;
+  }>;
+  requestPermission(): Promise<unknown>;
+  openSettings(): Promise<NativeSettingsOpenResult>;
+}): Promise<NativeSettingsOpenResult> {
+  const before = await input.readState();
+  const initialAction = selectNativeNotificationSetupAction({
+    ...before,
+    requestAttempted: false,
+  });
+  if (initialAction === 'complete') {
+    return { opened: false, destination: 'already-granted', fallbackLevel: 0 };
+  }
+  if (initialAction === 'open-settings') return input.openSettings();
+
+  await input.requestPermission();
+  const after = await input.readState();
+  const nextAction = selectNativeNotificationSetupAction({
+    ...after,
+    requestAttempted: true,
+  });
+  if (nextAction === 'complete') {
+    return { opened: false, destination: 'permission-dialog', fallbackLevel: 0 };
+  }
+  return input.openSettings();
 }
 
 export async function requestBatteryOptimizationExemption(): Promise<{
   state: SimplePermissionState;
   opened: boolean;
   fallback?: boolean;
+  destination?: string;
+  fallbackLevel?: number;
 }> {
   if (!isNative()) return { state: 'unknown', opened: false };
   try {
     const result = await NativeSetup.requestBatteryOptimizationExemption();
     const state = !result.supported || result.granted ? 'granted' : 'denied';
-    return { state, opened: !!result.opened, fallback: result.fallback };
+    return {
+      state,
+      opened: !!result.opened,
+      fallback: result.fallback,
+      destination: result.destination,
+      fallbackLevel: result.fallbackLevel,
+    };
   } catch {
     return { state: 'unknown', opened: false };
   }
 }
 
+export async function runNativeSetupStep(stepId: NativeSetupStepId): Promise<NativeSettingsOpenResult> {
+  const notOpened = (destination: string): NativeSettingsOpenResult => ({
+    opened: false,
+    destination,
+    fallbackLevel: 0,
+  });
+  if (!isNative()) return notOpened('unsupported');
+
+  if (stepId === 'location-enabled') return openSystemLocationSettingsResult();
+  if (stepId === 'location-precise') {
+    await requestLocationPermission();
+    const snapshot = await getNativeSetupSnapshot({ fresh: true });
+    if (snapshot?.fine) return notOpened('permission-dialog');
+    return openAppPermissionSettingsResult();
+  }
+  if (stepId === 'location-background') {
+    const snapshot = await getNativeSetupSnapshot({ fresh: true });
+    if (shouldRequestBackgroundLocationDirectly(snapshot)) {
+      const result = await NativeSetup.requestBackgroundLocationPermission();
+      const refreshed = await getNativeSetupSnapshot({ fresh: true });
+      if (result.granted || refreshed?.background) return notOpened('permission-dialog');
+    }
+    return openAppPermissionSettingsResult();
+  }
+  if (stepId === 'notification') {
+    const initialSnapshot = await getNativeSetupSnapshot({ fresh: true });
+    const residentChannelDisabled = initialSnapshot?.androidSdkInt !== null
+      && (initialSnapshot?.androidSdkInt ?? 0) >= 26
+      && initialSnapshot?.residentNotificationChannelExists === true
+      && initialSnapshot.residentNotificationChannelEnabled === false;
+    if (initialSnapshot?.notifications && residentChannelDisabled) {
+      try {
+        return normalizeSettingsOpenResult(
+          await NativeSetup.openResidentNotificationSettings(),
+          'resident-notification-channel',
+        );
+      } catch {
+        return openNotificationSettings();
+      }
+    }
+    return completeNativeNotificationSetup({
+      readState: async () => {
+        const [snapshot, permission] = await Promise.all([
+          getNativeSetupSnapshot({ fresh: true }),
+          checkNativeNotificationPermissionState(),
+        ]);
+        return {
+          permission,
+          notificationsEnabled: snapshot?.notifications === true,
+        };
+      },
+      requestPermission: requestNotificationPermission,
+      openSettings: openNotificationSettings,
+    });
+  }
+  if (stepId === 'battery-opt') {
+    const result = await requestBatteryOptimizationExemption();
+    return {
+      opened: result.opened,
+      destination: result.destination ?? 'battery-exemption-request',
+      fallbackLevel: result.fallbackLevel ?? (result.fallback ? 1 : 0),
+    };
+  }
+
+  requestRouteTrackingSync();
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    await wait(attempt === 0 ? 150 : 350);
+    const readiness = await checkNativeSetupReadiness({ fresh: true });
+    if (readiness.ready) return notOpened('resident-service-running');
+  }
+  return notOpened('resident-service-pending');
+}
+
+/** @deprecated Runs only the current missing item. Kept for older settings-screen callers. */
 export async function runNativeQuickSetup(): Promise<{
   steps: NativeSetupStep[];
   requiresManualFollowUp: boolean;
 }> {
-  const steps: NativeSetupStep[] = [];
   if (!isNative()) {
-    steps.push({
-      id: 'native-only',
-      label: '一括セットアップ',
-      level: 'warn',
-      detail: 'ネイティブ版のみ利用できます。',
-    });
-    return { steps, requiresManualFollowUp: true };
+    const readiness = await checkNativeSetupReadiness();
+    return { steps: readiness.steps, requiresManualFollowUp: false };
   }
-
-  const geo = await requestLocationPermission();
-  const locationDetail = await checkNativeLocationPermissionDetail();
-  const backgroundDenied =
-    locationDetail.backgroundRelevant && locationDetail.foreground === 'granted' && locationDetail.background !== 'granted';
-  if (backgroundDenied) {
-    await openAppPermissionSettings();
+  const before = await checkNativeSetupReadiness({ fresh: true });
+  if (before.activeStep && before.activeStep.id !== 'native-only') {
+    await runNativeSetupStep(before.activeStep.id);
   }
-  steps.push({
-    id: 'geo',
-    label: '位置情報権限',
-    level: geo === 'granted' && !backgroundDenied ? 'ok' : geo === 'denied' || backgroundDenied ? 'error' : 'warn',
-    detail:
-      geo === 'granted' && !backgroundDenied
-        ? '常時許可済み'
-        : backgroundDenied
-          ? '前景のみ許可されています。開いたアプリ設定で位置情報を「常に許可」に変更してください。'
-        : geo === 'denied'
-          ? '拒否されています。端末設定で「常に許可」に変更してください。'
-          : '状態を確定できません。端末設定で確認してください。',
-  });
-
-  const notif = await requestNotificationPermission();
-  steps.push({
-    id: 'notif',
-    label: '通知権限',
-    level: notif === 'granted' ? 'ok' : notif === 'denied' ? 'error' : 'warn',
-    detail:
-      notif === 'granted'
-        ? '許可済み'
-        : notif === 'denied'
-          ? '拒否されています。通知設定を許可してください。'
-          : '状態を確定できません。通知設定を確認してください。',
-  });
-
-  const batteryBefore = await checkBatteryOptimizationStatus();
-  if (batteryBefore === 'granted') {
-    steps.push({
-      id: 'battery-opt',
-      label: '電池最適化',
-      level: 'ok',
-      detail: '最適化除外済み',
-    });
-  } else {
-    const batteryRequest = await requestBatteryOptimizationExemption();
-    const batteryAfter = await checkBatteryOptimizationStatus();
-    const openedText = batteryRequest.opened ? '設定画面を開きました。' : '';
-    steps.push({
-      id: 'battery-opt',
-      label: '電池最適化',
-      level: batteryAfter === 'granted' ? 'ok' : 'warn',
-      detail:
-        batteryAfter === 'granted'
-          ? '最適化除外済み'
-          : `${openedText}端末側で「最適化しない」を選択してください。`,
-    });
-  }
-
-  const platformInfo = await getNativePlatformInfo();
-  const exactRelevant = platformInfo.exactAlarmRelevant !== false;
-  if (!exactRelevant) {
-    steps.push({
-      id: 'exact-alarm',
-      label: 'Exact Alarm',
-      level: 'ok',
-      detail: '対象外（Android 12未満）',
-    });
-  } else {
-    const exactBefore = await checkExactAlarmStatus();
-    if (exactBefore === 'granted') {
-      steps.push({
-        id: 'exact-alarm',
-        label: 'Exact Alarm',
-        level: 'ok',
-        detail: '有効',
-      });
-    } else {
-      const opened = await openExactAlarmSettings();
-      const exactAfter = await checkExactAlarmStatus();
-      steps.push({
-        id: 'exact-alarm',
-        label: 'Exact Alarm',
-        level: exactAfter === 'granted' ? 'ok' : 'warn',
-        detail:
-          exactAfter === 'granted'
-            ? '有効'
-            : `${opened ? '設定画面を開きました。' : ''}端末側で有効化してください。`,
-      });
-    }
-  }
-
-  const requiresManualFollowUp = steps.some(step => step.level !== 'ok');
-  return { steps, requiresManualFollowUp };
+  const after = await checkNativeSetupReadiness({ fresh: true });
+  return { steps: after.steps, requiresManualFollowUp: !after.ready };
 }

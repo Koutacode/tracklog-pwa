@@ -4,7 +4,6 @@ import {
   checkBatteryOptimizationStatus,
   checkLocationPermissionStatus,
   checkNativeLocationPermissionDetail,
-  getNativePlatformInfo,
 } from './nativeSetup';
 
 export type StartupDiagnosticLevel = 'ok' | 'warn' | 'error';
@@ -66,8 +65,6 @@ export async function runStartupDiagnostics(): Promise<StartupDiagnosticItem[]> 
   }
 
   if (Capacitor.isNativePlatform()) {
-    const platformInfo = await getNativePlatformInfo();
-    const exactAlarmRelevant = platformInfo.exactAlarmRelevant !== false;
     const nativeDiag = await getNativeNotificationDiagnostic();
     if (nativeDiag) {
       if (nativeDiag.notificationPermission === 'granted') {
@@ -89,35 +86,6 @@ export async function runStartupDiagnostics(): Promise<StartupDiagnosticItem[]> 
           id: 'notif',
           label: '通知権限',
           detail: '未確定です。許可すると終了確認が安定します。',
-          level: 'warn',
-        });
-      }
-      if (!exactAlarmRelevant) {
-        items.push({
-          id: 'exact-alarm',
-          label: 'Exact Alarm設定',
-          detail: '対象外（Android 12未満）',
-          level: 'ok',
-        });
-      } else if (nativeDiag.exactAlarm === 'granted') {
-        items.push({
-          id: 'exact-alarm',
-          label: 'Exact Alarm設定',
-          detail: '有効',
-          level: 'ok',
-        });
-      } else if (nativeDiag.exactAlarm === 'denied') {
-        items.push({
-          id: 'exact-alarm',
-          label: 'Exact Alarm設定',
-          detail: '無効です。端末設定で有効化すると通知の遅延を減らせます。',
-          level: 'warn',
-        });
-      } else {
-        items.push({
-          id: 'exact-alarm',
-          label: 'Exact Alarm設定',
-          detail: '要確認（Android 12+では有効化推奨）',
           level: 'warn',
         });
       }
@@ -174,7 +142,7 @@ export async function runStartupDiagnostics(): Promise<StartupDiagnosticItem[]> 
   items.push({
     id: 'network',
     label: '通信状態',
-    detail: navigator.onLine ? 'オンライン' : 'オフライン（IC判定/住所補完/マップ補正に制限あり）',
+    detail: navigator.onLine ? 'オンライン' : 'オフライン（IC名・住所・同期は通信復帰後に再試行します）',
     level: navigator.onLine ? 'ok' : 'warn',
   });
 

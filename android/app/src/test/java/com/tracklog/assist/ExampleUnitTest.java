@@ -44,11 +44,11 @@ public class ExampleUnitTest {
     }
 
     @Test
-    public void readiness_keepsBatteryAndExactAlarmAsDiagnosticsOnly() {
+    public void readiness_keepsBatteryOptimizationAsDiagnosticOnly() {
         ResidentLocationState.Readiness recommendedSettingsMissing =
-                new ResidentLocationState.Readiness(true, true, true, false, false, true);
+                new ResidentLocationState.Readiness(true, true, true, false, true);
         ResidentLocationState.Readiness requiredPermissionMissing =
-                new ResidentLocationState.Readiness(true, false, true, true, true, true);
+                new ResidentLocationState.Readiness(true, false, true, true, true);
 
         assertTrue(recommendedSettingsMissing.isReady());
         assertFalse(requiredPermissionMissing.isReady());

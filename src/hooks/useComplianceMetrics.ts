@@ -29,8 +29,9 @@ export function useComplianceMetrics(tripId: string | null, events: AppEvent[]) 
       tripId,
       events,
       dayRuns: liveVm.dayRuns,
+      currentTs: metricsNowIso,
     });
-  }, [tripId, events, liveVm]);
+  }, [tripId, events, liveVm, metricsNowIso]);
 
   const liveMetricsList = useMemo(
     () => (liveReportTrip ? computeTripDayMetrics(liveReportTrip, { currentTs: metricsNowIso }) : []),
