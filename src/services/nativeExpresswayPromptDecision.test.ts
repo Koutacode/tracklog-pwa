@@ -1,5 +1,6 @@
 import type {
   AutoExpresswayDecisionReason,
+  endExpressway,
   PendingExpresswayEndPrompt,
 } from '../db/repositories';
 import {
@@ -46,7 +47,13 @@ function dependencies(log: string[]) {
     },
     clearPendingPrompt: async () => { log.push('clear-prompt'); },
     clearPendingDecision: async () => { log.push('clear-decision'); },
-    endExpressway: async (input: { autoDecision?: AutoExpresswayDecisionReason }) => {
+    endExpressway: async (input: Parameters<typeof endExpressway>[0]) => {
+      assertEqual(input.source, 'automatic_detection', 'automatic prompt records its source');
+      assertEqual(
+        input.source === 'automatic_detection' ? input.automaticConfirmation : undefined,
+        'confirmed',
+        'automatic prompt is explicitly confirmed',
+      );
       log.push(`end:${input.autoDecision?.nativeDetectionId}:${input.autoDecision?.nativeGeneration}`);
       return { eventId: 'stored-end', created: true };
     },

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import type { AppEvent } from '../../../domain/types';
 import type { NativeResidentLocationStatus } from '../../../services/nativeResidentLocation';
 import {
+  findRecordingBlockingDiagnostic,
   buildPendingExpresswayKeepDecision,
   selectPendingExpresswayEndPrompt,
   summarizeDiagnostics,
@@ -53,7 +54,6 @@ const nativeStatus: NativeResidentLocationStatus = {
     backgroundLocation: true,
     notifications: true,
     batteryOptimization: true,
-    exactAlarm: true,
     locationEnabled: true,
   },
 };
@@ -65,6 +65,8 @@ const route = summarizeRouteTracking({
   routeTrackingError: null,
 });
 assert.equal(route.value, '記録中');
+assert.equal(route.recordingBlocked, false);
+assert.equal(route.degraded, false);
 assert.match(route.detail, /未送信: 3件/);
 assert.match(route.detail, /最終位置:/);
 assert.match(route.detail, /最終保存:/);
@@ -85,6 +87,7 @@ const ongoingQueueFailure = summarizeRouteTracking({
 });
 assert.equal(ongoingQueueFailure.value, '記録保存を確認');
 assert.equal(ongoingQueueFailure.tone, 'warning');
+assert.equal(ongoingQueueFailure.recordingBlocked, true);
 assert.match(ongoingQueueFailure.detail, /2件失敗/);
 assert.doesNotMatch(ongoingQueueFailure.detail, /trip-1|4096/);
 
@@ -101,6 +104,7 @@ const recoveredQueueFailure = summarizeRouteTracking({
 });
 assert.equal(recoveredQueueFailure.value, '記録中');
 assert.equal(recoveredQueueFailure.tone, 'success');
+assert.equal(recoveredQueueFailure.recordingBlocked, false);
 assert.doesNotMatch(recoveredQueueFailure.detail, /失敗|再診断/);
 
 const unhealthyQueue = summarizeRouteTracking({
@@ -115,6 +119,7 @@ const unhealthyQueue = summarizeRouteTracking({
 });
 assert.equal(unhealthyQueue.value, '記録保存エラー');
 assert.equal(unhealthyQueue.tone, 'error');
+assert.equal(unhealthyQueue.recordingBlocked, true);
 assert.match(unhealthyQueue.detail, /端末内に記録を保存できません/);
 
 const belowHighWater = summarizeRouteTracking({
@@ -140,6 +145,8 @@ const highWaterBytes = summarizeRouteTracking({
 });
 assert.equal(highWaterBytes.value, '未送信記録を確認');
 assert.equal(highWaterBytes.tone, 'warning');
+assert.equal(highWaterBytes.recordingBlocked, false, 'running high-water queue is degraded, not stopped');
+assert.equal(highWaterBytes.degraded, true);
 assert.match(highWaterBytes.detail, /未送信の記録が多くなっています/);
 assert.doesNotMatch(highWaterBytes.detail, /134217728|128MiB|byte/i);
 
@@ -167,6 +174,8 @@ const quarantinedRecords = summarizeRouteTracking({
 });
 assert.equal(quarantinedRecords.value, '記録を確認');
 assert.equal(quarantinedRecords.tone, 'warning');
+assert.equal(quarantinedRecords.recordingBlocked, false, 'quarantined records do not stop the running queue');
+assert.equal(quarantinedRecords.degraded, true);
 assert.match(quarantinedRecords.detail, /一部の記録を安全に退避しました/);
 assert.doesNotMatch(quarantinedRecords.detail, /1|byte/i);
 
@@ -244,6 +253,20 @@ assert.equal(summarizeDiagnostics([
 assert.equal(summarizeDiagnostics([
   { id: 'geo', label: '位置情報', detail: '許可済み', level: 'ok' },
 ], false).value, '準備完了');
+
+assert.equal(findRecordingBlockingDiagnostic([
+  { id: 'network', label: '通信状態', detail: 'オフライン', level: 'warn' },
+]), null, 'offline-only warning must not claim local recording stopped');
+assert.equal(findRecordingBlockingDiagnostic([
+  { id: 'battery-opt', label: '電池最適化', detail: '要確認', level: 'warn' },
+  { id: 'network', label: '通信状態', detail: 'オフライン', level: 'warn' },
+]), null, 'non-blocking reliability warnings remain in details');
+assert.equal(findRecordingBlockingDiagnostic([
+  { id: 'geo', label: '位置情報', detail: '常時位置情報が拒否されています', level: 'error' },
+])?.id, 'geo', 'confirmed location permission failure is critical');
+assert.equal(findRecordingBlockingDiagnostic([
+  { id: 'resident-service', label: '位置記録サービス', detail: '停止中', level: 'error' },
+])?.id, 'resident-service', 'foreground service failure is critical');
 
 const idleExpressway = summarizeExpressway([], null);
 assert.equal(idleExpressway.value, '高速区間なし');

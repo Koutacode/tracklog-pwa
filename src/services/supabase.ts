@@ -276,6 +276,15 @@ async function getNativeDriverAccessToken(): Promise<string | null> {
   }
 }
 
+/**
+ * Returns the Android foreground service's current driver token for a
+ * server-validated admin identity check. The refresh token remains owned by
+ * the native service and is never copied into the admin auth store.
+ */
+export async function getNativeDriverAdminAccessToken(): Promise<string | null> {
+  return getNativeDriverAccessToken();
+}
+
 function buildNativeDriverDataClient() {
   if (!SUPABASE_CONFIGURED) return null;
   return createClient(supabaseUrl, supabaseAnonKey, {
@@ -385,3 +394,7 @@ export const driverSupabase = ANDROID_NATIVE
   ? buildNativeDriverDataClient()
   : driverAuthSupabase;
 export const adminSupabase = buildClient(ADMIN_AUTH_STORAGE_KEY, adminAuthStorage);
+
+/** Android reuses the durable driver identity; web keeps its separate admin OAuth session. */
+export const adminAccessUsesDriverSession = ANDROID_NATIVE;
+export const adminAccessSupabase = ANDROID_NATIVE ? driverSupabase : adminSupabase;

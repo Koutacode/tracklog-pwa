@@ -1,11 +1,10 @@
 import type {
   RemoteDeviceProfile,
   RemoteReportSnapshot,
-  RemoteRoutePoint,
   RemoteTripEvent,
   RemoteTripHeader,
 } from '../domain/remoteTypes';
-import { adminSupabase, SUPABASE_CONFIGURED } from './supabase';
+import { adminAccessSupabase, SUPABASE_CONFIGURED } from './supabase';
 import {
   deleteTracklogDeviceViaFunction,
   deleteTracklogTripViaFunction,
@@ -23,7 +22,6 @@ export type AdminDeviceBundle = {
 export type AdminTripBundle = {
   header: RemoteTripHeader | null;
   events: RemoteTripEvent[];
-  routePoints: RemoteRoutePoint[];
   report: RemoteReportSnapshot | null;
 };
 
@@ -37,10 +35,10 @@ const ADMIN_HIDDEN_PLATFORM = 'admin_hidden';
 const ADMIN_HIDDEN_STATUS = '管理画面で非表示';
 
 function assertAdminConfigured() {
-  if (!SUPABASE_CONFIGURED || !adminSupabase) {
+  if (!SUPABASE_CONFIGURED || !adminAccessSupabase) {
     throw new Error('Supabase が未設定です');
   }
-  return adminSupabase;
+  return adminAccessSupabase;
 }
 
 function isHiddenDeviceProfile(profile: RemoteDeviceProfile) {
@@ -111,20 +109,17 @@ export async function getAdminDeviceBundle(deviceId: string): Promise<AdminDevic
 
 export async function getAdminTripBundle(tripId: string): Promise<AdminTripBundle> {
   const client = assertAdminConfigured();
-  const [headerResult, eventsResult, routePointsResult, reportResult] = await Promise.all([
+  const [headerResult, eventsResult, reportResult] = await Promise.all([
     client.from('trip_headers').select('*').eq('trip_id', tripId).maybeSingle(),
     client.from('trip_events').select('*').eq('trip_id', tripId).order('ts', { ascending: true }),
-    client.from('trip_route_points').select('*').eq('trip_id', tripId).order('ts', { ascending: true }),
     client.from('report_snapshots').select('*').eq('trip_id', tripId).maybeSingle(),
   ]);
   if (headerResult.error) throw headerResult.error;
   if (eventsResult.error) throw eventsResult.error;
-  if (routePointsResult.error) throw routePointsResult.error;
   if (reportResult.error) throw reportResult.error;
   return {
     header: (headerResult.data as RemoteTripHeader | null) ?? null,
     events: (eventsResult.data ?? []) as RemoteTripEvent[],
-    routePoints: (routePointsResult.data ?? []) as RemoteRoutePoint[],
     report: (reportResult.data as RemoteReportSnapshot | null) ?? null,
   };
 }

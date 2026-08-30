@@ -16,6 +16,11 @@ export type HomeStatusSummary = {
   icon: string;
 };
 
+export type RouteTrackingSummary = HomeStatusSummary & {
+  recordingBlocked: boolean;
+  degraded: boolean;
+};
+
 export function selectPendingExpresswayEndPrompt(params: {
   activeTripId: string | null;
   expresswayActive: boolean;
@@ -78,7 +83,7 @@ function formatNativeRecordingDetail(status: NativeResidentLocationStatus): stri
   return parts.join(' / ');
 }
 
-function summarizeQueueStorageProblem(status: NativeResidentLocationStatus): HomeStatusSummary | null {
+function summarizeQueueStorageProblem(status: NativeResidentLocationStatus): RouteTrackingSummary | null {
   const failureCount = Math.max(0, Math.trunc(status.queueWriteFailureCount || 0));
   const storageUnhealthy = status.queueStorageHealthy === false;
   const failureTime = status.lastQueueWriteFailureAt > 0
@@ -91,6 +96,8 @@ function summarizeQueueStorageProblem(status: NativeResidentLocationStatus): Hom
       detail: `端末内に記録を保存できません${failureTime}。再診断して端末の状態を確認してください`,
       tone: 'error',
       icon: '!',
+      recordingBlocked: true,
+      degraded: false,
     };
   }
 
@@ -104,6 +111,8 @@ function summarizeQueueStorageProblem(status: NativeResidentLocationStatus): Hom
       detail: `今回の記録で端末内保存に${failureCount}件失敗しました${failureTime}。再診断してください`,
       tone: 'warning',
       icon: '!',
+      recordingBlocked: true,
+      degraded: false,
     };
   }
 
@@ -118,6 +127,8 @@ function summarizeQueueStorageProblem(status: NativeResidentLocationStatus): Hom
       detail: `未送信の記録が多くなっています。通信とログインを確認してください${hasQuarantinedRecords ? '。一部の記録を安全に退避しました' : ''}`,
       tone: 'warning',
       icon: '!',
+      recordingBlocked: false,
+      degraded: true,
     };
   }
   if (hasQuarantinedRecords) {
@@ -127,6 +138,8 @@ function summarizeQueueStorageProblem(status: NativeResidentLocationStatus): Hom
       detail: '一部の記録を安全に退避しました。記録を保ったまま再診断できます',
       tone: 'warning',
       icon: '!',
+      recordingBlocked: false,
+      degraded: true,
     };
   }
   return null;
@@ -183,6 +196,30 @@ export function summarizeDiagnostics(
   };
 }
 
+const RECORDING_BLOCKING_DIAGNOSTIC_IDS = new Set([
+  'geo',
+  'location-enabled',
+  'location-precise',
+  'location-background',
+  'resident-service',
+  'foreground-service',
+  'fgs',
+]);
+
+/**
+ * Only confirmed blockers may claim that recording has stopped. Network and
+ * battery warnings affect later enrichment/reliability but do not stop the
+ * device-local queue, while notification permission alone does not prevent an
+ * Android foreground service from running.
+ */
+export function findRecordingBlockingDiagnostic(
+  items: StartupDiagnosticItem[],
+): StartupDiagnosticItem | null {
+  return items.find(item => (
+    item.level === 'error' && RECORDING_BLOCKING_DIAGNOSTIC_IDS.has(item.id)
+  )) ?? null;
+}
+
 export function summarizeLocation(
   geoStatus: { address?: string } | null,
   geoError: string | null,
@@ -219,7 +256,7 @@ export function summarizeRouteTracking(params: {
   isAndroidNative: boolean;
   nativeStatus: NativeResidentLocationStatus | null;
   routeTrackingError: string | null;
-}): HomeStatusSummary {
+}): RouteTrackingSummary {
   const { tripActive, isAndroidNative, nativeStatus, routeTrackingError } = params;
   if (routeTrackingError) {
     return {
@@ -228,15 +265,19 @@ export function summarizeRouteTracking(params: {
       detail: routeTrackingError,
       tone: 'error',
       icon: '!',
+      recordingBlocked: false,
+      degraded: true,
     };
   }
   if (!tripActive) {
     return {
       label: '位置記録',
       value: '未開始',
-      detail: '運行開始後にルートを記録します',
+      detail: '運行開始後に位置を記録します',
       tone: 'neutral',
       icon: '○',
+      recordingBlocked: false,
+      degraded: false,
     };
   }
   if (!isAndroidNative) {
@@ -246,6 +287,8 @@ export function summarizeRouteTracking(params: {
       detail: 'PWAを閉じずに位置情報を許可してください',
       tone: 'neutral',
       icon: '○',
+      recordingBlocked: false,
+      degraded: false,
     };
   }
   if (!nativeStatus) {
@@ -255,6 +298,8 @@ export function summarizeRouteTracking(params: {
       detail: 'バックグラウンド記録の状態を確認しています',
       tone: 'neutral',
       icon: '…',
+      recordingBlocked: false,
+      degraded: false,
     };
   }
   if (nativeStatus.authorizationBlocked) {
@@ -264,6 +309,8 @@ export function summarizeRouteTracking(params: {
       detail: '同期を再開するためログイン状態を確認してください',
       tone: 'error',
       icon: '!',
+      recordingBlocked: true,
+      degraded: false,
     };
   }
   const queueStorageProblem = summarizeQueueStorageProblem(nativeStatus);
@@ -275,6 +322,8 @@ export function summarizeRouteTracking(params: {
       detail: formatNativeRecordingDetail(nativeStatus),
       tone: 'success',
       icon: '●',
+      recordingBlocked: false,
+      degraded: false,
     };
   }
   if (!nativeStatus.approved || !nativeStatus.setupComplete) {
@@ -284,6 +333,8 @@ export function summarizeRouteTracking(params: {
       detail: 'ログインと利用登録の状態を確認してください',
       tone: 'warning',
       icon: '!',
+      recordingBlocked: true,
+      degraded: false,
     };
   }
   if (!nativeStatus.ready || !nativeStatus.eligible) {
@@ -293,6 +344,8 @@ export function summarizeRouteTracking(params: {
       detail: '位置情報と通知の端末設定を確認してください',
       tone: 'warning',
       icon: '!',
+      recordingBlocked: true,
+      degraded: false,
     };
   }
   if (nativeStatus.startRequested) {
@@ -302,6 +355,8 @@ export function summarizeRouteTracking(params: {
       detail: '端末の位置情報が有効になると自動で開始します',
       tone: 'warning',
       icon: '!',
+      recordingBlocked: true,
+      degraded: false,
     };
   }
   return {
@@ -312,6 +367,8 @@ export function summarizeRouteTracking(params: {
       : '再診断して端末設定を確認してください',
     tone: 'warning',
     icon: '■',
+    recordingBlocked: true,
+    degraded: false,
   };
 }
 

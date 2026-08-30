@@ -10,7 +10,6 @@ const requiredConnectSources = [
   { source: 'wss://*.supabase.co', reason: 'Supabase realtime/session transport' },
   { source: 'https://geoapi.heartrails.com', reason: 'reverse geocoding' },
   { source: 'https://api.github.com', reason: 'release update checks' },
-  { source: 'https://router.project-osrm.org', reason: 'route map correction' },
   { source: 'https://firebaseinstallations.googleapis.com', reason: 'Firebase web push installation token' },
   { source: 'https://fcmregistrations.googleapis.com', reason: 'Firebase web push registration token' },
   { source: 'https://firebaselogging.googleapis.com', reason: 'Firebase push delivery/open metrics' },

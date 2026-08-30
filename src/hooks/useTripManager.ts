@@ -29,6 +29,10 @@ import {
 } from '../services/expresswayIcResolution';
 import { cancelNativeExpresswayEndPrompt } from '../services/nativeExpresswayPrompt';
 import type { AppEvent } from '../domain/types';
+import {
+  executeExpresswayEndRequest,
+  type ExpresswayEndSource,
+} from '../domain/expresswayEndRequest';
 import { requestRouteTrackingSync } from '../app/routeTrackingSignal';
 import { prepareNativeExpresswayEventsForTripEnd } from '../services/nativeExpresswayEventHandoff';
 import { commitRouteTransitionWithNativeFastApply } from '../services/nativeTrackingFastApply';
@@ -188,7 +192,7 @@ export function useTripManager() {
   }, [captureGeoOnce, refresh, runOperation, tripId]);
 
   const handleToggleEvent = useCallback(async (
-    type: 'load' | 'unload' | 'break' | 'expressway',
+    type: 'load' | 'unload' | 'break',
     action: 'start' | 'end',
   ) => {
     if (!tripId) return;
@@ -214,24 +218,45 @@ export function useTripManager() {
             () => dbEndBreak({ tripId, geo, address, occurredAt }),
           );
         }
-      } else if (type === 'expressway') {
-        if (action === 'start') {
-          const { eventId } = await commitRouteTransitionWithNativeFastApply(
-            () => dbStartExpressway({ tripId, geo, address, occurredAt }),
-          );
-          enqueueExpresswayIcResolution({ eventId, geo });
-        } else {
-          const { eventId } = await commitRouteTransitionWithNativeFastApply(
-            () => dbEndExpressway({ tripId, geo, address, occurredAt }),
-          );
-          enqueueExpresswayIcResolution({ eventId, geo });
-        }
-        await cancelNativeExpresswayEndPrompt(tripId);
-        await clearPendingExpresswayEndDecision(tripId);
       }
       if (type === 'break') requestRouteTrackingSync();
       await refresh();
       return true;
+    });
+  }, [captureGeoOnce, refresh, runOperation, tripId]);
+
+  const handleStartExpressway = useCallback(async () => {
+    if (!tripId) return;
+    return runOperation('expressway-start', async () => {
+      const occurredAt = new Date().toISOString();
+      const { geo, address } = await captureGeoOnce();
+      const { eventId } = await commitRouteTransitionWithNativeFastApply(
+        () => dbStartExpressway({ tripId, geo, address, occurredAt }),
+      );
+      enqueueExpresswayIcResolution({ eventId, geo });
+      await cancelNativeExpresswayEndPrompt(tripId);
+      await clearPendingExpresswayEndDecision(tripId);
+      await refresh();
+      return true;
+    });
+  }, [captureGeoOnce, refresh, runOperation, tripId]);
+
+  const requestExpresswayEnd = useCallback(async (source: ExpresswayEndSource) => {
+    return executeExpresswayEndRequest(source, async authorization => {
+      if (!tripId) return false;
+      const completed = await runOperation('expressway-end', async () => {
+        const occurredAt = new Date().toISOString();
+        const { geo, address } = await captureGeoOnce();
+        const { eventId } = await commitRouteTransitionWithNativeFastApply(
+          () => dbEndExpressway({ tripId, geo, address, occurredAt, ...authorization }),
+        );
+        enqueueExpresswayIcResolution({ eventId, geo });
+        await cancelNativeExpresswayEndPrompt(tripId);
+        await clearPendingExpresswayEndDecision(tripId);
+        await refresh();
+        return true;
+      });
+      return completed === true;
     });
   }, [captureGeoOnce, refresh, runOperation, tripId]);
 
@@ -366,6 +391,8 @@ export function useTripManager() {
     handleStartRest,
     handleEndRest,
     handleToggleEvent,
+    handleStartExpressway,
+    requestExpresswayEnd,
     handleAddRefuel,
     handleAddFerry,
     handleAddPointMark,

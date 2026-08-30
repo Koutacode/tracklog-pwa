@@ -1,21 +1,16 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { RemoteDeviceProfile, TracklogAdminMessage, TracklogRuntimeConfig } from '../domain/remoteTypes';
-import { SUPABASE_CONFIGURED, adminSupabase, driverAuthSupabase, driverSupabase } from './supabase';
+import {
+  SUPABASE_CONFIGURED,
+  adminAccessSupabase,
+  driverAuthSupabase,
+  driverSupabase,
+} from './supabase';
 
 type FunctionResponse<T> = {
   ok?: boolean;
   data?: T;
   error?: string;
-};
-
-type DriverPrivilegedInvokeOptions = {
-  /**
-   * A freshly verified foreground Auth token may be used only for enrollment
-   * control-plane calls. Normal Android data traffic must keep using the
-   * native-owned driverSupabase client.
-   */
-  accessToken?: string | null;
-  client?: SupabaseClient | null;
 };
 
 export type TracklogWebPushSubscription = {
@@ -69,13 +64,40 @@ async function invokeTracklogPrivileged<T>(
       : {}),
   });
   if (error) {
-    throw new Error(error.message || 'TrackLog サーバー処理に失敗しました');
+    const wrapped = new Error(error.message || 'TrackLog サーバー処理に失敗しました') as Error & {
+      cause?: unknown;
+      status?: number;
+    };
+    wrapped.cause = error;
+    const context = 'context' in error ? error.context : null;
+    if (context && typeof context === 'object' && 'status' in context && typeof context.status === 'number') {
+      wrapped.status = context.status;
+    }
+    throw wrapped;
   }
   if (!data?.ok) {
     throw new Error(data?.error || 'TrackLog サーバー処理に失敗しました');
   }
   return data.data as T;
 }
+
+/** Builds an explicit Authorization override for a foreground control-plane credential. */
+export function buildTracklogPrivilegedAuthorizationHeader(accessToken?: string | null) {
+  const normalized = accessToken?.trim() || '';
+  return normalized
+    ? { Authorization: `Bearer ${normalized}` }
+    : null;
+}
+
+export type DriverPrivilegedRequestOptions = {
+  /**
+   * A freshly verified foreground Auth token may be used only for explicit
+   * enrollment or admin-validation control-plane calls. Normal Android data
+   * traffic must keep using the native-owned driverSupabase client.
+   */
+  client?: SupabaseClient | null;
+  accessToken?: string | null;
+};
 
 export async function claimTracklogDeviceProfileViaFunction(input: {
   deviceId: string;
@@ -91,7 +113,7 @@ export async function claimTracklogDeviceProfileViaFunction(input: {
   latestLng?: number | null;
   latestAccuracy?: number | null;
   lastSeenAt: string;
-}, options?: DriverPrivilegedInvokeOptions): Promise<RemoteDeviceProfile> {
+}, options?: DriverPrivilegedRequestOptions): Promise<RemoteDeviceProfile> {
   const enrollmentAccessToken = options?.accessToken?.trim() || '';
   const client = requireClient(
     options?.client ?? (enrollmentAccessToken ? driverAuthSupabase : driverSupabase),
@@ -104,28 +126,29 @@ export async function claimTracklogDeviceProfileViaFunction(input: {
   );
 }
 
-export async function getTracklogAdminAccessStateViaFunction(): Promise<{
+export async function getTracklogAdminAccessStateViaFunction(options?: DriverPrivilegedRequestOptions): Promise<{
   email: string | null;
   isAdmin: boolean;
 }> {
-  const client = requireClient(adminSupabase);
+  const accessToken = options?.accessToken?.trim() || '';
+  const client = requireClient(options?.client ?? (accessToken ? driverAuthSupabase : adminAccessSupabase));
   return invokeTracklogPrivileged<{
     email: string | null;
     isAdmin: boolean;
-  }>(client, 'getAdminAccessState', {});
+  }>(client, 'getAdminAccessState', {}, accessToken);
 }
 
 export async function getTracklogRuntimeConfigViaFunction(options?: {
   admin?: boolean;
 }): Promise<TracklogRuntimeConfig> {
-  const client = requireClient(options?.admin ? adminSupabase : driverSupabase);
+  const client = requireClient(options?.admin ? adminAccessSupabase : driverSupabase);
   return invokeTracklogPrivileged<TracklogRuntimeConfig>(client, 'getRuntimeConfig', {});
 }
 
 export async function updateTracklogRuntimeConfigViaFunction(input: {
   locationNotificationText: string;
 }): Promise<TracklogRuntimeConfig> {
-  const client = requireClient(adminSupabase);
+  const client = requireClient(adminAccessSupabase);
   return invokeTracklogPrivileged<TracklogRuntimeConfig>(client, 'updateRuntimeConfig', input);
 }
 
@@ -143,7 +166,7 @@ export async function sendTracklogAdminMessageViaFunction(input: {
   body: string;
   requestLocation?: boolean;
 }): Promise<TracklogAdminMessage> {
-  const client = requireClient(adminSupabase);
+  const client = requireClient(adminAccessSupabase);
   return invokeTracklogPrivileged<TracklogAdminMessage>(client, 'sendAdminMessage', input);
 }
 
@@ -209,16 +232,14 @@ export async function ackTracklogAdminMessagesViaFunction(input: {
 export async function migrateTracklogDeviceRecordsViaFunction(input: {
   oldDeviceId: string;
   newDeviceId: string;
-}, options?: DriverPrivilegedInvokeOptions): Promise<void> {
-  const enrollmentAccessToken = options?.accessToken?.trim() || '';
-  const client = requireClient(
-    options?.client ?? (enrollmentAccessToken ? driverAuthSupabase : driverSupabase),
-  );
+}, options?: DriverPrivilegedRequestOptions): Promise<void> {
+  const accessToken = options?.accessToken?.trim() || '';
+  const client = requireClient(options?.client ?? (accessToken ? driverAuthSupabase : driverSupabase));
   await invokeTracklogPrivileged<{ migrated: boolean }>(
     client,
     'migrateDeviceRecords',
     input,
-    enrollmentAccessToken,
+    accessToken,
   );
 }
 
@@ -240,7 +261,7 @@ export async function setTracklogDeviceApprovalViaFunction(input: {
   deviceId: string;
   approvalStatus: 'approved' | 'rejected';
 }): Promise<RemoteDeviceProfile> {
-  const client = requireClient(adminSupabase);
+  const client = requireClient(adminAccessSupabase);
   return invokeTracklogPrivileged<RemoteDeviceProfile>(client, 'setDeviceApproval', input);
 }
 
@@ -248,12 +269,12 @@ export async function deleteTracklogDeviceViaFunction(deviceId: string): Promise
   deletedCount: number;
   hidden: boolean;
 }> {
-  const client = requireClient(adminSupabase);
+  const client = requireClient(adminAccessSupabase);
   return invokeTracklogPrivileged<{ deletedCount: number; hidden: boolean }>(client, 'deleteDevice', { deviceId });
 }
 
 export async function deleteTracklogTripViaFunction(tripId: string): Promise<number> {
-  const client = requireClient(adminSupabase);
+  const client = requireClient(adminAccessSupabase);
   const result = await invokeTracklogPrivileged<{ deletedCount: number }>(client, 'deleteTrip', { tripId });
   return result.deletedCount;
 }

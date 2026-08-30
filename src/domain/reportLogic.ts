@@ -78,6 +78,38 @@ function jstDayStartMs(dateKey: string): number {
   return new Date(`${dateKey}T00:00:00+09:00`).getTime();
 }
 
+function listJstDateKeys(startDateKey: string, endDateKey: string): string[] {
+  const startMs = jstDayStartMs(startDateKey);
+  const endMs = jstDayStartMs(endDateKey);
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs < startMs) return [];
+
+  const dateKeys: string[] = [];
+  for (let cursor = startMs; cursor <= endMs; cursor += DAY_TOTAL_MIN * 60000) {
+    dateKeys.push(jstDateKey(new Date(cursor).toISOString()));
+  }
+  return dateKeys;
+}
+
+function getTripCalendarDateKeys(events: readonly { type: string; ts: string }[], currentTs?: string): string[] {
+  const sorted = [...events]
+    .filter(event => Number.isFinite(Date.parse(event.ts)))
+    .sort((left, right) => left.ts.localeCompare(right.ts));
+  const tripStart = sorted.find(event => event.type === 'trip_start');
+  if (!tripStart) return [];
+
+  const tripStartMs = Date.parse(tripStart.ts);
+  const tripEnd = [...sorted]
+    .reverse()
+    .find(event => event.type === 'trip_end' && Date.parse(event.ts) >= tripStartMs);
+  const currentMs = currentTs ? Date.parse(currentTs) : Number.NaN;
+  const latestEvent = sorted[sorted.length - 1];
+  const rangeEndTs = tripEnd?.ts
+    ?? (Number.isFinite(currentMs) && currentMs >= tripStartMs ? currentTs : latestEvent?.ts)
+    ?? tripStart.ts;
+
+  return listJstDateKeys(jstDateKey(tripStart.ts), jstDateKey(rangeEndTs));
+}
+
 function minuteOfDayExactJst(dateKey: string, utcIso: string): number {
   const raw = minuteOffsetExactJst(dateKey, utcIso);
   if (!Number.isFinite(raw)) return 0;
@@ -437,6 +469,7 @@ function mapAppEventToRawEvent(event: AppEvent): RawEvent {
 export function buildImportableDayRunsFromAppEvents(
   events: AppEvent[],
   dayRuns: ReadonlyArray<Pick<SourceDayRun, 'dateKey' | 'km'>>,
+  options?: { currentTs?: string },
 ): ImportableReportDayRun[] {
   const groupedEvents = new Map<string, RawEvent[]>();
   const projectedEvents = projectAutomaticBreakAsRest(events);
@@ -456,6 +489,7 @@ export function buildImportableDayRunsFromAppEvents(
   const dateKeys = Array.from(new Set([
     ...groupedEvents.keys(),
     ...dayRuns.map(day => day.dateKey),
+    ...getTripCalendarDateKeys(normalEvents, options?.currentTs),
   ])).sort();
 
   return dateKeys.map(dateKey => {
@@ -481,12 +515,15 @@ export function buildReportTripFromAppEvents(params: {
   events: AppEvent[];
   dayRuns: ReadonlyArray<Pick<SourceDayRun, 'dateKey' | 'km'>>;
   label?: string;
+  currentTs?: string;
 }): Trip {
   const raw = {
     recordType: 'app_trip_snapshot',
     sourceTripId: params.tripId,
     ...(params.label ? { label: params.label } : {}),
-    dayRuns: buildImportableDayRunsFromAppEvents(params.events, params.dayRuns),
+    dayRuns: buildImportableDayRunsFromAppEvents(params.events, params.dayRuns, {
+      currentTs: params.currentTs,
+    }),
   };
   return parseJsonToTrip(JSON.stringify(raw), params.tripId);
 }
@@ -904,18 +941,33 @@ function categoryAfterEvent(
   }
 }
 
+function buildInitialStateByDay(days: readonly DayRecord[]): Map<number, DayState> {
+  const initialByDay = new Map<number, DayState>();
+  let state: DayState = { category: 'rest', tripActive: false };
+
+  for (const day of days) {
+    initialByDay.set(day.dayIndex, { ...state });
+    for (const event of [...day.events].sort((left, right) => left.ts.localeCompare(right.ts))) {
+      state = categoryAfterEvent(event.type, state.category, state.tripActive);
+    }
+  }
+  return initialByDay;
+}
+
 function buildRoundedIntervals(
   day: DayRecord,
   currentTs?: string,
   tripProjection?: ReportTimelineProjection,
+  carriedInitialState?: DayState,
 ): RoundedInterval[] {
   const events = [...day.events].sort((a, b) => a.ts.localeCompare(b.ts));
   const { startMin: windowStart, endMin: windowEnd } = getReportWindow(day, events, currentTs);
+  const dayInitialState = carriedInitialState ?? inferInitialState(day, events);
   const hasReportMinDurationStart = events.some(event =>
     getMinDurationStartPair(event.type) && getReportMinDurationMinutes(event) > 0,
   );
   if (events.length === 0) {
-    return [{ startMin: windowStart, endMin: windowEnd, category: 'rest' }];
+    return [{ startMin: windowStart, endMin: windowEnd, category: dayInitialState.category }];
   }
 
   const scopedEvents = events.filter(event => {
@@ -941,15 +993,14 @@ function buildRoundedIntervals(
   }
 
   if (scopedEvents.length === 0) {
-    return [{ startMin: windowStart, endMin: windowEnd, category: 'rest' }];
+    return [{ startMin: windowStart, endMin: windowEnd, category: dayInitialState.category }];
   }
 
   const projectedEvents = projection.events;
   const intervals: RoundedInterval[] = [];
   let cursor = windowStart;
-  const initialState = inferInitialState(day, scopedEvents);
-  let tripActive = initialState.tripActive;
-  let currentCategory = initialState.category;
+  let tripActive = dayInitialState.tripActive;
+  let currentCategory = dayInitialState.category;
 
   for (const projectedEvent of projectedEvents) {
     const { event, effectiveMinute: boundary } = projectedEvent;
@@ -1239,6 +1290,7 @@ function buildTripPairDetailsByDay(
 function buildTripFerrySegmentsByDay(
   days: DayRecord[],
   projections: Map<number, ReportTimelineProjection>,
+  currentTs?: string,
 ): Map<number, TimeSegmentDetail[]> {
   const details = buildTripPairDetailsByDay(
     days,
@@ -1248,7 +1300,7 @@ function buildTripFerrySegmentsByDay(
     'ferrySessionId',
     true,
   );
-  return new Map(
+  const byDay = new Map<number, TimeSegmentDetail[]>(
     Array.from(details.entries()).map(([dayIndex, items]) => [
       dayIndex,
       items.map(item => ({
@@ -1258,6 +1310,74 @@ function buildTripFerrySegmentsByDay(
       })),
     ]),
   );
+
+  const events = days.flatMap(day => day.events);
+  const ferryDefinition = findToggleDefinition('boarding', 'disembark', 'ferrySessionId');
+  const pairing = resolveTogglePairing(events, [ferryDefinition]);
+  const openStart = pairing.openStarts[0]?.start;
+  if (!openStart) return byDay;
+
+  const tripEnd = [...events]
+    .sort((left, right) => left.ts.localeCompare(right.ts))
+    .reverse()
+    .find(event => event.type === 'trip_end');
+  const reportEndTs = tripEnd?.ts ?? currentTs;
+  const rawStartMs = Date.parse(openStart.ts);
+  if (!reportEndTs) return byDay;
+  const rawEndMs = Date.parse(reportEndTs);
+  if (!Number.isFinite(rawStartMs) || !Number.isFinite(rawEndMs) || rawEndMs <= rawStartMs) {
+    return byDay;
+  }
+
+  const projectedTimestamps = new Map(
+    days.flatMap(day => (
+      projections.get(day.dayIndex)?.events.map(item => [item.event, item.effectiveTs] as const) ?? []
+    )),
+  );
+  const projectedStartMs = Date.parse(projectedTimestamps.get(openStart) ?? openStart.ts);
+  if (!Number.isFinite(projectedStartMs)) return byDay;
+
+  const reportEndDateKey = jstDateKey(reportEndTs);
+  const roundedReportEndMs = Date.parse(utcFromJstMinute(
+    reportEndDateKey,
+    roundToQuarterMinutes(minuteOfDayExactJst(reportEndDateKey, reportEndTs)),
+  ));
+  const minimumEndMs = projectedStartMs + getReportMinDurationMinutes(openStart) * 60000;
+  const desiredEndMs = Math.max(roundedReportEndMs, minimumEndMs);
+  const availableReportEndMs = days.reduce((latest, day) => {
+    const window = getReportWindow(day, day.events, currentTs);
+    const projectedEndMinute = projections.get(day.dayIndex)?.minimumEndMinute ?? 0;
+    return Math.max(
+      latest,
+      jstDayStartMs(day.dateKey) + Math.max(window.endMin, projectedEndMinute) * 60000,
+    );
+  }, Number.NEGATIVE_INFINITY);
+  const effectiveEndMs = Math.min(desiredEndMs, availableReportEndMs);
+  if (!Number.isFinite(effectiveEndMs) || effectiveEndMs <= projectedStartMs) return byDay;
+
+  for (const day of days) {
+    const dayStartMs = jstDayStartMs(day.dateKey);
+    const window = getReportWindow(day, day.events, currentTs);
+    const projectedEndMinute = projections.get(day.dayIndex)?.minimumEndMinute ?? 0;
+    const reportWindowStartMs = dayStartMs + window.startMin * 60000;
+    const reportWindowEndMs = dayStartMs + Math.max(window.endMin, projectedEndMinute) * 60000;
+    const overlapStartMs = Math.max(projectedStartMs, reportWindowStartMs);
+    const overlapEndMs = Math.min(effectiveEndMs, reportWindowEndMs);
+    if (overlapEndMs <= overlapStartMs) continue;
+
+    const current = byDay.get(day.dayIndex) ?? [];
+    current.push({
+      startTs: new Date(overlapStartMs).toISOString(),
+      endTs: new Date(overlapEndMs).toISOString(),
+      durationMinutes: Math.floor((overlapEndMs - overlapStartMs) / 60000),
+      continuesFromPreviousDay: overlapStartMs > projectedStartMs,
+      continuesToNextDay: overlapEndMs < effectiveEndMs,
+    });
+    current.sort((left, right) => left.startTs.localeCompare(right.startTs));
+    byDay.set(day.dayIndex, current);
+  }
+
+  return byDay;
 }
 
 function getRollingDriveMinutes(days: DayRecord[], metricsList: DayMetrics[], index: number, spanDays: number): number {
@@ -1352,12 +1472,13 @@ export function computeDayMetrics(
   day: DayRecord,
   currentTs?: string,
   tripProjection?: ReportTimelineProjection,
+  carriedInitialState?: DayState,
 ): DayMetrics {
   if (!tripProjection) {
     day = normalizeReportDays([day])[0] ?? day;
   }
   const alerts: ReportAlert[] = [];
-  const intervals = buildRoundedIntervals(day, currentTs, tripProjection);
+  const intervals = buildRoundedIntervals(day, currentTs, tripProjection, carriedInitialState);
   const coveredMin = intervals.reduce((sum, interval) => sum + Math.max(0, interval.endMin - interval.startMin), 0);
   const isPartialDay = coveredMin < DAY_TOTAL_MIN;
   const driveMin = sumCategoryMinutes(intervals, 'drive');
@@ -1465,11 +1586,17 @@ export function computeTripDayMetrics(
   const normalizedDays = normalizeReportDays(trip.days);
   const normalizedTrip = { ...trip, days: normalizedDays };
   const reportProjections = projectTripReportTimelines(normalizedDays);
+  const initialStateByDay = buildInitialStateByDay(normalizedDays);
   const base = normalizedDays.map(day => (
-    computeDayMetrics(day, currentTs, reportProjections.get(day.dayIndex))
+    computeDayMetrics(
+      day,
+      currentTs,
+      reportProjections.get(day.dayIndex),
+      initialStateByDay.get(day.dayIndex),
+    )
   ));
   const continuous = computeContinuousDriveTimeline(normalizedDays, currentTs).byDay;
-  const ferryByDay = buildTripFerrySegmentsByDay(normalizedDays, reportProjections);
+  const ferryByDay = buildTripFerrySegmentsByDay(normalizedDays, reportProjections, currentTs);
   const loadsByDay = buildTripPairDetailsByDay(
     normalizedDays,
     reportProjections,
@@ -1494,6 +1621,7 @@ export function computeTripDayMetrics(
       day,
       currentTs,
       reportProjections.get(day.dayIndex),
+      initialStateByDay.get(day.dayIndex),
     );
     const coveredMin = intervals.reduce((sum, interval) => sum + Math.max(0, interval.endMin - interval.startMin), 0);
     const baseRestSegments = buildCategorySegments(day, intervals, 'rest');

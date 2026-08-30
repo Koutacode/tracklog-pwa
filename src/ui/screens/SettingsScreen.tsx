@@ -1,12 +1,18 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Capacitor } from '@capacitor/core';
+import { useAdminEntryAvailability } from '../../hooks/useAdminEntryAvailability';
 import { APP_VERSION, BUILD_DATE } from '../../app/version';
 import {
   getDriverProfileEnrollmentErrorMessage,
   getDriverRegistrationGateModel,
 } from '../../app/driverRegistrationGateModel';
-import { getDriverIdentity, sendDriverMagicLink, setDriverProfileLocal } from '../../services/remoteAuth';
+import {
+  getDriverAuthWorkflowErrorCode,
+  getDriverIdentity,
+  sendDriverMagicLink,
+  setDriverProfileLocal,
+} from '../../services/remoteAuth';
 import { getRemoteSyncState, hydrateRemoteSyncState, runRemoteSync, subscribeRemoteSyncState } from '../../services/remoteSync';
 import {
   checkLatestAndroidRelease,
@@ -55,6 +61,29 @@ function latestVersionLabel(check: AndroidReleaseCheck | PwaBuildCheck | null) {
   return check.latestVersion ? `v${check.latestVersion}` : '不明';
 }
 
+function enrollmentErrorMessage(error: unknown) {
+  const fallback = error instanceof Error && error.message.trim()
+    ? error.message
+    : '承認申請を送信できませんでした。通信状態を確認して、もう一度お試しください。';
+  switch (getDriverAuthWorkflowErrorCode(error)) {
+    case 'driver_auth_session_refresh_failed':
+      return 'ログイン状態を更新できませんでした。通信状態を確認してから、もう一度「承認申請を再送」を押してください。';
+    case 'driver_auth_email_mismatch':
+      return fallback;
+    case 'driver_enrollment_session_changed':
+      return 'ログイン状態が更新されました。画面を開き直して、もう一度「承認申請を再送」を押してください。';
+    case 'driver_native_credentials_update_failed':
+      return '承認申請の前に端末の認証情報を保存できませんでした。通信状態を確認して、認証状態を更新してください。';
+    case 'driver_profile_enrollment_failed':
+      return getDriverProfileEnrollmentErrorMessage(error)
+        ?? 'メール認証は完了していますが、承認申請を送信できませんでした。通信状態を確認して、もう一度「承認申請を再送」を押してください。';
+    case 'driver_otp_session_invalid':
+      return 'ログイン情報を確認できませんでした。登録済みログインから、もう一度メール認証してください。';
+    default:
+      return fallback;
+  }
+}
+
 export default function SettingsScreen() {
   const [displayName, setDisplayName] = useState('');
   const [vehicleLabel, setVehicleLabel] = useState('');
@@ -76,10 +105,11 @@ export default function SettingsScreen() {
   const [versionUpdating, setVersionUpdating] = useState(false);
   const [apkSharing, setApkSharing] = useState(false);
   const [apkUrlCopying, setApkUrlCopying] = useState(false);
-
   const isNative = Capacitor.isNativePlatform();
+  const usesDriverAdminAccount = isNative && Capacitor.getPlatform() === 'android';
+  const canOpenAdmin = useAdminEntryAvailability({ enabled: usesDriverAdminAccount });
   const standalone = useMemo(() => isStandaloneMode(), []);
-  const profileLocked = authInitialized && profileComplete && approvalStatus === 'approved';
+  const profileLocked = authInitialized && profileComplete && approvalStatus !== 'unregistered';
   const authStatusLabel = authInitialized ? '認証済み' : email.trim() ? '認証待ち' : '未登録';
   const registrationGate = getDriverRegistrationGateModel({
     configured: syncState.configured,
@@ -87,7 +117,16 @@ export default function SettingsScreen() {
     profileComplete,
     approvalStatus,
   });
-  const approvalStatusLabel = registrationGate.statusLabel;
+  const approvalStatusLabel =
+    registrationGate.mode === 'approved' && approvalStatus === 'approved'
+      ? '承認済み'
+      : registrationGate.mode === 'rejected' && approvalStatus === 'rejected'
+        ? '拒否済み'
+        : registrationGate.mode === 'approval-pending' && approvalStatus === 'pending'
+          ? '管理者承認待ち'
+          : registrationGate.mode === 'enrollment-incomplete' && authInitialized
+            ? '承認申請が必要'
+            : registrationGate.statusLabel;
   const syncAvailable = syncState.configured && authInitialized && profileComplete && approvalStatus === 'approved';
 
   const runVersionCheck = async () => {
@@ -193,9 +232,8 @@ export default function SettingsScreen() {
             <Link to="/messages" className="pill-link">
               メッセージ
             </Link>
-            <Link to="/login" className="pill-link">
-              管理者ログイン
-            </Link>
+            {!usesDriverAdminAccount && <Link to="/login" className="pill-link">管理者ログイン</Link>}
+            {usesDriverAdminAccount && canOpenAdmin && <Link to="/admin" className="pill-link">管理画面</Link>}
           </div>
         </div>
 
@@ -262,85 +300,106 @@ export default function SettingsScreen() {
             {registrationGate.showStatusCard && (
               <div className={`approval-wait-card approval-wait-card--${registrationGate.cardStatus ?? 'unregistered'}`}>
                 <strong>{approvalStatusLabel}</strong>
-                {registrationGate.statusMessage && <span>{registrationGate.statusMessage}</span>}
+                <span>
+                  {approvalStatus === 'rejected'
+                    ? '管理者により拒否されています。利用する場合は管理者へ確認してください。'
+                    : approvalStatus === 'pending'
+                      ? '認証と承認申請は完了しています。管理者が許可するまでお待ちください。'
+                      : registrationGate.statusMessage
+                        ?? 'メール認証は完了しています。プロフィールを確認して、承認申請を再送してください。'}
+                </span>
               </div>
             )}
             {profileLocked && (
               <div className="settings-note">
-                登録済みプロフィールは不正利用防止のため、この端末からは変更できません。
+                {approvalStatus === 'pending'
+                  ? '承認申請済みのプロフィールです。変更が必要な場合は管理者へ確認してください。'
+                  : approvalStatus === 'rejected'
+                    ? '拒否された申請の内容はこの端末から変更せず、管理者へ確認してください。'
+                    : '登録済みプロフィールは不正利用防止のため、この端末からは変更できません。'}
               </div>
             )}
-            <button
-              className="trip-btn"
-              disabled={profileLocked || !email.trim() || sendingMagic}
-              onClick={async () => {
-                setMessage(null);
-                setSendingMagic(true);
-                try {
-                  const validation = validateDriverProfile({ displayName, vehicleLabel, phone, email });
-                  setDisplayName(validation.value.displayName);
-                  setVehicleLabel(validation.value.vehicleLabel);
-                  setPhone(validation.value.phone);
-                  setEmail(validation.value.email);
-                  setFieldErrors(validation.errors);
-                  if (!validation.valid) {
-                    setMessage(validation.firstError);
-                    return;
+            {!authInitialized && (
+              <button
+                className="trip-btn trip-btn--primary"
+                disabled={!email.trim() || sendingMagic}
+                onClick={async () => {
+                  setMessage(null);
+                  setSendingMagic(true);
+                  try {
+                    const validation = validateDriverProfile({ displayName, vehicleLabel, phone, email });
+                    setDisplayName(validation.value.displayName);
+                    setVehicleLabel(validation.value.vehicleLabel);
+                    setPhone(validation.value.phone);
+                    setEmail(validation.value.email);
+                    setFieldErrors(validation.errors);
+                    if (!validation.valid) {
+                      setMessage(validation.firstError);
+                      return;
+                    }
+                    await setDriverProfileLocal(validation.value);
+                    await sendDriverMagicLink(validation.value.email);
+                    setMessage('認証メールを送信しました。メール本文の案内に従ってログインしてください。');
+                  } catch (error: any) {
+                    setMessage(error?.message ?? '認証メール送信に失敗しました');
+                  } finally {
+                    setSendingMagic(false);
                   }
-                  await setDriverProfileLocal(validation.value);
-                  await sendDriverMagicLink(validation.value.email);
-                  setMessage('認証メールを送信しました。iPhone PWAではメール本文の認証コードを登録済みログイン画面で入力してください。');
-                } catch (error: any) {
-                  setMessage(error?.message ?? '認証メール送信に失敗しました');
-                } finally {
-                  setSendingMagic(false);
-                }
-              }}
-            >
-              {sendingMagic ? '送信中…' : '認証メールを送信'}
-            </button>
-            <button
-              className="trip-btn trip-btn--primary"
-              disabled={profileLocked || saving}
-              onClick={async () => {
-                setSaving(true);
-                setMessage(null);
-                try {
-                  const validation = validateDriverProfile({ displayName, vehicleLabel, phone, email });
-                  setDisplayName(validation.value.displayName);
-                  setVehicleLabel(validation.value.vehicleLabel);
-                  setPhone(validation.value.phone);
-                  setEmail(validation.value.email);
-                  setFieldErrors(validation.errors);
-                  if (!validation.valid) {
-                    setMessage(validation.firstError);
-                    return;
+                }}
+              >
+                {sendingMagic ? '送信中…' : '認証メールを送信'}
+              </button>
+            )}
+            {authInitialized && approvalStatus === 'unregistered' && (
+              <button
+                className="trip-btn trip-btn--primary"
+                disabled={saving}
+                onClick={async () => {
+                  setSaving(true);
+                  setMessage(null);
+                  try {
+                    const validation = validateDriverProfile({ displayName, vehicleLabel, phone, email });
+                    setDisplayName(validation.value.displayName);
+                    setVehicleLabel(validation.value.vehicleLabel);
+                    setPhone(validation.value.phone);
+                    setEmail(validation.value.email);
+                    setFieldErrors(validation.errors);
+                    if (!validation.valid) {
+                      setMessage(validation.firstError);
+                      return;
+                    }
+                    await setDriverProfileLocal(validation.value);
+                    await hydrateRemoteSyncState();
+                    const identity = await getDriverIdentity();
+                    setDisplayName(identity.displayName);
+                    setVehicleLabel(identity.vehicleLabel);
+                    setPhone(identity.phone);
+                    setEmail(identity.email || validation.value.email);
+                    setAuthInitialized(identity.authInitialized);
+                    setProfileComplete(identity.profileComplete);
+                    setApprovalStatus(identity.approvalStatus);
+                    if (identity.approvalStatus === 'approved') {
+                      await runRemoteSync('profile-save');
+                      setMessage('承認済みの状態を確認し、同期を再開しました。');
+                    } else if (identity.approvalStatus === 'pending') {
+                      setMessage('承認申請を送信しました。管理者の承認をお待ちください。');
+                    } else {
+                      setMessage('承認申請の状態を確認できませんでした。通信状態を確認して、もう一度お試しください。');
+                    }
+                  } catch (error: any) {
+                    setMessage(enrollmentErrorMessage(error));
+                  } finally {
+                    setSaving(false);
                   }
-                  await setDriverProfileLocal(validation.value);
-                  await hydrateRemoteSyncState();
-                  await runRemoteSync('profile-save');
-                  const identity = await getDriverIdentity();
-                  setAuthInitialized(identity.authInitialized);
-                  setProfileComplete(identity.profileComplete);
-                  setApprovalStatus(identity.approvalStatus);
-                  setMessage('端末プロフィールを保存しました');
-                } catch (error: any) {
-                  setMessage(
-                    getDriverProfileEnrollmentErrorMessage(error)
-                      ?? error?.message
-                      ?? '保存に失敗しました',
-                  );
-                } finally {
-                  setSaving(false);
-                }
-              }}
-            >
-              {saving
-                ? '保存中…'
-                : registrationGate.canRetryEnrollment
-                  ? '承認申請を再送'
-                  : '保存して同期'}
-            </button>
+                }}
+              >
+                {saving
+                  ? '送信中…'
+                  : registrationGate.canRetryEnrollment
+                    ? '承認申請を再送'
+                    : '保存して同期'}
+              </button>
+            )}
           </article>
 
           <article className="card settings-panel">
@@ -572,7 +631,7 @@ export default function SettingsScreen() {
                 {apkUrlCopying ? '最新版を確認中…' : '最新版APK URLをコピー'}
               </button>
             </div>
-            {isNative && (
+            {usesDriverAdminAccount && canOpenAdmin && (
               <Link
                 to="/admin"
                 className="trip-btn"

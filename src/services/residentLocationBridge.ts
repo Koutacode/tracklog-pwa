@@ -39,7 +39,6 @@ export type NativeResidentLocationSettings = {
   backgroundLocation: boolean;
   notifications: boolean;
   batteryOptimization: boolean;
-  exactAlarm: boolean;
   locationEnabled: boolean;
 };
 

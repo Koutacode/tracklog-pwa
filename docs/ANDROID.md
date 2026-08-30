@@ -52,7 +52,7 @@ npm run release:prepare
 
 ## 3. 実機インストール
 - 運行データを保持する端末では、アンインストールやデータ消去を行わず `adb -s <serial> install -r output\tracklog-assist-debug.apk` で更新する
-- 更新後はversionName/versionCode、起動、クラッシュ/ANR、バックグラウンド位置情報、通知、Exact Alarm、電池最適化除外、既存運行データの保持を確認する
+- 更新後はversionName/versionCode、起動、クラッシュ/ANR、端末の位置情報ON、正確／常時位置情報、通知、電池最適化除外、常駐位置サービス、既存運行データの保持を確認する
 - 再インストール時は同一署名キーを使用
 - 長期運用時はリリース署名鍵を管理する
 
@@ -89,8 +89,8 @@ npm run release:verify:apk
 - 位置情報: 常時許可（必要時）
 - 通知: 許可
 - 電池最適化: 除外推奨
-- Exact Alarm: 端末要件に応じて設定
-- アプリ内の `ネイティブ設定 > 一括セットアップ / 権限設定を開く` で、常時位置情報・通知・電池最適化・Exact Alarm を確認する
+- アプリ内の段階式端末設定で、未完了の項目だけを1つずつ確認する。各ボタンから対象のAndroid設定へ移動し、TrackLogへ戻った後に最新状態を自動判定する
+- TrackLogはExact Alarmを使用しないため、権限・初回設定・診断の対象に含めない
 
 ## 5. アプリ基本情報
 - appId: `com.tracklog.assist`

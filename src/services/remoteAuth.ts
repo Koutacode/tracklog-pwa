@@ -8,9 +8,12 @@ import { getStableDeviceKey } from './deviceIdentity';
 import {
   clearPersistedDriverAuthSession,
   clearAuthCodeVerifier,
+  adminAccessSupabase,
+  adminAccessUsesDriverSession,
   adminSupabase,
   driverAuthSupabase,
   driverSupabase,
+  getNativeDriverAdminAccessToken,
   restoreAuthCodeVerifier,
   snapshotAuthCodeVerifier,
   SUPABASE_CONFIGURED,
@@ -37,7 +40,7 @@ import {
   clearDriverExplicitSignOut,
   markDriverExplicitSignOut,
 } from './authStorageKeys';
-import { isPermanentDriverAuthFailure } from './driverAuthFailurePolicy';
+import { isPermanentDriverAuthFailure as isPermanentDriverAuthFailureDirect } from './driverAuthFailurePolicy';
 import {
   beginDriverAuthIntent,
   isCurrentDriverAuthIntent,
@@ -45,8 +48,10 @@ import {
 } from './driverAuthMutationLock';
 import {
   claimTracklogDeviceProfileViaFunction,
+  getTracklogAdminAccessStateViaFunction,
   migrateTracklogDeviceRecordsViaFunction,
 } from './tracklogPrivilegedApi';
+import { classifyAdminValidationFailure, resolveAdminSession } from './adminSessionPolicy';
 import {
   assertValidDriverProfile,
   normalizeEmailInput,
@@ -72,15 +77,136 @@ const WEB_DRIVER_CALLBACK_PATH = '/auth/driver/callback';
 const EMAIL_OTP_PATTERN = /^\d{6,10}$/;
 const EMAIL_OTP_ERROR_MESSAGE = 'メール本文に表示された認証コードをそのまま入力してください';
 
-export class DriverProfileEnrollmentError extends Error {
-  readonly code = 'driver_profile_enrollment_failed';
+export type DriverAuthWorkflowErrorCode =
+  | 'driver_otp_session_invalid'
+  | 'driver_auth_email_mismatch'
+  | 'driver_auth_session_refresh_failed'
+  | 'driver_enrollment_session_changed'
+  | 'driver_native_credentials_update_failed'
+  | 'driver_profile_enrollment_failed';
+
+class DriverAuthWorkflowError extends Error {
+  readonly code: DriverAuthWorkflowErrorCode;
   readonly cause: unknown;
 
-  constructor(cause?: unknown) {
-    super('メール認証は完了しましたが、端末の承認申請を送信できませんでした。通信状態を確認して、承認申請を再送してください。');
-    this.name = 'DriverProfileEnrollmentError';
+  constructor(
+    name: string,
+    code: DriverAuthWorkflowErrorCode,
+    message: string,
+    cause?: unknown,
+  ) {
+    super(message);
+    this.name = name;
+    this.code = code;
     this.cause = cause;
   }
+}
+
+export class DriverOtpSessionError extends DriverAuthWorkflowError {
+  constructor(cause?: unknown) {
+    super(
+      'DriverOtpSessionError',
+      'driver_otp_session_invalid',
+      'メール認証後のセッションを取得できませんでした。最新の認証メールからもう一度お試しください。',
+      cause,
+    );
+  }
+}
+
+export class DriverAuthEmailMismatchError extends DriverAuthWorkflowError {
+  constructor(lockedEmail?: string) {
+    super(
+      'DriverAuthEmailMismatchError',
+      'driver_auth_email_mismatch',
+      lockedEmail
+        ? `この端末は ${lockedEmail} のアカウントに紐づいています。同じメールで再認証してください。`
+        : '認証したメールアドレスが登録内容と一致しません。登録中のメールアドレスを確認してください。',
+    );
+  }
+}
+
+export class DriverAuthSessionRefreshError extends DriverAuthWorkflowError {
+  constructor(cause?: unknown) {
+    super(
+      'DriverAuthSessionRefreshError',
+      'driver_auth_session_refresh_failed',
+      'ログイン状態を更新できませんでした。通信状態を確認して、もう一度お試しください。',
+      cause,
+    );
+  }
+}
+
+export class DriverEnrollmentSessionChangedError extends DriverAuthWorkflowError {
+  constructor() {
+    super(
+      'DriverEnrollmentSessionChangedError',
+      'driver_enrollment_session_changed',
+      '認証セッションが更新されたため、端末登録をやり直してください。',
+    );
+  }
+}
+
+export class DriverNativeCredentialUpdateError extends DriverAuthWorkflowError {
+  constructor(cause?: unknown) {
+    super(
+      'DriverNativeCredentialUpdateError',
+      'driver_native_credentials_update_failed',
+      'メール認証は完了しましたが、端末のバックグラウンド認証情報を保存できませんでした。通信状態を確認して、認証状態を更新してください。',
+      cause,
+    );
+  }
+}
+
+export class DriverProfileEnrollmentError extends DriverAuthWorkflowError {
+  constructor(cause?: unknown) {
+    super(
+      'DriverProfileEnrollmentError',
+      'driver_profile_enrollment_failed',
+      'メール認証は完了しましたが、端末の承認申請を送信できませんでした。通信状態を確認して、承認申請を再送してください。',
+      cause,
+    );
+  }
+}
+
+export async function ensureNativeDriverCredentialInstallation(input: {
+  required: boolean;
+  install: () => Promise<boolean>;
+}): Promise<void> {
+  if (!input.required) return;
+  try {
+    if (await input.install()) return;
+  } catch (error) {
+    if (error instanceof DriverAuthWorkflowError) throw error;
+    throw new DriverNativeCredentialUpdateError(error);
+  }
+  throw new DriverNativeCredentialUpdateError(
+    new Error('Native credential installation returned false'),
+  );
+}
+
+export function getDriverAuthWorkflowErrorCode(error: unknown): DriverAuthWorkflowErrorCode | null {
+  const code = error && typeof error === 'object' && 'code' in error
+    ? (error as { code?: unknown }).code
+    : null;
+  return code === 'driver_otp_session_invalid'
+    || code === 'driver_auth_email_mismatch'
+    || code === 'driver_auth_session_refresh_failed'
+    || code === 'driver_enrollment_session_changed'
+    || code === 'driver_native_credentials_update_failed'
+    || code === 'driver_profile_enrollment_failed'
+    ? code
+    : null;
+}
+
+export function isPermanentDriverAuthFailure(error: unknown): boolean {
+  let current: unknown = error;
+  for (let depth = 0; current != null && depth < 5; depth += 1) {
+    if (isPermanentDriverAuthFailureDirect(current)) return true;
+    current = typeof current === 'object' && 'cause' in current
+      ? (current as { cause?: unknown }).cause
+      : null;
+  }
+  return false;
 }
 
 export type NativeAuthStartOptions = {
@@ -159,12 +285,48 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+function isAndroidNativePlatform() {
+  return Capacitor.isNativePlatform() && Capacitor.getPlatform() === 'android';
+}
+
 function normalizeText(value: string | null | undefined) {
   return value?.trim() ?? '';
 }
 
 function normalizeEmail(value: string | null | undefined) {
   return normalizeEmailInput(value);
+}
+
+export function validateVerifiedDriverOtpSession(
+  session: Session | null,
+  expectedEmail: string,
+): Session {
+  if (!session?.access_token || !session.refresh_token || !session.user) {
+    throw new DriverOtpSessionError();
+  }
+  if (!sameEmailAddress(normalizeEmail(session.user.email), normalizeEmail(expectedEmail))) {
+    throw new DriverAuthEmailMismatchError();
+  }
+  return session;
+}
+
+export function selectDriverEnrollmentAccessToken(input: {
+  expectedAccessToken?: string | null;
+  currentAccessToken: string;
+  approvalStatus: DriverApprovalStatus;
+}) {
+  const expectedAccessToken = input.expectedAccessToken?.trim() || '';
+  if (expectedAccessToken && expectedAccessToken !== input.currentAccessToken) {
+    throw new DriverEnrollmentSessionChangedError();
+  }
+  if (
+    expectedAccessToken
+    || input.approvalStatus === 'unregistered'
+    || input.approvalStatus === 'pending'
+  ) {
+    return expectedAccessToken || input.currentAccessToken;
+  }
+  return '';
 }
 
 function normalizeApprovalStatus(value: string | null | undefined): DriverApprovalStatus {
@@ -232,8 +394,6 @@ export function isDriverProfileComplete(input: {
   return validateDriverProfile({ displayName, vehicleLabel, email, phone }).valid;
 }
 
-export { isPermanentDriverAuthFailure } from './driverAuthFailurePolicy';
-
 export function deriveDriverIdentityFromPersistence(input: {
   configured: boolean;
   deviceId: string;
@@ -292,11 +452,11 @@ async function claimTracklogDeviceProfile(input: {
   latestLat?: number | null;
   latestLng?: number | null;
   latestAccuracy?: number | null;
-}, enrollment?: {
-  accessToken?: string | null;
+}, options?: {
   client?: SupabaseClient | null;
+  accessToken?: string | null;
 }) {
-  const client = enrollment?.client ?? driverSupabase;
+  const client = options?.client ?? driverSupabase;
   if (!client) return null;
   return claimTracklogDeviceProfileViaFunction({
     deviceId: input.deviceId,
@@ -314,7 +474,7 @@ async function claimTracklogDeviceProfile(input: {
     lastSeenAt: nowIso(),
   }, {
     client,
-    accessToken: enrollment?.accessToken,
+    accessToken: options?.accessToken,
   }) as Promise<ClaimedDeviceProfile | null>;
 }
 
@@ -395,9 +555,15 @@ export async function getDriverIdentity(): Promise<DriverIdentity> {
 
 async function getProfileIdentity() {
   if (!SUPABASE_CONFIGURED || !driverAuthSupabase) return null;
-  await restoreNativeResidentLocationSession();
-  const { data, error } = await driverAuthSupabase.auth.getSession();
-  if (error) throw error;
+  let result: Awaited<ReturnType<typeof driverAuthSupabase.auth.getSession>>;
+  try {
+    await restoreNativeResidentLocationSession();
+    result = await driverAuthSupabase.auth.getSession();
+  } catch (error) {
+    throw new DriverAuthSessionRefreshError(error);
+  }
+  const { data, error } = result;
+  if (error) throw new DriverAuthSessionRefreshError(error);
   const session = data.session;
   if (!session?.user) return null;
   return {
@@ -407,25 +573,28 @@ async function getProfileIdentity() {
   };
 }
 
-export async function initializeDriverIdentity(options?: {
+export type InitializeDriverIdentityOptions = {
   enrollmentAccessToken?: string | null;
   expectedAuthIntent?: number;
   skipNativeSessionRestore?: boolean;
-}): Promise<DriverIdentity> {
+};
+
+export async function initializeDriverIdentity(
+  options?: InitializeDriverIdentityOptions,
+): Promise<DriverIdentity> {
   if (!SUPABASE_CONFIGURED || !driverAuthSupabase) {
     return getDriverIdentity();
   }
 
   const assertCurrentAuthIntent = () => {
     if (
-      options?.expectedAuthIntent != null &&
-      !isCurrentDriverAuthIntent(options.expectedAuthIntent)
+      options?.expectedAuthIntent != null
+      && !isCurrentDriverAuthIntent(options.expectedAuthIntent)
     ) {
       throw new Error('認証処理は新しい操作により中止されました');
     }
   };
   assertCurrentAuthIntent();
-
   const { stableDeviceKey } = await getStableDeviceKey();
   const persistedIdentity = await getPersistedDriverIdentity(stableDeviceKey, null, {
     allowPersistedAuth: true,
@@ -440,6 +609,9 @@ export async function initializeDriverIdentity(options?: {
     if (error) throw error;
     session = data.session;
   } catch (error) {
+    if (options?.enrollmentAccessToken || options?.expectedAuthIntent != null) {
+      throw new DriverAuthSessionRefreshError(error);
+    }
     if (isPermanentDriverAuthFailure(error)) {
       return getPersistedDriverIdentity(stableDeviceKey, null, {
         allowPersistedAuth: false,
@@ -449,6 +621,9 @@ export async function initializeDriverIdentity(options?: {
   }
 
   if (!session) {
+    if (options?.enrollmentAccessToken || options?.expectedAuthIntent != null) {
+      throw new DriverAuthSessionRefreshError(new Error('Driver session was not persisted'));
+    }
     await setMeta(META_DEVICE_ID, stableDeviceKey);
     return getPersistedDriverIdentity(stableDeviceKey, null, {
       allowPersistedAuth: false,
@@ -459,17 +634,11 @@ export async function initializeDriverIdentity(options?: {
   if (!user) {
     throw new Error('ユーザー情報の初期化に失敗しました');
   }
-  const explicitEnrollmentAccessToken = options?.enrollmentAccessToken?.trim() || '';
-  if (explicitEnrollmentAccessToken && explicitEnrollmentAccessToken !== session.access_token) {
-    throw new Error('認証セッションが更新されたため、端末登録をやり直してください');
-  }
-  const shouldUseEnrollmentSession =
-    !!explicitEnrollmentAccessToken ||
-    persistedIdentity.approvalStatus === 'unregistered' ||
-    persistedIdentity.approvalStatus === 'pending';
-  const enrollmentAccessToken = shouldUseEnrollmentSession
-    ? explicitEnrollmentAccessToken || session.access_token
-    : '';
+  const enrollmentAccessToken = selectDriverEnrollmentAccessToken({
+    expectedAccessToken: options?.enrollmentAccessToken,
+    currentAccessToken: session.access_token,
+    approvalStatus: persistedIdentity.approvalStatus,
+  });
   const enrollmentClient = enrollmentAccessToken ? driverAuthSupabase : driverSupabase;
 
   const [savedDisplayName, savedVehicleLabel, currentDeviceId, savedDriverPhone, savedDriverEmail] = await Promise.all([
@@ -638,17 +807,52 @@ export async function setDriverProfileLocal(input: {
 
   const identity = await getDriverIdentity();
   if (identity.configured && identity.authInitialized && identity.deviceId) {
-    const claimedProfile = await claimTracklogDeviceProfile({
-      deviceId: identity.deviceId,
-      displayName: normalized.displayName,
-      vehicleLabel: normalized.vehicleLabel,
-      driverPhone: normalized.phone,
-      driverEmail: normalized.email,
-    }, {
-      client: sessionProfile?.accessToken ? driverAuthSupabase : driverSupabase,
-      accessToken: sessionProfile?.accessToken,
-    });
-    await setMeta(META_DRIVER_APPROVAL_STATUS, normalizeApprovalStatus(claimedProfile?.approval_status));
+    const deviceId = identity.deviceId;
+    const nativeCredentialInstallRequired = isAndroidNativePlatform() && Boolean(sessionProfile?.accessToken);
+    const enrollmentAuthIntent = nativeCredentialInstallRequired ? beginDriverAuthIntent() : null;
+    if (enrollmentAuthIntent != null) {
+      invalidateNativeResidentLocationSessionRestore();
+    }
+    const assertCurrentEnrollmentIntent = () => {
+      if (
+        enrollmentAuthIntent != null
+        && !isCurrentDriverAuthIntent(enrollmentAuthIntent)
+      ) {
+        throw new Error('認証処理は新しい操作により中止されました');
+      }
+    };
+    try {
+      await withDriverAuthMutation(async () => {
+        assertCurrentEnrollmentIntent();
+        await ensureNativeDriverCredentialInstallation({
+          required: nativeCredentialInstallRequired,
+          install: async () => {
+            const installed = await installNativeResidentLocationAuthorization(
+              enrollmentAuthIntent ?? undefined,
+            );
+            assertCurrentEnrollmentIntent();
+            return installed;
+          },
+        });
+        assertCurrentEnrollmentIntent();
+        const claimedProfile = await claimTracklogDeviceProfile({
+          deviceId,
+          displayName: normalized.displayName,
+          vehicleLabel: normalized.vehicleLabel,
+          driverPhone: normalized.phone,
+          driverEmail: normalized.email,
+        }, {
+          client: sessionProfile?.accessToken ? driverAuthSupabase : driverSupabase,
+          accessToken: sessionProfile?.accessToken,
+        });
+        assertCurrentEnrollmentIntent();
+        await setMeta(META_DRIVER_APPROVAL_STATUS, normalizeApprovalStatus(claimedProfile?.approval_status));
+      });
+    } catch (error) {
+      throw error instanceof DriverAuthWorkflowError
+        ? error
+        : new DriverProfileEnrollmentError(error);
+    }
   }
   requestImmediateRemoteSync('profile-save');
 }
@@ -922,37 +1126,50 @@ async function discardNativeAuthAttempt(attempt: NativeAuthAttempt | null) {
 }
 
 export async function getAdminSession(): Promise<AdminSession> {
-  if (!SUPABASE_CONFIGURED || !adminSupabase) {
-    return {
-      configured: false,
-      authenticated: false,
-      isAdmin: false,
-      email: null,
-    };
+  let validatedNativeAccessToken = '';
+  try {
+    return await resolveAdminSession({
+      configured: SUPABASE_CONFIGURED && !!adminAccessSupabase,
+      validateUser: async () => {
+        if (!adminAccessSupabase) return null;
+
+        if (adminAccessUsesDriverSession) {
+          const accessToken = await getNativeDriverAdminAccessToken();
+          if (!accessToken) return null;
+          // driverSupabase is configured with Supabase's accessToken callback,
+          // which deliberately disables its auth API. Validate the native token
+          // with the normal auth client, then reuse that exact token for the
+          // server-side admin allowlist check below.
+          if (!driverAuthSupabase) return null;
+          const { data, error } = await driverAuthSupabase.auth.getUser(accessToken);
+          if (error) throw error;
+          validatedNativeAccessToken = accessToken;
+          return data.user ? { email: data.user.email ?? null } : null;
+        }
+
+        if (!adminSupabase) return null;
+        const { data: sessionData, error: sessionError } = await adminSupabase.auth.getSession();
+        if (sessionError) throw sessionError;
+        if (!sessionData.session?.access_token) return null;
+        const { data, error } = await adminSupabase.auth.getUser(sessionData.session.access_token);
+        if (error) throw error;
+        return data.user ? { email: data.user.email ?? null } : null;
+      },
+      getServerAccessState: () => getTracklogAdminAccessStateViaFunction(
+        validatedNativeAccessToken ? { accessToken: validatedNativeAccessToken } : undefined,
+      ),
+    });
+  } catch (error) {
+    if (classifyAdminValidationFailure(error) === 'definitive') {
+      return {
+        configured: SUPABASE_CONFIGURED,
+        authenticated: false,
+        isAdmin: false,
+        email: null,
+      };
+    }
+    throw error;
   }
-  const { data } = await adminSupabase.auth.getSession();
-  const session = data.session;
-  if (!session?.user) {
-    return {
-      configured: true,
-      authenticated: false,
-      isAdmin: false,
-      email: null,
-    };
-  }
-  const { data: adminRows, error: adminError } = await adminSupabase
-    .from('admin_users')
-    .select('email')
-    .eq('enabled', true)
-    .ilike('email', session.user.email ?? '')
-    .limit(1);
-  if (adminError) throw adminError;
-  return {
-    configured: true,
-    authenticated: true,
-    isAdmin: (adminRows ?? []).length > 0,
-    email: session.user.email ?? null,
-  };
 }
 
 export async function sendAdminMagicLink(
@@ -1120,7 +1337,7 @@ export async function verifyDriverEmailOtp(email: string, token: string): Promis
   ]);
   const lockedEmail = confirmed === 'true' ? normalizeEmail(savedEmail) : '';
   if (lockedEmail && !sameEmailAddress(normalized, lockedEmail)) {
-    throw new Error(`この端末は ${lockedEmail} のアカウントに紐づいています。同じメールで再認証してください。`);
+    throw new DriverAuthEmailMismatchError(lockedEmail);
   }
   const authIntent = beginDriverAuthIntent();
   invalidateNativeResidentLocationSessionRestore();
@@ -1131,13 +1348,7 @@ export async function verifyDriverEmailOtp(email: string, token: string): Promis
       type: 'email',
     });
     if (error) throw error;
-    const session = data.session;
-    if (!session?.access_token || !session.refresh_token || !session.user) {
-      throw new Error('メール認証後のセッションを取得できませんでした');
-    }
-    if (!sameEmailAddress(normalizeEmail(session.user.email), normalized)) {
-      throw new Error('認証したメールアドレスが登録内容と一致しません');
-    }
+    const session = validateVerifiedDriverOtpSession(data.session, normalized);
     if (!isCurrentDriverAuthIntent(authIntent)) {
       throw new Error('認証処理は新しい操作により中止されました');
     }
@@ -1149,8 +1360,15 @@ export async function verifyDriverEmailOtp(email: string, token: string): Promis
       throw new Error('認証処理は新しい操作により中止されました');
     }
     clearDriverExplicitSignOut();
-    await installNativeResidentLocationAuthorization(authIntent).catch(error => {
-      console.warn('[resident-location] confirmed login could not be installed natively', error);
+    await ensureNativeDriverCredentialInstallation({
+      required: isAndroidNativePlatform(),
+      install: async () => {
+        const installed = await installNativeResidentLocationAuthorization(authIntent);
+        if (!isCurrentDriverAuthIntent(authIntent)) {
+          throw new Error('認証処理は新しい操作により中止されました');
+        }
+        return installed;
+      },
     });
     if (!isCurrentDriverAuthIntent(authIntent)) {
       throw new Error('認証処理は新しい操作により中止されました');
@@ -1158,16 +1376,18 @@ export async function verifyDriverEmailOtp(email: string, token: string): Promis
     return session;
   });
   if (Capacitor.isNativePlatform()) await clearNativeAuthStartStateForRole('driver');
+  let identity: DriverIdentity;
   try {
-    return await initializeDriverIdentity({
+    identity = await initializeDriverIdentity({
       enrollmentAccessToken: verifiedSession.access_token,
       expectedAuthIntent: authIntent,
       skipNativeSessionRestore: true,
     });
   } catch (error) {
-    if (error instanceof DriverProfileEnrollmentError) throw error;
+    if (error instanceof DriverAuthWorkflowError) throw error;
     throw new DriverProfileEnrollmentError(error);
   }
+  return identity;
 }
 
 export async function signOutDriver(): Promise<void> {
@@ -1241,10 +1461,9 @@ export async function signOutAdmin(): Promise<void> {
 }
 
 export function onAdminAuthStateChange(callback: () => void) {
-  if (!adminSupabase) return () => undefined;
-  const { data } = adminSupabase.auth.onAuthStateChange(() => {
-    callback();
-  });
+  const client = adminAccessUsesDriverSession ? driverAuthSupabase : adminSupabase;
+  if (!client) return () => undefined;
+  const { data } = client.auth.onAuthStateChange(() => callback());
   return () => {
     data.subscription.unsubscribe();
   };

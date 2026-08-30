@@ -8,6 +8,7 @@ import NativeUpdateNotice from './NativeUpdateNotice';
 import NativeExpresswayPromptBootstrap from './NativeExpresswayPromptBootstrap';
 import PwaBootstrap from './PwaBootstrap';
 import RequireDriverProfile from './RequireDriverProfile';
+import RequireAdminAccess from './RequireAdminAccess';
 import RemoteSyncBootstrap from './RemoteSyncBootstrap';
 import RouteTrackingSupervisor from './RouteTrackingSupervisor';
 import BreakToRestConfirmationGate from './BreakToRestConfirmationGate';
@@ -21,7 +22,6 @@ import OfflineStatusBanner from '../ui/components/OfflineStatusBanner';
 const HomeScreen = lazy(() => import('../ui/screens/HomeScreen'));
 const TripDetail = lazy(() => import('../ui/screens/TripDetail'));
 const HistoryScreen = lazy(() => import('../ui/screens/HistoryScreen'));
-const RouteMapScreen = lazy(() => import('../ui/screens/RouteMapScreen'));
 const ReportDashboard = lazy(() => import('../ui/screens/ReportDashboard'));
 const SettingsScreen = lazy(() => import('../ui/screens/SettingsScreen'));
 const MessageInboxScreen = lazy(() => import('../ui/screens/MessageInboxScreen'));
@@ -116,7 +116,6 @@ function AppShell() {
           <Route path="/" element={<RequireDriverProfile><HomeScreen /></RequireDriverProfile>} />
           <Route path="/settings" element={<RequireDriverProfile><SettingsScreen /></RequireDriverProfile>} />
           <Route path="/trip/:tripId" element={<RequireDriverProfile><TripDetail /></RequireDriverProfile>} />
-          <Route path="/trip/:tripId/route" element={<RequireDriverProfile><RouteMapScreen /></RequireDriverProfile>} />
           <Route path="/history" element={<RequireDriverProfile><HistoryScreen /></RequireDriverProfile>} />
           <Route path="/report" element={<RequireDriverProfile><ReportDashboard /></RequireDriverProfile>} />
           <Route path="/messages" element={<RequireDriverProfile><MessageInboxScreen /></RequireDriverProfile>} />
@@ -125,9 +124,9 @@ function AppShell() {
           <Route path="/admin/login" element={<Navigate to="/login" replace />} />
           <Route path="/auth/driver/callback" element={<AuthCallbackScreen role="driver" />} />
           <Route path="/auth/admin/callback" element={<AuthCallbackScreen role="admin" />} />
-          <Route path="/admin" element={<AdminDashboard />} />
-          <Route path="/admin/devices/:deviceId" element={<AdminDeviceDetail />} />
-          <Route path="/admin/trips/:tripId" element={<AdminTripDetail />} />
+          <Route path="/admin" element={<RequireAdminAccess><AdminDashboard /></RequireAdminAccess>} />
+          <Route path="/admin/devices/:deviceId" element={<RequireAdminAccess><AdminDeviceDetail /></RequireAdminAccess>} />
+          <Route path="/admin/trips/:tripId" element={<RequireAdminAccess><AdminTripDetail /></RequireAdminAccess>} />
           <Route path="*" element={<NotFoundScreen />} />
         </Routes>
       </Suspense>

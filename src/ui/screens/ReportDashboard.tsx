@@ -128,6 +128,7 @@ export default function ReportDashboard() {
       events: liveEvents,
       dayRuns: liveVm.dayRuns,
       label: currentLabel,
+      currentTs: new Date().toISOString(),
     });
     await saveReportTrip(nextTrip);
     await loadTrips();
