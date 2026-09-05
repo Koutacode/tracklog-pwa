@@ -63,6 +63,7 @@ import {
 import {
   canUseNativeResidentLocation,
   drainNativeResidentRoutePointQueue,
+  resolveNativeLocationSetupAction,
   resolveUnapprovedNativeLocationAction,
 } from './nativeResidentLocationPolicy';
 import {
@@ -272,16 +273,23 @@ export default function RouteTrackingSupervisor() {
         }
 
         const readiness = await checkNativeSetupReadiness({ fresh: native });
+        if (disposed || syncEpoch !== lifecycleEpoch) return;
         // The final setup step verifies that this supervisor actually started
         // the resident service. Gate this bootstrap on the five physical
         // settings only, otherwise `running` could never become true.
-        const setupCanStart = native ? readiness.permissionsReady : readiness.ready;
-        if (!setupCanStart) {
+        const setupAction = native
+          ? resolveNativeLocationSetupAction(readiness)
+          : readiness.ready ? 'start' : 'stop';
+        if (setupAction === 'wait-for-location') {
+          // The native foreground service owns OFF/ON recovery. Preserve its
+          // durable trip, authorization, and pending expressway confirmation.
+          await stopWebLocationWork();
+          return;
+        }
+        if (setupAction === 'stop') {
           await stopAllLocationWork('permission-denied');
           return;
         }
-
-        if (disposed || syncEpoch !== lifecycleEpoch) return;
 
         startLocationHeartbeat();
         if (native) {
