@@ -11,6 +11,42 @@ public class ResidentExpresswayDetectionPolicyTest {
             ResidentExpresswayDetectionPolicy.Config.DEFAULT;
 
     @Test
+    public void restoredEndResponseBeforeFirstFixCreatesValidTripState() {
+        ResidentExpresswayDetectionPolicy.State restored =
+                ResidentExpresswayDetectionPolicy.afterRestoredEndPrompt(null, "trip");
+        assertEquals("trip", restored.tripId);
+        assertFalse(restored.keepSuppressed);
+        assertEquals(-1L, restored.speedBelowSinceMs);
+        ResidentExpresswayDetectionPolicy.Result next = ResidentExpresswayDetectionPolicy.advance(
+                restored, point(10_000L, 10d), CONFIG, true, true);
+        assertEquals(ResidentExpresswayDetectionPolicy.EffectKind.NONE, next.effect.kind);
+        assertEquals("trip", next.state.tripId);
+    }
+
+    @Test
+    public void restoredEndResponseAfterFirstFixPreservesClockButClearsMotionEvidence() {
+        ResidentExpresswayDetectionPolicy.State previous = advance(state("trip"), point(1_000L, 15d), true).state;
+        previous.speedBelowSinceMs = 1_000L;
+        previous.keepSuppressed = true;
+        ResidentExpresswayDetectionPolicy.State restored =
+                ResidentExpresswayDetectionPolicy.afterRestoredEndPrompt(previous, "trip");
+        assertEquals(previous.lastMotionAtMs, restored.lastMotionAtMs);
+        assertEquals(-1L, restored.speedBelowSinceMs);
+        assertFalse(restored.keepSuppressed);
+        assertEquals(1_000L, previous.speedBelowSinceMs);
+    }
+
+    @Test
+    public void restoredEndResponseDoesNotCarryClockFromAnotherTrip() {
+        ResidentExpresswayDetectionPolicy.State previous = state("other");
+        previous.lastMotionAtMs = 1_000L;
+        ResidentExpresswayDetectionPolicy.State restored =
+                ResidentExpresswayDetectionPolicy.afterRestoredEndPrompt(previous, "trip");
+        assertEquals("trip", restored.tripId);
+        assertEquals(-1L, restored.lastMotionAtMs);
+    }
+
+    @Test
     public void startRequiresAccelerationSustainedSpeedAndTwoStrongSignalsHeldTwelveSeconds() {
         ResidentExpresswayDetectionPolicy.State state = state("trip");
         state = advance(state, point(1_000L, 50d), false).state;

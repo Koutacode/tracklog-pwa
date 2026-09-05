@@ -203,6 +203,7 @@ const VALID_EVENT_TYPES: Set<string> = new Set([
   'wait_start', 'wait_end',
   'drive_start', 'drive_end',
   'work_start', 'work_end',
+  'refuel',
   'expressway', 'expressway_start', 'expressway_end',
 ]);
 

@@ -818,7 +818,6 @@ export default function HomeScreen() {
           <details id="home-stopped-more" className="home-detail-drawer home-stopped-more">
             <summary>その他</summary>
             <div className="home-detail-drawer__links">
-              <Link to="/report">運行日報</Link>
               <Link to="/settings">同期・端末設定</Link>
               {canOpenAdmin && <Link to="/admin">管理画面</Link>}
             </div>
@@ -994,7 +993,6 @@ export default function HomeScreen() {
           <summary>詳細・設定</summary>
           <div className="home-detail-drawer__links">
             <Link to={`/trip/${tripId}`}>運行詳細</Link>
-            <Link to="/report">運行日報</Link>
             {canOpenAdmin && <Link to="/admin">管理画面</Link>}
             <Link to="/settings">同期・端末設定</Link>
             {isNative && <button type="button" onClick={() => setNativeSettingsOpen(true)}>位置記録の設定</button>}

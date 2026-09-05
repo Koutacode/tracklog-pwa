@@ -396,6 +396,15 @@ final class ResidentExpresswayDetectionPolicy {
         return state;
     }
 
+    static State afterRestoredEndPrompt(State previous, String tripId) {
+        // An END probe is persisted independently of the in-memory motion samples.
+        // Its response can arrive before the first location after service recreation.
+        State current = previous != null && previous.tripId.equals(tripId)
+                ? previous
+                : new State(tripId);
+        return afterTransition(current, false);
+    }
+
     private static Clock resolveClock(State state, Point point) {
         boolean hasMonotonic = !point.monotonicSessionId.isEmpty()
                 && point.elapsedRealtimeMs >= 0L;

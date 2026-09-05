@@ -107,6 +107,7 @@ final class ResidentLocationUploader {
 
         int status;
         try {
+            if (!canSendLocation(appContext)) return Outcome.RETRY;
             status = postLocation(authorization, location);
         } catch (Exception exception) {
             Log.w(TAG, "Latest location upload failed; retrying on a later location", exception);
@@ -127,6 +128,7 @@ final class ResidentLocationUploader {
 
         AuthorizationRefreshResult refreshResult;
         try {
+            if (!canSendLocation(appContext)) return Outcome.RETRY;
             refreshResult = refreshAfterUnauthorized(
                     appContext,
                     authorization,
@@ -144,6 +146,7 @@ final class ResidentLocationUploader {
         }
 
         try {
+            if (!canSendLocation(appContext)) return Outcome.RETRY;
             int retryStatus = postLocation(refreshed, location);
             ResidentLocationUploadPolicy.Action retryAction =
                     ResidentLocationUploadPolicy.classifyStatus(retryStatus, true);
@@ -181,6 +184,9 @@ final class ResidentLocationUploader {
         }
         HttpResult result;
         try {
+            if (!canSendLocation(appContext)) {
+                return ExpresswayProbeResult.retry(ExpresswayProbeOutcome.NETWORK_RETRY);
+            }
             result = postExpresswayProbe(snapshot.authorization, probe);
         } catch (Exception exception) {
             Log.w(TAG, "Expressway road-signal request failed; durable probe retained");
@@ -189,6 +195,9 @@ final class ResidentLocationUploader {
         if (result.statusCode == 401) {
             AuthorizationRefreshResult refresh;
             try {
+                if (!canSendLocation(appContext)) {
+                    return ExpresswayProbeResult.retry(ExpresswayProbeOutcome.NETWORK_RETRY);
+                }
                 refresh = refreshAfterUnauthorized(
                         appContext,
                         snapshot.authorization,
@@ -204,6 +213,9 @@ final class ResidentLocationUploader {
                 return ExpresswayProbeResult.retry(ExpresswayProbeOutcome.AUTHORIZATION_RETRY);
             }
             try {
+                if (!canSendLocation(appContext)) {
+                    return ExpresswayProbeResult.retry(ExpresswayProbeOutcome.NETWORK_RETRY);
+                }
                 result = postExpresswayProbe(refresh.authorization, probe);
             } catch (Exception exception) {
                 Log.w(TAG, "Expressway road-signal retry failed; durable probe retained");
@@ -307,6 +319,13 @@ final class ResidentLocationUploader {
             boolean applied = cleared && markAuthorizationMutationApplied(clearEpoch);
             return applied ? Outcome.STOPPED_AUTHORIZATION : Outcome.RETRY;
         }
+    }
+
+    private static boolean canSendLocation(Context context) {
+        // A queued upload or 401 refresh may outlive the location ON state.
+        // Recheck before each new request without mutating authorization or durable probes.
+        return ResidentLocationState.isEligible(context)
+                && ResidentLocationState.getReadiness(context).isReady();
     }
 
     private static int postLocation(

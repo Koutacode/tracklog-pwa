@@ -3,10 +3,12 @@ import type { TripEvent, TripEventType } from '../../domain/reportTypes';
 
 export type TripDetailWorkTimelineRow = {
   key: string;
+  kind: 'interval' | 'instant';
   label: string;
   startMinute: number;
   endMinute?: number;
   detail?: string;
+  liters?: number;
   continuesFromPreviousDay?: boolean;
   continuesToNextDay?: boolean;
 };
@@ -25,6 +27,20 @@ const WORK_TIMELINE_PAIRS: Array<{ start: TripEventType; end: TripEventType; lab
   { start: 'wait_start', end: 'wait_end', label: '待機' },
   { start: 'work_start', end: 'work_end', label: '業務' },
 ];
+
+function getRefuelLiters(event: TripEvent): number | undefined {
+  const liters = event.extras?.liters;
+  return typeof liters === 'number' && Number.isFinite(liters) && liters > 0
+    ? liters
+    : undefined;
+}
+
+function formatRefuelLiters(liters: number): string {
+  return new Intl.NumberFormat('ja-JP', {
+    minimumFractionDigits: 1,
+    maximumFractionDigits: 3,
+  }).format(liters);
+}
 
 export function buildTripDetailWorkTimeline(
   timeline: ProjectedReportTimelineEvent[],
@@ -45,6 +61,7 @@ export function buildTripDetailWorkTimelineForDay(
   }>>();
   const absoluteRows: Array<{
     key: string;
+    kind: 'interval';
     label: string;
     startMinute: number;
     endMinute?: number;
@@ -77,6 +94,7 @@ export function buildTripDetailWorkTimelineForDay(
     openByStartType.set(endDefinition.start, open);
     absoluteRows.push({
       key: `${endDefinition.start}-${start?.index ?? `carry-${index}`}-${index}`,
+      kind: 'interval',
       label: endDefinition.label,
       startMinute: start?.absoluteMinute ?? Number.NEGATIVE_INFINITY,
       endMinute: projected.absoluteMinute,
@@ -89,6 +107,7 @@ export function buildTripDetailWorkTimelineForDay(
     for (const start of openByStartType.get(pair.start) ?? []) {
       absoluteRows.push({
         key: `${pair.start}-${start.index}-open`,
+        kind: 'interval',
         label: pair.label,
         startMinute: start.absoluteMinute,
         detail: start.event.customer || start.event.address,
@@ -106,6 +125,7 @@ export function buildTripDetailWorkTimelineForDay(
     const continuesToNextDay = row.endMinute == null ? !isLastDay : absoluteEnd > targetEnd;
     return [{
       key: `${targetDayIndex}-${row.key}`,
+      kind: row.kind,
       label: row.label,
       startMinute: Math.max(0, row.startMinute - targetStart),
       endMinute: row.endMinute == null && isLastDay
@@ -117,10 +137,35 @@ export function buildTripDetailWorkTimelineForDay(
     }];
   });
 
-  return rows.sort((a, b) => a.startMinute - b.startMinute || (a.endMinute ?? Infinity) - (b.endMinute ?? Infinity));
+  const instantRows: TripDetailWorkTimelineRow[] = dayTimelines[targetDayPosition].timeline.flatMap(
+    (projected, index) => {
+      if (projected.event.type !== 'refuel') return [];
+      const liters = getRefuelLiters(projected.event);
+      return [{
+        key: `${targetDayIndex}-refuel-${projected.event.ts}-${index}`,
+        kind: 'instant',
+        label: liters == null ? '給油' : `給油 ${formatRefuelLiters(liters)} L`,
+        startMinute: projected.effectiveMinute,
+        detail: projected.event.address || projected.event.memo,
+        liters,
+      }];
+    },
+  );
+
+  return [...rows, ...instantRows].sort((a, b) => (
+    a.startMinute - b.startMinute
+    || (a.endMinute ?? Infinity) - (b.endMinute ?? Infinity)
+  ));
 }
 
 export function formatTripDetailWorkTimelineRow(row: TripDetailWorkTimelineRow) {
+  if (row.kind === 'instant') {
+    return {
+      startLabel: `時刻 ${formatReportMinute(row.startMinute)}`,
+      endLabel: '',
+      durationLabel: row.liters == null ? '給油量 未記録' : '給油記録',
+    };
+  }
   return {
     startLabel: `開始 ${formatReportMinute(row.startMinute)}`,
     endLabel: `終了 ${row.endMinute == null ? '進行中' : formatReportMinute(row.endMinute)}`,

@@ -34,6 +34,7 @@ const STATUS_COLORS: Record<string, string> = {
   rest: '#ef4444',
   wait: '#64748b',
   work: '#14b8a6',
+  refuel: '#facc15',
 };
 
 // --- Main tabs ---
@@ -643,6 +644,26 @@ function getExpresswayTimelineDetail(event: TripEvent): string | undefined {
   return `${prefix}: ${formatIcName(icName)}${formatIcDistance(distanceM)}`;
 }
 
+function getRefuelLiters(event: TripEvent): number | undefined {
+  const liters = event.extras?.liters;
+  return typeof liters === 'number' && Number.isFinite(liters) && liters > 0
+    ? liters
+    : undefined;
+}
+
+function formatRefuelLiters(liters: number): string {
+  return new Intl.NumberFormat('ja-JP', {
+    minimumFractionDigits: 1,
+    maximumFractionDigits: 3,
+  }).format(liters);
+}
+
+export function getReportTimelineRefuelDetail(event: TripEvent): string | undefined {
+  if (event.type !== 'refuel') return undefined;
+  const liters = getRefuelLiters(event);
+  return liters == null ? undefined : `給油量: ${formatRefuelLiters(liters)} L`;
+}
+
 // --- Constraint time card ---
 function ConstraintCard({ metrics }: { metrics: DayMetrics }) {
   const pct = Math.min(100, (metrics.constraintMinutes / metrics.effectiveConstraintLimitMinutes) * 100);
@@ -859,7 +880,7 @@ function NextDayCard({ day }: { day: DayRecord }) {
 // =============================================
 // Sub-view: Timeline
 // =============================================
-function TimelineView({ day, days }: { day: DayRecord; days: DayRecord[] }) {
+export function TimelineView({ day, days }: { day: DayRecord; days: DayRecord[] }) {
   const sorted = useMemo(
     () => projectTripReportTimelines(days).get(day.dayIndex)?.events ?? projectReportTimeline(day),
     [day, days]
@@ -887,6 +908,7 @@ function TimelineView({ day, days }: { day: DayRecord; days: DayRecord[] }) {
     drive_end: '運転終了',
     work_start: '業務開始',
     work_end: '業務終了',
+    refuel: '給油',
   };
 
   const typeColors: Record<string, string> = {
@@ -911,6 +933,7 @@ function TimelineView({ day, days }: { day: DayRecord; days: DayRecord[] }) {
     wait_end: STATUS_COLORS.wait,
     work_start: STATUS_COLORS.work,
     work_end: STATUS_COLORS.work,
+    refuel: STATUS_COLORS.refuel,
   };
 
   if (sorted.length === 0) {
@@ -925,7 +948,7 @@ function TimelineView({ day, days }: { day: DayRecord; days: DayRecord[] }) {
     <div className="report-timeline">
       {sorted.map(({ event: ev, effectiveMinute }, i) => {
         const color = typeColors[ev.type] ?? '#94a3b8';
-        const expresswayDetail = getExpresswayTimelineDetail(ev);
+        const eventDetail = getExpresswayTimelineDetail(ev) ?? getReportTimelineRefuelDetail(ev);
         return (
           <div key={i} className="report-timeline__item">
             <div className="report-timeline__line">
@@ -937,7 +960,7 @@ function TimelineView({ day, days }: { day: DayRecord; days: DayRecord[] }) {
               <div className="report-timeline__label" style={{ color }}>
                 {typeLabels[ev.type] ?? ev.type}
               </div>
-              {expresswayDetail && <div className="report-timeline__detail">{expresswayDetail}</div>}
+              {eventDetail && <div className="report-timeline__detail">{eventDetail}</div>}
               {ev.customer && <div className="report-timeline__detail">{ev.customer}</div>}
               {ev.address && <div className="report-timeline__detail">{ev.address}</div>}
               {ev.memo && <div className="report-timeline__detail">{ev.memo}</div>}

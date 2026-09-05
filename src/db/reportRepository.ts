@@ -17,6 +17,18 @@ export async function saveReportTrip(trip: Trip): Promise<void> {
   requestRemoteSync('report-save');
 }
 
+/** Refresh derived report data without undoing a user's report deletion. */
+export async function saveReportTripSnapshot(trip: Trip): Promise<void> {
+  const saved = await db.transaction('rw', db.reportTrips, db.deletedReportTombstones, async () => {
+    // Keep this check in the write transaction so a concurrent deletion cannot
+    // land between the check and the snapshot write.
+    if (await db.deletedReportTombstones.get(trip.id)) return false;
+    await db.reportTrips.put(trip);
+    return true;
+  });
+  if (saved) requestRemoteSync('report-snapshot-save');
+}
+
 export async function getReportTrip(id: string): Promise<Trip | undefined> {
   const trip = await db.reportTrips.get(id);
   return trip ? projectReportTripForView(trip) : undefined;
