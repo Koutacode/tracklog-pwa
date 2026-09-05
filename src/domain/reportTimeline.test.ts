@@ -777,6 +777,66 @@ function testNotionLateLoadEndIsExcludedFromReports() {
   assertEqual(metrics.restMinutes, 60, 'rest continues after the excluded late end');
 }
 
+function testRefuelSurvivesReportProjectionWithoutChangingTotals() {
+  const firstDate = '2026-08-30';
+  const secondDate = '2026-08-31';
+  const baseEvents = [
+    makeAppEvent('trip-start', 'trip_start', timestamp(firstDate, '23:30')),
+    makeAppEvent('break-start', 'break_start', timestamp(firstDate, '23:45'), {
+      breakSessionId: 'break-across-midnight',
+    }),
+    makeAppEvent('break-end', 'break_end', timestamp(secondDate, '00:15'), {
+      breakSessionId: 'break-across-midnight',
+    }),
+    makeAppEvent('trip-end', 'trip_end', timestamp(secondDate, '01:00')),
+  ];
+  const refuel = makeAppEvent('refuel', 'refuel', timestamp(secondDate, '00:35'), { liters: 40 });
+  const sourceDays = [
+    { dateKey: firstDate, km: 10 },
+    { dateKey: secondDate, km: 20 },
+  ];
+  const baseline = buildReportTripFromAppEvents({
+    tripId: 'trip-refuel-baseline',
+    events: baseEvents,
+    dayRuns: sourceDays,
+  });
+  const withRefuel = buildReportTripFromAppEvents({
+    tripId: 'trip-refuel-event',
+    events: [...baseEvents, refuel],
+    dayRuns: sourceDays,
+  });
+  const secondDay = withRefuel.days.find(day => day.dateKey === secondDate);
+  const importedRefuel = secondDay?.events.find(event => event.type === 'refuel');
+
+  assertEqual(importedRefuel?.extras?.liters, 40, 'report import preserves numeric refuel liters');
+  assertEqual(secondDay?.dateKey, secondDate, 'refuel remains assigned to its JST calendar day');
+  assertEqual(
+    secondDay ? projectReportTimeline(secondDay).map(item => item.event.type).join(',') : '',
+    'refuel,trip_end',
+    'refuel remains in chronological report projection',
+  );
+
+  const durationSignature = (trip: Trip): string => JSON.stringify(
+    computeTripDayMetrics(trip).map(metric => ({
+      constraintMinutes: metric.constraintMinutes,
+      driveMinutes: metric.driveMinutes,
+      workMinutes: metric.workMinutes,
+      breakMinutes: metric.breakMinutes,
+      restMinutes: metric.restMinutes,
+      restEquivalentMinutes: metric.restEquivalentMinutes,
+      waitMinutes: metric.waitMinutes,
+      loadMinutes: metric.loadMinutes,
+      unloadMinutes: metric.unloadMinutes,
+      ferryMinutes: metric.ferryMinutes,
+    })),
+  );
+  assertEqual(
+    durationSignature(withRefuel),
+    durationSignature(baseline),
+    'instant refuel does not change any duration total',
+  );
+}
+
 function testExpresswaySessionsReconnectAcrossDays() {
   const firstDay = makeDay('2026-07-18', [
     {
@@ -842,6 +902,7 @@ const tests: Array<[string, () => void]> = [
   ['completed quiet middle day carry-over', testCompletedTripBuildsCompletelyQuietMiddleDay],
   ['open ferry current-time bound', testOpenFerryIsBoundedAtCurrentTimeAcrossMidnight],
   ['Notion stale load end regression', testNotionLateLoadEndIsExcludedFromReports],
+  ['refuel report projection', testRefuelSurvivesReportProjectionWithoutChangingTotals],
   ['cross-day expressway sessions', testExpresswaySessionsReconnectAcrossDays],
 ];
 

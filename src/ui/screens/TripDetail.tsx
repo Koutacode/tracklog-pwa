@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Capacitor } from '@capacitor/core';
 import { App as CapacitorApp } from '@capacitor/app';
 import { Link, useNavigate, useParams } from 'react-router-dom';
@@ -13,7 +13,7 @@ import {
   updateEventTimestamp,
   updateEventType,
 } from '../../db/repositories';
-import { getReportTrip, saveReportTrip } from '../../db/reportRepository';
+import { getReportTrip, saveReportTripSnapshot } from '../../db/reportRepository';
 import type { AppEvent, EventType } from '../../domain/types';
 import {
   buildImportableDayRunsFromAppEvents,
@@ -45,6 +45,9 @@ import {
 } from './tripDetailTimeline';
 import { buildTripDetailLocationInfo } from './tripDetailLocationInfo';
 import { commitTripDetailOperationalMutation } from './tripDetailOperationalMutation';
+import {
+  createTripDetailReportSnapshotPersistence,
+} from './tripDetailReportSnapshot';
 import {
   millisecondsUntilNextTripDetailRefresh,
   shouldRefreshTripDetailOnAppState,
@@ -151,8 +154,6 @@ type AiCopySession = {
   status: string;
 };
 
-export type DayDetailView = 'report' | 'timeline';
-
 function getBusinessMinutes(metrics: DayMetrics) {
   return metrics.workMinutes + metrics.loadMinutes + metrics.unloadMinutes + metrics.waitMinutes;
 }
@@ -162,15 +163,11 @@ export function DayReportSummary({
   metrics,
   timeline,
   dayTimelines,
-  view,
-  onViewChange,
 }: {
   day: DayRecord;
   metrics: DayMetrics;
   timeline: ProjectedReportTimelineEvent[];
   dayTimelines: TripDetailDayTimeline[];
-  view: DayDetailView;
-  onViewChange: (view: DayDetailView) => void;
 }) {
   const businessMinutes = getBusinessMinutes(metrics);
   const totalMinutes = metrics.driveMinutes
@@ -198,69 +195,52 @@ export function DayReportSummary({
         <div className="trip-day-summary__distance">{day.km} km</div>
       </div>
 
-      <div className="trip-day-summary__tabs" role="group" aria-label={`${day.dayIndex}日目の表示切替`}>
-        <button
-          type="button"
-          className={`trip-day-summary__tab${view === 'report' ? ' trip-day-summary__tab--active' : ''}`}
-          aria-pressed={view === 'report'}
-          onClick={() => onViewChange('report')}
-        >
-          項目別時間
-        </button>
-        <button
-          type="button"
-          className={`trip-day-summary__tab${view === 'timeline' ? ' trip-day-summary__tab--active' : ''}`}
-          aria-pressed={view === 'timeline'}
-          onClick={() => onViewChange('timeline')}
-        >
-          TL
-        </button>
-      </div>
-
-      {view === 'report' ? (
-        <div className="trip-day-report">
-          <div className="trip-day-report__note">15分単位で丸め・日本時間24時締め</div>
-          <div className="trip-day-report__categories">
-            {categories.map(category => (
-              <div key={category.label} className={`trip-day-report__row trip-day-report__row--${category.tone}`}>
-                <span>{category.label}</span>
-                <strong>{formatMinutes(category.minutes)}</strong>
-              </div>
-            ))}
-            <div className="trip-day-report__row trip-day-report__row--total">
-              <span>合計</span>
-              <strong>{formatMinutes(totalMinutes)}</strong>
+      <div className="trip-day-report">
+        <h3 className="trip-day-summary__section-title">項目別時間</h3>
+        <div className="trip-day-report__note">15分単位で丸め・日本時間24時締め</div>
+        <div className="trip-day-report__categories">
+          {categories.map(category => (
+            <div key={category.label} className={`trip-day-report__row trip-day-report__row--${category.tone}`}>
+              <span>{category.label}</span>
+              <strong>{formatMinutes(category.minutes)}</strong>
             </div>
+          ))}
+          <div className="trip-day-report__row trip-day-report__row--total">
+            <span>合計</span>
+            <strong>{formatMinutes(totalMinutes)}</strong>
           </div>
         </div>
-      ) : (
-        <div className="trip-day-timeline">
-          {workTimeline.length > 0 ? workTimeline.map(row => {
-            const formatted = formatTripDetailWorkTimelineRow(row);
-            return (
-              <div key={row.key} className="trip-day-timeline__item">
-                <div className="trip-day-timeline__times">
-                  <time>{formatted.startLabel}</time>
-                  <time>{formatted.endLabel}</time>
-                </div>
-                <div>
-                  <div className="trip-day-timeline__label">{row.label}</div>
-                  <div className="trip-day-timeline__duration">{formatted.durationLabel}</div>
-                  {row.continuesFromPreviousDay && (
-                    <div className="trip-day-timeline__detail">前日から継続（当日は00:00から集計）</div>
-                  )}
-                  {row.continuesToNextDay && (
-                    <div className="trip-day-timeline__detail">翌日へ継続（当日は24:00まで集計）</div>
-                  )}
-                  {row.detail && <div className="trip-day-timeline__detail">{row.detail}</div>}
-                </div>
+      </div>
+
+      <section className="trip-day-timeline" aria-labelledby={`trip-day-timeline-${day.dayIndex}`}>
+        <h3 id={`trip-day-timeline-${day.dayIndex}`} className="trip-day-summary__section-title">時間軸</h3>
+        {workTimeline.length > 0 ? workTimeline.map(row => {
+          const formatted = formatTripDetailWorkTimelineRow(row);
+          return (
+            <div key={row.key} className="trip-day-timeline__item">
+              <div className="trip-day-timeline__times">
+                <time>{formatted.startLabel}</time>
+                {row.kind === 'interval' && <time>{formatted.endLabel}</time>}
               </div>
-            );
-          }) : (
-            <div className="trip-day-timeline__empty">この日の作業記録はありません</div>
-          )}
-        </div>
-      )}
+              <div>
+                <div className="trip-day-timeline__label">{row.label}</div>
+                {row.kind === 'interval' && (
+                  <div className="trip-day-timeline__duration">{formatted.durationLabel}</div>
+                )}
+                {row.kind === 'interval' && row.continuesFromPreviousDay && (
+                  <div className="trip-day-timeline__detail">前日から継続（当日は00:00から集計）</div>
+                )}
+                {row.kind === 'interval' && row.continuesToNextDay && (
+                  <div className="trip-day-timeline__detail">翌日へ継続（当日は24:00まで集計）</div>
+                )}
+                {row.detail && <div className="trip-day-timeline__detail">{row.detail}</div>}
+              </div>
+            </div>
+          );
+        }) : (
+          <div className="trip-day-timeline__empty">この日の作業記録はありません</div>
+        )}
+      </section>
 
       {locationInfo.length > 0 && (
         <section className="trip-day-locations" aria-labelledby={`trip-day-locations-${day.dayIndex}`}>
@@ -711,12 +691,11 @@ export default function TripDetail() {
   const [deleting, setDeleting] = useState(false);
   const [sharing, setSharing] = useState(false);
   const [aiCopySession, setAiCopySession] = useState<AiCopySession | null>(null);
-  const [reportOpening, setReportOpening] = useState(false);
   const [workingId, setWorkingId] = useState<string | null>(null);
   const [openEditorId, setOpenEditorId] = useState<string | null>(null);
   const [selectedDayIndex, setSelectedDayIndex] = useState(0);
-  const [dayDetailView, setDayDetailView] = useState<DayDetailView>('report');
   const [reportNow, setReportNow] = useState(() => Date.now());
+  const reportSnapshotPersistenceRef = useRef<ReturnType<typeof createTripDetailReportSnapshotPersistence> | null>(null);
 
   function toLocalInputValue(ts: string) {
     const d = new Date(ts);
@@ -824,6 +803,34 @@ export default function TripDetail() {
       })),
     };
   }, [events, reportNow, tripId, vm]);
+
+  useEffect(() => {
+    const persistence = createTripDetailReportSnapshotPersistence({
+      loadExistingLabel: async id => (await getReportTrip(id))?.label,
+      saveSnapshot: saveReportTripSnapshot,
+      now: () => new Date().toISOString(),
+      scheduleRetry: (callback, delayMs) => window.setTimeout(callback, delayMs),
+      cancelRetry: handle => window.clearTimeout(handle as number),
+      onPermanentFailure: () => console.warn('運行日報スナップショットの自動保存に失敗しました'),
+    });
+    reportSnapshotPersistenceRef.current = persistence;
+    return () => {
+      persistence.dispose();
+      if (reportSnapshotPersistenceRef.current === persistence) {
+        reportSnapshotPersistenceRef.current = null;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!tripId || !vm || events.length === 0 || vm.dayRuns.length === 0) return;
+    reportSnapshotPersistenceRef.current?.enqueue({
+      tripId,
+      events,
+      dayRuns: vm.dayRuns,
+      fallbackLabel: vm.dayRuns[0]?.dateKey ? `${vm.dayRuns[0].dateKey} の運行` : '',
+    });
+  }, [events, tripId, vm]);
 
   async function handleSaveTime() {
     if (!editing) return;
@@ -1040,31 +1047,6 @@ export default function TripDetail() {
     }
   }
 
-  async function handleOpenReport() {
-    if (!tripId || !vm) return;
-    setReportOpening(true);
-    setErr(null);
-    try {
-      const existingReport = await getReportTrip(tripId);
-      const existingLabel = existingReport?.label || (vm.dayRuns[0]?.dateKey ? `${vm.dayRuns[0].dateKey} の運行` : '');
-      const reportTrip = buildReportTripFromAppEvents({
-        tripId,
-        events,
-        dayRuns: vm.dayRuns,
-        label: existingLabel,
-        currentTs: new Date().toISOString(),
-      });
-        await saveReportTrip(reportTrip);
-        navigate(`/report?tripId=${encodeURIComponent(tripId)}`, {
-          state: { initialReportTrip: reportTrip },
-        });
-    } catch (e: any) {
-      setErr(e?.message ?? '日報の作成に失敗しました');
-    } finally {
-      setReportOpening(false);
-    }
-  }
-
   if (!tripId) {
     return <div style={{ padding: 16 }}>tripId が不正です</div>;
   }
@@ -1098,10 +1080,7 @@ export default function TripDetail() {
                       type="button"
                       aria-pressed={selectedDayIndex === index}
                       className={`trip-day-selector__button${selectedDayIndex === index ? ' trip-day-selector__button--active' : ''}`}
-                      onClick={() => {
-                        setSelectedDayIndex(index);
-                        setDayDetailView('report');
-                      }}
+                      onClick={() => setSelectedDayIndex(index)}
                     >
                       {day.dayIndex}日目
                     </button>
@@ -1120,8 +1099,6 @@ export default function TripDetail() {
                     metrics={metrics}
                     timeline={reportOverview.timelines.get(day.dayIndex)?.events ?? []}
                     dayTimelines={reportOverview.dayTimelines}
-                    view={dayDetailView}
-                    onViewChange={setDayDetailView}
                   />
                 );
               })()}
@@ -1138,13 +1115,6 @@ export default function TripDetail() {
               className="trip-detail__button trip-detail__button--accent"
             >
               {sharing ? 'コピー中…' : 'AI要約'}
-            </button>
-            <button
-              onClick={handleOpenReport}
-              disabled={reportOpening || !vm}
-              className="trip-detail__button trip-detail__button--accent"
-            >
-              {reportOpening ? '更新中…' : '日報を作成/更新'}
             </button>
             <button onClick={load} className="trip-detail__button">再読み込み</button>
             <button

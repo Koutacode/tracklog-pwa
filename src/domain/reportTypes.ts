@@ -17,6 +17,7 @@ export type TripEventType =
   | 'drive_end'
   | 'work_start'
   | 'work_end'
+  | 'refuel'
   | 'expressway'
   | 'expressway_start'
   | 'expressway_end';

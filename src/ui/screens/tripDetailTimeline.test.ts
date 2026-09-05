@@ -6,9 +6,17 @@ import {
   formatTripDetailWorkTimelineRow,
 } from './tripDetailTimeline';
 
-function projected(type: TripEventType, minute: number): ProjectedReportTimelineEvent {
+function projected(
+  type: TripEventType,
+  minute: number,
+  extras?: Record<string, unknown>,
+): ProjectedReportTimelineEvent {
   return {
-    event: { type, ts: `2026-08-30T${String(Math.floor(minute / 60)).padStart(2, '0')}:00:00.000Z` },
+    event: {
+      type,
+      ts: `2026-08-30T${String(Math.floor(minute / 60)).padStart(2, '0')}:00:00.000Z`,
+      extras,
+    },
     effectiveMinute: minute,
     effectiveTs: '2026-08-30T00:00:00.000Z',
   };
@@ -94,4 +102,29 @@ assertEqual(
   'a truly ongoing last-day interval does not falsely claim a next-day continuation',
 );
 
-console.log('tripDetailTimeline: 30 assertions passed');
+const refuelRows = buildTripDetailWorkTimeline([
+  projected('load_start', 480),
+  projected('refuel', 525, { liters: 40 }),
+  projected('load_end', 540),
+  projected('refuel', 600, { liters: -5 }),
+]);
+assertEqual(refuelRows.length, 3, 'refuels are included alongside paired work');
+assertEqual(refuelRows[0]?.label, '積込', 'rows stay ordered by their position on the time axis');
+assertEqual(refuelRows[1]?.kind, 'instant', 'refuel is distinguishable from an open interval');
+assertEqual(refuelRows[1]?.startMinute, 525, 'refuel keeps its projected minute');
+assertEqual(refuelRows[1]?.endMinute, undefined, 'refuel has no artificial end time');
+assertEqual(refuelRows[1]?.liters, 40, 'valid liters stay numeric');
+assertEqual(refuelRows[1]?.label, '給油 40.0 L', 'whole-number liters use a readable decimal label');
+const refuelLabels = formatTripDetailWorkTimelineRow(refuelRows[1]!);
+assertEqual(refuelLabels.startLabel, '時刻 08:45', 'instant event uses a single time label');
+assertEqual(refuelLabels.endLabel, '', 'instant event never displays a false end state');
+assertEqual(refuelLabels.durationLabel, '給油記録', 'instant event never displays a duration');
+assertEqual(refuelRows[2]?.liters, undefined, 'invalid liters are not exposed as a value');
+assertEqual(refuelRows[2]?.label, '給油', 'invalid liters do not invent an amount');
+assertEqual(
+  formatTripDetailWorkTimelineRow(refuelRows[2]!).durationLabel,
+  '給油量 未記録',
+  'invalid liters are reported as missing',
+);
+
+console.log('tripDetailTimeline: 43 assertions passed');

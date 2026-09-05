@@ -5,8 +5,10 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
+import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.pm.ServiceInfo;
 import android.location.Location;
 import android.location.LocationListener;
@@ -32,6 +34,7 @@ import java.util.UUID;
 
 public final class ResidentLocationService extends Service implements LocationListener {
     static final String NOTIFICATION_TEXT = "位置記録中";
+    static final String LOCATION_WAITING_TEXT = "位置情報OFF・記録待機中";
     static final String CHANNEL_ID = "tracklog_resident_location";
     static final int NOTIFICATION_ID = 41139;
     private static final String TAG = "ResidentLocation";
@@ -49,10 +52,7 @@ public final class ResidentLocationService extends Service implements LocationLi
     private final Runnable readinessCheck = new Runnable() {
         @Override
         public void run() {
-            if (!canRun()) {
-                stopResidentService();
-                return;
-            }
+            if (!reconcileLocationReadiness()) return;
             handler.postDelayed(this, READINESS_CHECK_MS);
         }
     };
@@ -66,6 +66,16 @@ public final class ResidentLocationService extends Service implements LocationLi
     private ResidentLocationQualityPolicy.Fix lastAcceptedFix;
     private ResidentExpresswayDetectionPolicy.State expresswayDetectionState;
     private long expresswayDetectionRevision = -1L;
+    private volatile boolean waitingForLocation;
+    private volatile boolean stopping;
+    private boolean foregroundStarted;
+    private final BroadcastReceiver locationModeReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            // Read the real state instead of trusting broadcast extras.
+            handler.post(() -> reconcileLocationReadiness());
+        }
+    };
 
     static boolean isRunning() {
         return RUNNING.get();
@@ -73,11 +83,14 @@ public final class ResidentLocationService extends Service implements LocationLi
 
     static boolean startIfEligible(Context context) {
         Context appContext = context.getApplicationContext();
-        if (!ResidentLocationState.isEligible(appContext)
-                || !ResidentLocationState.getReadiness(appContext).isReady()) {
+        ResidentLocationRecoveryPolicy.Mode mode = recoveryMode(appContext, RUNNING.get());
+        if (mode == ResidentLocationRecoveryPolicy.Mode.STOP) {
             stop(appContext);
             return false;
         }
+        // Do not stop an already running service, or attempt a new location FGS,
+        // merely because the user temporarily switched device location off.
+        if (mode == ResidentLocationRecoveryPolicy.Mode.WAIT_FOR_LOCATION) return true;
         try {
             ContextCompat.startForegroundService(
                     appContext,
@@ -109,18 +122,27 @@ public final class ResidentLocationService extends Service implements LocationLi
             thread.setDaemon(true);
             return thread;
         });
+        IntentFilter filter = new IntentFilter(LocationManager.MODE_CHANGED_ACTION);
+        filter.addAction(LocationManager.PROVIDERS_CHANGED_ACTION);
+        ContextCompat.registerReceiver(this, locationModeReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED);
     }
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        if (!canRun()) {
+        if (stopping) return START_NOT_STICKY;
+        ResidentLocationRecoveryPolicy.Mode mode = recoveryMode(this, foregroundStarted);
+        if (mode == ResidentLocationRecoveryPolicy.Mode.STOP) {
             stopResidentService();
             return START_NOT_STICKY;
         }
 
         try {
-            promoteToForeground();
-            requestLocationUpdates();
+            if (!foregroundStarted) {
+                promoteToForeground();
+                foregroundStarted = true;
+            }
+            if (!reconcileLocationReadiness()) return START_NOT_STICKY;
+            if (!waitingForLocation) requestLocationUpdates();
             ResidentExpresswayNotification.restoreIfPending(this);
             scheduleDueExpresswayProbe();
             RUNNING.set(true);
@@ -135,8 +157,55 @@ public final class ResidentLocationService extends Service implements LocationLi
     }
 
     private boolean canRun() {
-        return ResidentLocationState.isEligible(this)
+        return !stopping && ResidentLocationState.isEligible(this)
                 && ResidentLocationState.getReadiness(this).isReady();
+    }
+
+    private static ResidentLocationRecoveryPolicy.Mode recoveryMode(Context context, boolean started) {
+        ResidentLocationState.Readiness readiness = ResidentLocationState.getReadiness(context);
+        return ResidentLocationRecoveryPolicy.mode(
+                ResidentLocationState.isEligible(context),
+                readiness.foregroundLocation,
+                readiness.backgroundLocation,
+                readiness.notifications,
+                readiness.locationEnabled,
+                started
+        );
+    }
+
+    /** Runs on the main thread; only an existing foreground service may wait. */
+    private boolean reconcileLocationReadiness() {
+        if (stopping) return false;
+        ResidentLocationRecoveryPolicy.Mode mode = recoveryMode(this, foregroundStarted);
+        if (mode == ResidentLocationRecoveryPolicy.Mode.STOP) {
+            stopResidentService();
+            return false;
+        }
+        boolean shouldWait = mode == ResidentLocationRecoveryPolicy.Mode.WAIT_FOR_LOCATION;
+        if (waitingForLocation == shouldWait) return true;
+        waitingForLocation = shouldWait;
+        try {
+            if (shouldWait) {
+                if (locationManager != null) locationManager.removeUpdates(this);
+                handler.removeCallbacks(expresswayProbeRetryCheck);
+                // Do not count the OFF interval as continuous low speed or reuse its fix.
+                if (locationHandler != null) locationHandler.post(() -> {
+                    lastAcceptedFix = null;
+                    expresswayDetectionState = null;
+                    expresswayDetectionRevision = -1L;
+                });
+            } else {
+                requestLocationUpdates();
+                scheduleDueExpresswayProbe();
+            }
+            NotificationManager manager = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+            if (manager != null) manager.notify(NOTIFICATION_ID, buildNotification());
+            return true;
+        } catch (SecurityException | IllegalStateException exception) {
+            Log.e(TAG, "Unable to reconcile location readiness", exception);
+            stopResidentService();
+            return false;
+        }
     }
 
     private void promoteToForeground() {
@@ -152,6 +221,13 @@ public final class ResidentLocationService extends Service implements LocationLi
             manager.createNotificationChannel(channel);
         }
 
+        int type = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+                ? ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
+                : 0;
+        ServiceCompat.startForeground(this, NOTIFICATION_ID, buildNotification(), type);
+    }
+
+    private Notification buildNotification() {
         Intent launchIntent = new Intent(this, MainActivity.class)
                 .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
         PendingIntent contentIntent = PendingIntent.getActivity(
@@ -160,19 +236,15 @@ public final class ResidentLocationService extends Service implements LocationLi
                 launchIntent,
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
         );
-        Notification notification = new NotificationCompat.Builder(this, CHANNEL_ID)
+        return new NotificationCompat.Builder(this, CHANNEL_ID)
                 .setSmallIcon(R.mipmap.ic_launcher)
-                .setContentTitle(NOTIFICATION_TEXT)
+                .setContentTitle(waitingForLocation ? LOCATION_WAITING_TEXT : NOTIFICATION_TEXT)
                 .setContentIntent(contentIntent)
                 .setOngoing(true)
                 .setOnlyAlertOnce(true)
                 .setCategory(NotificationCompat.CATEGORY_SERVICE)
                 .setPriority(NotificationCompat.PRIORITY_LOW)
                 .build();
-        int type = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
-                ? ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
-                : 0;
-        ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, type);
     }
 
     private void requestLocationUpdates() {
@@ -180,7 +252,7 @@ public final class ResidentLocationService extends Service implements LocationLi
             throw new IllegalStateException("位置情報サービスを利用できません。");
         }
         locationManager.removeUpdates(this);
-        if (locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
+        if (locationManager.getAllProviders().contains(LocationManager.GPS_PROVIDER)) {
             locationManager.requestLocationUpdates(
                     LocationManager.GPS_PROVIDER,
                     MIN_TIME_MS,
@@ -189,7 +261,7 @@ public final class ResidentLocationService extends Service implements LocationLi
                     locationThread.getLooper()
             );
         }
-        if (locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
+        if (locationManager.getAllProviders().contains(LocationManager.NETWORK_PROVIDER)) {
             locationManager.requestLocationUpdates(
                     LocationManager.NETWORK_PROVIDER,
                     MIN_TIME_MS,
@@ -202,8 +274,8 @@ public final class ResidentLocationService extends Service implements LocationLi
 
     @Override
     public void onLocationChanged(Location location) {
-        if (!canRun()) {
-            stopResidentService();
+        if (!canRun() || waitingForLocation) {
+            handler.post(() -> reconcileLocationReadiness());
             return;
         }
         long now = System.currentTimeMillis();
@@ -330,13 +402,32 @@ public final class ResidentLocationService extends Service implements LocationLi
 
     private void scheduleDueExpresswayProbe() {
         handler.removeCallbacks(expresswayProbeRetryCheck);
-        if (uploadExecutor == null || uploadExecutor.isShutdown()) return;
-        ResidentExpresswayStore.Probe probe = ResidentExpresswayStore.dueProbe(
-                this,
-                System.currentTimeMillis()
+        if (!canRun() || waitingForLocation || uploadExecutor == null || uploadExecutor.isShutdown()) return;
+        ResidentExpresswayStore.Snapshot snapshot = ResidentExpresswayStore.snapshot(this);
+        ResidentExpresswayStore.Probe probe = snapshot.pendingProbe;
+        boolean applicable = snapshot.storageHealthy && !snapshot.paused && probe != null
+                && ResidentExpresswayStore.canApplyProbe(
+                        probe.tripId, probe.expectedRevision, snapshot.tripId, snapshot.revision
+                );
+        long delay = ResidentExpresswayRecoveryPolicy.nextProbeDelay(
+                applicable,
+                expresswayProbeInFlight.get(),
+                probe == null ? 0L : probe.retryAfterAtMs,
+                System.currentTimeMillis(),
+                ResidentExpresswayStore.PROBE_RETRY_MAX_MS
         );
-        if (probe == null || !expresswayProbeInFlight.compareAndSet(false, true)) return;
+        if (delay < 0L) return;
+        if (delay > 0L) {
+            handler.postDelayed(expresswayProbeRetryCheck, delay);
+            return;
+        }
+        if (!expresswayProbeInFlight.compareAndSet(false, true)) return;
         uploadExecutor.execute(() -> {
+            if (!canRun() || waitingForLocation) {
+                expresswayProbeInFlight.set(false);
+                handler.post(expresswayProbeRetryCheck);
+                return;
+            }
             ResidentLocationUploader.ExpresswayProbeResult result =
                     ResidentLocationUploader.probeExpresswaySignal(this, probe);
             Handler callbackHandler = locationHandler;
@@ -353,6 +444,7 @@ public final class ResidentLocationService extends Service implements LocationLi
             ResidentLocationUploader.ExpresswayProbeResult result
     ) {
         try {
+            if (!canRun() || waitingForLocation) return;
             if (result.outcome != ResidentLocationUploader.ExpresswayProbeOutcome.SIGNAL
                     || result.signal == null) {
                 ResidentExpresswayStore.markProbeFailure(
@@ -361,7 +453,6 @@ public final class ResidentLocationService extends Service implements LocationLi
                         probeFailureCategory(result.outcome),
                         System.currentTimeMillis()
                 );
-                scheduleNextExpresswayProbeRetry();
                 return;
             }
             ResidentExpresswayStore.Snapshot current = ResidentExpresswayStore.snapshot(this);
@@ -413,7 +504,6 @@ public final class ResidentLocationService extends Service implements LocationLi
                             "response",
                             System.currentTimeMillis()
                     );
-                    scheduleNextExpresswayProbeRetry();
                 }
                 return;
             }
@@ -430,12 +520,14 @@ public final class ResidentLocationService extends Service implements LocationLi
                     result.signal
             );
             if (!promptId.isEmpty()) {
-                expresswayDetectionState = ResidentExpresswayDetectionPolicy.afterTransition(
+                expresswayDetectionState = ResidentExpresswayDetectionPolicy.afterRestoredEndPrompt(
                         expresswayDetectionState,
-                        false
+                        probe.tripId
                 );
                 expresswayDetectionRevision = ResidentExpresswayStore.snapshot(this).revision;
-                handler.post(() -> ResidentExpresswayNotification.show(this, promptId));
+                handler.post(() -> {
+                    if (!stopping) ResidentExpresswayNotification.show(this, promptId);
+                });
             } else {
                 ResidentExpresswayStore.markProbeFailure(
                         this,
@@ -443,21 +535,11 @@ public final class ResidentLocationService extends Service implements LocationLi
                         "response",
                         System.currentTimeMillis()
                 );
-                scheduleNextExpresswayProbeRetry();
             }
         } finally {
             expresswayProbeInFlight.set(false);
+            handler.post(expresswayProbeRetryCheck);
         }
-    }
-
-    private void scheduleNextExpresswayProbeRetry() {
-        ResidentExpresswayStore.Snapshot snapshot = ResidentExpresswayStore.snapshot(this);
-        if (snapshot.pendingProbe == null) return;
-        long now = System.currentTimeMillis();
-        long delay = Math.max(1_000L, snapshot.pendingProbe.retryAfterAtMs - now);
-        delay = Math.min(delay, ResidentExpresswayStore.PROBE_RETRY_MAX_MS);
-        handler.removeCallbacks(expresswayProbeRetryCheck);
-        handler.postDelayed(expresswayProbeRetryCheck, delay);
     }
 
     private static String probeFailureCategory(
@@ -492,6 +574,7 @@ public final class ResidentLocationService extends Service implements LocationLi
         Location snapshot = new Location(location);
         uploadExecutor.execute(() -> {
             try {
+                if (!canRun() || waitingForLocation) return;
                 ResidentLocationUploader.Outcome outcome = ResidentLocationUploader.upload(this, snapshot);
                 if (outcome == ResidentLocationUploader.Outcome.SUCCESS) {
                     ResidentLocationState.markUploadSuccess(this, System.currentTimeMillis());
@@ -510,13 +593,13 @@ public final class ResidentLocationService extends Service implements LocationLi
 
     @Override
     public void onProviderDisabled(String provider) {
-        if (!ResidentLocationState.getReadiness(this).locationEnabled) {
-            stopResidentService();
-        }
+        handler.post(() -> reconcileLocationReadiness());
     }
 
     @Override
-    public void onProviderEnabled(String provider) {}
+    public void onProviderEnabled(String provider) {
+        handler.post(() -> reconcileLocationReadiness());
+    }
 
     @Override
     public void onStatusChanged(String provider, int status, Bundle extras) {}
@@ -529,9 +612,9 @@ public final class ResidentLocationService extends Service implements LocationLi
 
     @Override
     public void onDestroy() {
-        handler.removeCallbacks(readinessCheck);
-        handler.removeCallbacks(expresswayProbeRetryCheck);
-        handler.removeCallbacks(queueIdleSeal);
+        stopping = true;
+        unregisterReceiver(locationModeReceiver);
+        handler.removeCallbacksAndMessages(null);
         if (locationManager != null) {
             try {
                 locationManager.removeUpdates(this);
@@ -540,6 +623,7 @@ public final class ResidentLocationService extends Service implements LocationLi
             }
         }
         RUNNING.set(false);
+        foregroundStarted = false;
         if (locationThread != null) {
             locationThread.quitSafely();
         }
@@ -553,8 +637,10 @@ public final class ResidentLocationService extends Service implements LocationLi
     }
 
     private void stopResidentService() {
+        stopping = true;
         handler.removeCallbacks(readinessCheck);
         RUNNING.set(false);
+        foregroundStarted = false;
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE);
         stopSelf();
     }

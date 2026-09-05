@@ -42,20 +42,15 @@
   - 位置情報 / 通知 / Exact Alarm / 電池最適化除外の状態
   - 高速開始・高速終了イベントにIC名が保存されること
 
-## Notion / GitHub
-- Obsidian は更新しない。運用ログ、配布情報、改善履歴は Notion に集約する。
-- 作業後は原則として Notion に作業ログを残す。Codex全般の復旧用スキル `notion-second-brain-capture` が使える場合はそれに従う。
-- 実装・検証・APK更新・実機確認・GitHub/CI作業・調査判断・重要な設定変更は、最終報告前にNotionへ反映する。
-- Notion には、目的、変更ファイル、検証結果、成果物パス、端末状態、判断理由、未解決事項、次回復旧手順を残す。
-- 機密情報はNotion保存可。ただし通常はキー名・保存場所・用途・復旧手順を記録し、値そのものは必要時または明示指示時のみ記録する。
-- 更新対象は必要に応じて確認する:
-  - `個人アプリ`
-  - `TrackLog運行アシスト｜機能・アップデート・配布情報`
-  - `改善点`
-- `NOTION_TOKEN` 未設定のため、GitHub Actions 自動同期は使わない。
-
-## Local Release Helper
-- ローカルスキル: `skills/tracklog-release-notion/SKILL.md`
-- 補助スクリプト: `skills/tracklog-release-notion/scripts/prepare-tracklog-release.ps1`
-- 一括ビルド例:
-  - `powershell -ExecutionPolicy Bypass -File skills/tracklog-release-notion/scripts/prepare-tracklog-release.ps1 -Build -SyncAndroid -AssembleDebug`
+## Google Drive / GitHub
+- Obsidian と Notion は今後の記録先として更新しない。Google Drive を第二のノート兼運用記録の正本として使う。
+- 今後の TrackLog の運用ログ、実装・検証メモ、APK・Release情報、GitHub/CI作業、調査判断、重要な設定変更、必要なファイル・文章・要約は、最終報告前に Google Drive へ追加または既存文書を編集して反映する。
+- 記録には、目的、日付、変更ファイル、検証結果、成果物パス、端末状態、判断理由、未解決事項、次回復旧手順を含める。
+- Google Drive 内は年・月単位で整理する。基本構成は `TrackLog/<YYYY>/<YYYY-MM>/` とし、作業ログ、リリース情報、チャット履歴・要約、関連ファイルを後から追跡しやすい名前と日付で保存する。
+- 同じ対象・同じ月の記録が既にある場合は、重複文書を増やすより既存文書への追記・更新を優先し、変更履歴と決定事項を保持する。
+- Android / Chrome で使う実際のパスワード値は、承認済みの標準保存先として Google Password Manager に保存する。利用できるサービスではパスキーを優先し、パスワードが必要な場合はサービスごとに異なる自動生成パスワードを使う。
+- Google Drive に保存してよい認証関連情報は、サービス／アカウント一覧、ID・ユーザー名・メールアドレス、ログインURL、Google Password Manager 内の登録名と保存場所、復旧用メール・電話番号、2段階認証方式、バックアップコードの保管場所、最終確認・ローテーション日時と状態までとする。
+- 平文パスワード、APIキー、アクセストークン、JWT、秘密鍵、正確な座標、生の非公開運行データは Google Drive に保存しない。Codexやチャットにも秘密値を貼り付けるよう依頼しない。
+- 今後Codexが認証情報を記録する場合は、ユーザーが秘密値を Google Password Manager へ直接保存した後、Google Drive 側の非秘密の索引・復旧情報だけを更新する。
+- 過去資料に平文の秘密値が存在する可能性がある場合は、自動で閲覧・転記・公開せず、別途レビューした移行と認証情報のローテーション手順として扱う。
+- 既存の Notion 履歴は削除しない。Google Drive への移行・複製は、ユーザーから明示的に依頼された場合に限って行う。

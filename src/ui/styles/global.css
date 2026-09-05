@@ -2143,6 +2143,20 @@ a:hover {
   transform: translateY(-1px);
 }
 
+.trip-detail__button:focus-visible,
+.trip-detail :where(.trip-btn, .trip-input):focus-visible,
+.trip-day-selector__button:focus-visible,
+.trip-detail-more__summary:focus-visible {
+  outline: 3px solid #0b63ce;
+  outline-offset: 3px;
+}
+
+.trip-detail__button:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+  transform: none;
+}
+
 .trip-detail__header .trip-detail__button,
 .trip-detail__header .trip-detail__button:hover {
   border-color: #cbd5e1;
@@ -2156,9 +2170,16 @@ a:hover {
 }
 
 .trip-detail__button--accent {
-  border-color: rgba(59, 130, 246, 0.6);
-  background: rgba(30, 58, 138, 0.45);
+  border-color: #1d4ed8;
+  background: #1e40af;
+  color: #fff;
   box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.2);
+}
+
+.trip-detail__button--accent:hover {
+  border-color: #60a5fa;
+  background: #1d4ed8;
+  color: #fff;
 }
 
 .trip-detail__button--danger {
@@ -2253,43 +2274,16 @@ a:hover {
   white-space: nowrap;
 }
 
-.trip-day-summary__tabs {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 0;
-  padding: 0 12px;
-  border-bottom: 1px solid #cbd5e1;
-  background: #fff;
-}
-
-.trip-day-summary__tab {
-  min-height: 58px;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-  color: #475569;
-  font: inherit;
-  font-size: 19px;
-  font-weight: 900;
-  cursor: pointer;
-}
-
-.trip-day-summary__tab--active {
-  border-bottom: 4px solid #0b63ce;
-  background: #fff;
-  color: #0b63ce;
-  box-shadow: none;
-}
-
-.trip-day-summary__tab:focus-visible,
-.trip-detail-more__summary:focus-visible {
-  outline: 3px solid #0b63ce;
-  outline-offset: 3px;
-}
-
 .trip-day-report,
 .trip-day-timeline {
   padding: 18px 20px 22px;
+}
+
+.trip-day-summary__section-title {
+  margin: 0 0 10px;
+  color: #0f172a;
+  font-size: 20px;
+  font-weight: 900;
 }
 
 .trip-day-report__note {
@@ -2342,6 +2336,7 @@ a:hover {
 .trip-day-timeline {
   display: grid;
   gap: 0;
+  border-top: 1px solid #cbd5e1;
 }
 
 .trip-day-timeline__item {
@@ -2624,6 +2619,7 @@ a:hover {
 .trip-section {
   padding: 16px;
   border-radius: 20px;
+  color: #f8fafc;
 }
 
 .trip-section__title {
@@ -2636,7 +2632,7 @@ a:hover {
   margin-top: -6px;
   margin-bottom: 12px;
   font-size: 13px;
-  color: var(--muted);
+  color: #cbd5e1;
 }
 
 .trip-list {
@@ -2651,6 +2647,7 @@ a:hover {
   border: 1px solid rgba(148, 163, 184, 0.2);
   display: grid;
   gap: 8px;
+  color: #f8fafc;
 }
 
 .trip-item--split {
@@ -2695,6 +2692,7 @@ a:hover {
   border-radius: 16px;
   background: linear-gradient(145deg, rgba(15, 23, 42, 0.92), rgba(2, 6, 23, 0.72));
   border: 1px solid rgba(148, 163, 184, 0.22);
+  color: #f8fafc;
 }
 
 .trip-distance-day__head {
@@ -2793,6 +2791,7 @@ a:hover {
   border: 1px dashed rgba(148, 163, 184, 0.25);
   display: grid;
   gap: 10px;
+  color: #f8fafc;
 }
 
 .trip-event__header {
@@ -2853,7 +2852,7 @@ a:hover {
 
 .trip-edit__id {
   font-size: 12px;
-  color: var(--muted);
+  color: #cbd5e1;
 }
 
 .trip-edit--compact {
