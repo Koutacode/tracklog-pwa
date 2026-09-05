@@ -1,6 +1,24 @@
 import type { DriverIdentity } from '../domain/remoteTypes';
 import type { RoutePoint } from '../domain/types';
 import type { NativeResidentLocationPoint } from '../services/nativeResidentLocation';
+import type { NativeSetupReadiness } from '../services/nativeSetup';
+
+export function resolveNativeLocationSetupAction(
+  readiness: NativeSetupReadiness,
+): 'start' | 'wait-for-location' | 'stop' {
+  if (readiness.permissionsReady) return 'start';
+  const snapshot = readiness.snapshot;
+  if (snapshot?.approved
+    && snapshot.setupComplete
+    && !snapshot.locationEnabled
+    && ['location-precise', 'location-background', 'notification', 'battery-opt']
+      .every(id => readiness.steps.find(step => step.id === id)?.level === 'ok')) {
+    // Device location OFF pauses the existing native intent; it does not revoke
+    // enrollment or authorize clearing credentials, the trip, or pending probes.
+    return 'wait-for-location';
+  }
+  return 'stop';
+}
 
 export type UnapprovedNativeLocationAction =
   | 'preserve-native-auth'

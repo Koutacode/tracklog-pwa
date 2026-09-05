@@ -1,18 +1,105 @@
 import type { DriverIdentity } from '../domain/remoteTypes';
 import type { NativeResidentLocationPoint } from '../services/nativeResidentLocation';
+import { buildNativeSetupReadiness, type NativeSetupSnapshot } from '../services/nativeSetup';
 import {
   canUseNativeResidentLocation,
   drainNativeResidentRoutePointQueue,
   orderNativeResidentRoutePoints,
+  resolveNativeLocationSetupAction,
   resolveUnapprovedNativeLocationAction,
   uniqueNativeResidentRoutePoints,
 } from './nativeResidentLocationPolicy';
 
+let assertionCount = 0;
 function assertEqual<T>(actual: T, expected: T, message: string) {
   if (actual !== expected) {
     throw new Error(`${message}: expected ${String(expected)}, received ${String(actual)}`);
   }
+  assertionCount += 1;
 }
+
+function setupSnapshot(overrides: Partial<NativeSetupSnapshot> = {}): NativeSetupSnapshot {
+  return {
+    androidSdkInt: 36,
+    locationEnabled: true,
+    fine: true,
+    coarse: true,
+    foreground: true,
+    background: true,
+    backgroundRelevant: true,
+    backgroundPermissionOptionLabel: 'Always allow',
+    notifications: true,
+    residentNotificationChannelExists: true,
+    residentNotificationChannelEnabled: true,
+    batteryOptimization: true,
+    residentRunning: true,
+    approved: true,
+    setupComplete: true,
+    authorizationConfigured: true,
+    ...overrides,
+  };
+}
+
+// Use the real readiness builder: locationEnabled is part of permissionsReady,
+// although turning the device switch off has not revoked any app permission.
+for (const [locationEnabled, expected] of [
+  [true, 'start'],
+  [false, 'wait-for-location'],
+  [false, 'wait-for-location'],
+  [true, 'start'],
+] as const) {
+  assertEqual(
+    resolveNativeLocationSetupAction(buildNativeSetupReadiness(setupSnapshot({ locationEnabled }))),
+    expected,
+    'ON/OFF/repeated supervisor tick/ON preserves existing native tracking intent',
+  );
+}
+assertEqual(
+  resolveNativeLocationSetupAction(buildNativeSetupReadiness(setupSnapshot({
+    locationEnabled: false,
+    residentRunning: false,
+  }))),
+  'wait-for-location',
+  'OFF after process exit preserves intent without authorizing a new foreground service',
+);
+assertEqual(
+  resolveNativeLocationSetupAction(buildNativeSetupReadiness(setupSnapshot({
+    locationEnabled: false,
+    authorizationConfigured: false,
+  }))),
+  'wait-for-location',
+  'temporary missing authorization does not revoke approved local recording intent',
+);
+for (const missingPrerequisite of [
+  { fine: false },
+  { background: false },
+  { notifications: false },
+  { residentNotificationChannelEnabled: false },
+  { batteryOptimization: false },
+  { approved: false },
+  { setupComplete: false },
+]) {
+  assertEqual(
+    resolveNativeLocationSetupAction(buildNativeSetupReadiness(setupSnapshot({
+      locationEnabled: false,
+      ...missingPrerequisite,
+    }))),
+    'stop',
+    `OFF must not hide a missing prerequisite: ${Object.keys(missingPrerequisite)[0]}`,
+  );
+}
+assertEqual(
+  resolveNativeLocationSetupAction({
+    ready: false,
+    permissionsReady: false,
+    steps: [],
+    activeStep: null,
+    remaining: 0,
+    snapshot: null,
+  }),
+  'stop',
+  'unknown readiness must not be classified as a confirmed location-only interruption',
+);
 
 function identity(overrides: Partial<DriverIdentity> = {}): DriverIdentity {
   return {
@@ -321,7 +408,7 @@ async function runAsyncTests() {
   });
   assertEqual(pwaPeekCalled, false, 'PWA does not invoke the native queue bridge');
 
-  console.log('nativeResidentLocationPolicy: 27 tests passed');
+  console.log(`nativeResidentLocationPolicy: ${assertionCount} assertions passed`);
 }
 
 void runAsyncTests().catch(error => {
