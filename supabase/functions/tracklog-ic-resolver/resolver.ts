@@ -83,6 +83,8 @@ const EMPTY_CACHE_TTL_MS = 60 * 1000;
 const MAX_CACHE_ENTRIES = 192;
 const MAX_OVERPASS_ELEMENTS = 5000;
 const NEAR_IC_DISTANCE_M = 1200;
+// Keep candidate acceptance aligned with src/services/icResolver.ts.
+const CORROBORATED_IC_DISTANCE_M = 2000;
 const NEAR_GATE_DISTANCE_M = 220;
 const NEAR_LINK_DISTANCE_M = 650;
 
@@ -127,15 +129,15 @@ function delay(delayMs: number) {
   return new Promise<void>((resolve) => setTimeout(resolve, delayMs));
 }
 
-async function fetchWithTimeout(
+async function fetchElementsWithTimeout(
   endpoint: string,
   query: string,
   fetchImpl: FetchLike,
   timeoutMs: number,
-) {
+): Promise<OverpassElement[]> {
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<Response>((_, reject) => {
+  const timeout = new Promise<OverpassElement[]>((_, reject) => {
     timer = setTimeout(() => {
       controller.abort();
       reject(new Error(`Overpass request timed out after ${timeoutMs}ms`));
@@ -144,17 +146,32 @@ async function fetchWithTimeout(
 
   try {
     return await Promise.race([
-      fetchImpl(endpoint, {
-        method: 'POST',
-        headers: {
-          Accept: 'application/json',
-          'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-          'User-Agent': 'TrackLog-IC-Resolver/1.0',
-        },
-        body: `data=${encodeURIComponent(query)}`,
-        cache: 'no-store',
-        signal: controller.signal,
-      }),
+      (async () => {
+        const response = await fetchImpl(endpoint, {
+          method: 'POST',
+          headers: {
+            Accept: 'application/json',
+            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+            'User-Agent': 'TrackLog-IC-Resolver/1.0',
+          },
+          body: `data=${encodeURIComponent(query)}`,
+          cache: 'no-store',
+          signal: controller.signal,
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        // Reading the body can stall after headers arrive. Keep it inside the
+        // timeout race so another provider is still tried in that case.
+        const body = await response.json() as { elements?: unknown; remark?: unknown } | null;
+        if (typeof body?.remark === 'string' && body.remark.trim()) {
+          // Overpass can send runtime errors with HTTP 200 and empty or partial
+          // elements. Never cache those responses as successful lookups.
+          throw new Error('Overpass returned an incomplete result (remark)');
+        }
+        if (!Array.isArray(body?.elements)) {
+          throw new Error('response did not include an elements array');
+        }
+        return (body.elements as OverpassElement[]).slice(0, MAX_OVERPASS_ELEMENTS);
+      })(),
       timeout,
     ]);
   } finally {
@@ -179,17 +196,7 @@ export async function fetchOverpassElements(
     for (const endpoint of endpoints) {
       attempts += 1;
       try {
-        const response = await fetchWithTimeout(endpoint, query, fetchImpl, timeoutMs);
-        if (!response.ok) {
-          lastError = `HTTP ${response.status}`;
-          continue;
-        }
-        const body = await response.json() as { elements?: unknown };
-        if (!Array.isArray(body.elements)) {
-          lastError = 'response did not include an elements array';
-          continue;
-        }
-        return (body.elements as OverpassElement[]).slice(0, MAX_OVERPASS_ELEMENTS);
+        return await fetchElementsWithTimeout(endpoint, query, fetchImpl, timeoutMs);
       } catch (error) {
         lastError = error instanceof Error ? error.message : 'request failed';
       }
@@ -387,6 +394,7 @@ export function rankIcCandidates(
   elements: OverpassElement[],
   lat: number,
   lon: number,
+  maxDistanceM = Number.POSITIVE_INFINITY,
 ): RankedIcCandidate[] {
   const byName = new Map<string, RankedIcCandidate>();
   for (const element of elements) {
@@ -394,6 +402,9 @@ export function rankIcCandidates(
     const point = elementPoint(element);
     if (!source || !point || !element.tags) continue;
     const distanceM = Math.round(haversineM(lat, lon, point.lat, point.lon));
+    // Filter before deduplicating names: an out-of-range junction can have a
+    // better score than an in-range toll booth with the same name.
+    if (distanceM > maxDistanceM) continue;
 
     for (const taggedName of collectTaggedNames(element.tags, source)) {
       if (taggedName.tag === 'operator' && !isIcLikeName(taggedName.raw)) continue;
@@ -417,7 +428,6 @@ export function analyzeOverpassElements(
   lat: number,
   lon: number,
 ): Omit<ExpresswayResolution, 'cached'> {
-  const nearestIc = rankIcCandidates(elements, lat, lon)[0] ?? null;
   let nearEtcGate = false;
   let onExpresswayRoad = false;
 
@@ -439,11 +449,19 @@ export function analyzeOverpassElements(
     }
   }
 
+  const nearbyCandidates = rankIcCandidates(elements, lat, lon, NEAR_IC_DISTANCE_M);
+  const acceptableCandidates = nearEtcGate && onExpresswayRoad
+    ? rankIcCandidates(elements, lat, lon, CORROBORATED_IC_DISTANCE_M)
+    : nearbyCandidates;
+  const nearestIc = acceptableCandidates[0] ?? null;
+
   return {
     resolved: true,
     provider: 'overpass',
     onExpresswayRoad,
-    nearIc: !!nearestIc && nearestIc.distanceM <= NEAR_IC_DISTANCE_M,
+    // Proximity is independent of name ranking, which may prefer a better
+    // corroborated name beyond 1200m over a closer auxiliary candidate.
+    nearIc: nearbyCandidates.length > 0,
     nearEtcGate,
     nearestIc: nearestIc ? { icName: nearestIc.icName, distanceM: nearestIc.distanceM } : null,
   };

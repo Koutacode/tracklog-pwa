@@ -1,4 +1,6 @@
 import { useEffect } from 'react';
+import { App as CapacitorApp } from '@capacitor/app';
+import { Capacitor } from '@capacitor/core';
 import { retryPendingExpresswayIcResolutions } from '../services/expresswayIcResolution';
 import { onDriverAuthStateChange } from '../services/remoteAuth';
 
@@ -18,6 +20,7 @@ export default function IcResolverJob() {
     let running = false;
     let rerunRequested = false;
     let forceNextRun = false;
+    let lastForegroundRecoveryAt = Date.now();
     const runOnce = async (ignorePendingBackoff = false) => {
       if (running) {
         rerunRequested = true;
@@ -41,20 +44,41 @@ export default function IcResolverJob() {
       }
     };
 
-    const onOnline = () => {
-      void runOnce(true);
+    const start = (force = false) => {
+      // A deleted/edited event or a suspended database must not disable the
+      // recurring worker or leave an unhandled promise rejection.
+      void runOnce(force).catch(() => undefined);
+    };
+    const onOnline = () => start(true);
+    const onResume = () => {
+      if (disposed) return;
+      const now = Date.now();
+      // Native resume and WebView visibility often describe the same return.
+      // Repeated app switching must not continually reset network backoff.
+      if (now - lastForegroundRecoveryAt < 15_000) return;
+      lastForegroundRecoveryAt = now;
+      start(true);
+    };
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') onResume();
     };
     window.addEventListener('online', onOnline);
+    document.addEventListener('visibilitychange', onVisible);
+    const nativeResume = Capacitor.isNativePlatform()
+      ? CapacitorApp.addListener('resume', onResume)
+      : null;
     const unsubscribeAuth = onDriverAuthStateChange(event => {
       if (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED') {
-        void runOnce(true);
+        start(true);
       }
     });
-    void runOnce();
-    const interval = setInterval(() => void runOnce(), 60 * 1000);
+    start(true);
+    const interval = setInterval(() => start(), 15 * 1000);
     return () => {
       disposed = true;
       window.removeEventListener('online', onOnline);
+      document.removeEventListener('visibilitychange', onVisible);
+      void nativeResume?.then(listener => listener.remove()).catch(() => undefined);
       unsubscribeAuth();
       clearInterval(interval);
     };

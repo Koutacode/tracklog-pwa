@@ -114,12 +114,12 @@ assertEqual(computeIcResolveBackoffMs(1), 120_000, 'first failure uses two-minut
 assertEqual(computeIcResolveBackoffMs(10), 3_600_000, 'backoff is capped at one hour');
 assertEqual(
   computeIcResolveDeferredBackoffMs('temporary', 1),
-  120_000,
-  'temporary deferred failures begin at two minutes',
+  15_000,
+  'temporary failures retry promptly after a short network interruption',
 );
 assertEqual(
   computeIcResolveDeferredBackoffMs('temporary', 2),
-  240_000,
+  30_000,
   'temporary deferred failures increase exponentially',
 );
 assertEqual(
@@ -227,7 +227,7 @@ assertEqual(
 assertJsonEqual(
   selectIcResolutionRoutePoint([
     { ts: '2026-07-17T07:57:00.000Z', lat: 35.1, lng: 139.1, accuracy: 20 },
-    { ts: '2026-07-17T08:01:00.000Z', lat: 35.2, lng: 139.2, accuracy: 30 },
+    { ts: '2026-07-17T08:00:25.000Z', lat: 35.2, lng: 139.2, accuracy: 30 },
     { ts: '2026-07-17T08:00:30.000Z', lat: 35.3, lng: 139.3, accuracy: 120 },
   ], '2026-07-17T08:00:00.000Z'),
   { lat: 35.2, lng: 139.2, accuracy: 30 },
