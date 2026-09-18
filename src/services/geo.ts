@@ -1,4 +1,5 @@
 import type { Geo } from '../domain/types';
+import { requestActiveTripPosition } from './activeTripLocation';
 
 /**
  * getGeo returns the current position from the browser's geolocation API. If
@@ -6,25 +7,24 @@ import type { Geo } from '../domain/types';
  * implementation requests high accuracy and has sensible timeouts.
  */
 export async function getGeo(): Promise<Geo | undefined> {
-  if (!navigator.geolocation) return undefined;
+  if (typeof navigator === 'undefined' || !navigator.geolocation) return undefined;
+  // Permission is not consent to collect outside a trip. Resolve lazily because
+  // repositories also use reverseGeocode for already-recorded event positions.
+  const { getActiveTripId } = await import('../db/repositories');
+  const tripId = await getActiveTripId();
+  if (!tripId) return undefined;
   const timeouts = [5000, 8000]; // try fast first, then a bit longer
 
   for (let i = 0; i < timeouts.length; i++) {
+    if (await getActiveTripId() !== tripId) return undefined;
     // eslint-disable-next-line no-await-in-loop
-    const res = await new Promise<Geo | undefined>(resolve => {
-      navigator.geolocation.getCurrentPosition(
-        pos => {
-          resolve({
-            lat: pos.coords.latitude,
-            lng: pos.coords.longitude,
-            accuracy: pos.coords.accuracy,
-          });
-        },
-        () => resolve(undefined),
-        { enableHighAccuracy: true, timeout: timeouts[i], maximumAge: 30000 },
-      );
+    const position = await requestActiveTripPosition({
+      enableHighAccuracy: true, timeout: timeouts[i], maximumAge: 30000,
     });
-    if (res) return res;
+    if (await getActiveTripId() !== tripId) return undefined;
+    if (position) return {
+      lat: position.coords.latitude, lng: position.coords.longitude, accuracy: position.coords.accuracy,
+    };
     // brief delay before retry
     // eslint-disable-next-line no-await-in-loop
     await new Promise(r => setTimeout(r, 300));

@@ -1008,8 +1008,8 @@ export default function HomeScreen() {
             </div>
             <div className="card home-info-card">
               <div className="home-section-label">現在地</div>
-              <div className="home-info-card__address">{geoStatus?.address || '位置情報を取得しています...'}</div>
-              <button className="trip-btn" disabled={operationsDisabled} onClick={captureGeoOnce}>現在地を更新</button>
+              <div className="home-info-card__address">{!tripId ? '運行開始まで位置情報の取得を停止しています' : geoStatus?.address || '運行中に取得した位置を使用します'}</div>
+              <button className="trip-btn" disabled={operationsDisabled || !tripId} onClick={captureGeoOnce}>現在地を更新</button>
             </div>
           </div>
           {liveVm?.segments.length ? (
@@ -1037,7 +1037,11 @@ export default function HomeScreen() {
               <div className="home-section-label">ネイティブ設定</div>
               <h2 id="native-settings-title" style={{ margin: '6px 0 14px' }}>位置記録の設定</h2>
               <div style={{ display: 'grid', gap: 12 }}>
-                <div className="home-native-mode" role="group" aria-label="位置記録モード">
+                {isAndroidNative ? (
+                  <p style={{ margin: 0 }}>
+                    位置情報は運行開始後だけ取得し、運行終了後は停止します。走行中は高速道路の判定に必要な精度で記録します。
+                  </p>
+                ) : <div className="home-native-mode" role="group" aria-label="位置記録モード">
                   <button
                     type="button"
                     aria-pressed={routeTrackingMode === 'precision'}
@@ -1052,7 +1056,7 @@ export default function HomeScreen() {
                   >
                     省電力
                   </button>
-                </div>
+                </div>}
                 <button type="button" className="trip-btn" onClick={() => void runQuickSetup()} disabled={quickSetupRunning}>
                   {quickSetupRunning ? '設定を確認中…' : 'かんたん設定を実行'}
                 </button>

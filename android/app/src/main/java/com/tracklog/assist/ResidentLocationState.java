@@ -4,6 +4,7 @@ import android.Manifest;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
+import android.location.Location;
 import android.location.LocationManager;
 import android.os.Build;
 import android.os.PowerManager;
@@ -14,7 +15,13 @@ import java.util.Locale;
 
 import androidx.core.content.ContextCompat;
 
+import org.json.JSONObject;
+
 final class ResidentLocationState {
+    // Never hold this lock during HTTP/auth refresh. Tracking transitions must
+    // remain available while AUTHORIZATION_REFRESH_LOCK is waiting on network.
+    static final Object TRACKING_INTENT_LOCK = new Object();
+    private static long trackingIntentEpoch = 0L;
     static final String PREFERENCES_NAME = "tracklog_resident_location";
     static final String KEY_ACTIVE_TRIP_ID = "active_trip_id";
     static final String KEY_ROUTE_PAUSE_AT_MS = "route_pause_at_ms";
@@ -33,6 +40,8 @@ final class ResidentLocationState {
     static final String KEY_REFRESH_FAILURE_COUNT = "refresh_failure_count";
     static final String KEY_REFRESH_RETRY_AFTER_AT = "refresh_retry_after_at";
     static final String KEY_LAST_ACCEPTED_LOCATION_AT = "last_accepted_location_at";
+    private static final String KEY_LATEST_RECORDED_LOCATION = "latest_recorded_location";
+    private static final Object LATEST_RECORDED_LOCATION_LOCK = new Object();
     private static final String KEY_LOCATION_REJECT_PREFIX = "location_reject_count_";
     private static final String KEY_LOCATION_QUALITY_METRICS_VERSION = "location_quality_metrics_version";
     private static final String KEY_LOCATION_QUALITY_SESSION_STARTED_AT = "location_quality_session_started_at";
@@ -43,6 +52,18 @@ final class ResidentLocationState {
     private static final int LOCATION_QUALITY_METRICS_VERSION = 1;
 
     private ResidentLocationState() {}
+
+    static long beginTrackingIntent() {
+        synchronized (TRACKING_INTENT_LOCK) {
+            return ++trackingIntentEpoch;
+        }
+    }
+
+    static boolean isCurrentTrackingIntent(long expectedEpoch) {
+        synchronized (TRACKING_INTENT_LOCK) {
+            return trackingIntentEpoch == expectedEpoch;
+        }
+    }
 
     static SharedPreferences preferences(Context context) {
         return context.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE);
@@ -111,17 +132,32 @@ final class ResidentLocationState {
     }
 
     static void stop(Context context, boolean clearAuthorization, boolean clearActiveTrip) {
-        SharedPreferences.Editor editor = preferences(context).edit().putBoolean(KEY_ENABLED, false);
+        SharedPreferences.Editor editor = stoppedTrackingEditor(context, clearActiveTrip, clearAuthorization);
         if (clearAuthorization) {
-            editor.putBoolean(KEY_APPROVED, false).putBoolean(KEY_SETUP_COMPLETE, false);
             clearAuthorization(editor);
             editor.remove(KEY_BLOCKED_AUTHORIZATION_FINGERPRINT);
+        }
+        editor.commit();
+    }
+
+    static void stopTrackingIntent(Context context, boolean clearActiveTrip, boolean suspendEnrollment) {
+        stoppedTrackingEditor(context, clearActiveTrip, suspendEnrollment).commit();
+    }
+
+    private static SharedPreferences.Editor stoppedTrackingEditor(
+            Context context,
+            boolean clearActiveTrip,
+            boolean suspendEnrollment
+    ) {
+        SharedPreferences.Editor editor = preferences(context).edit().putBoolean(KEY_ENABLED, false);
+        if (suspendEnrollment) {
+            editor.putBoolean(KEY_APPROVED, false).putBoolean(KEY_SETUP_COMPLETE, false);
         }
         if (clearActiveTrip) {
             editor.remove(KEY_ACTIVE_TRIP_ID);
             editor.remove(KEY_ROUTE_PAUSE_AT_MS);
         }
-        editor.commit();
+        return editor;
     }
 
     static boolean isEnabled(Context context) {
@@ -138,6 +174,57 @@ final class ResidentLocationState {
 
     static String getActiveTripId(Context context) {
         return normalizeTripId(preferences(context).getString(KEY_ACTIVE_TRIP_ID, ""));
+    }
+
+    /** Called only after the existing route spool has accepted this real fix. */
+    static void cacheLatestRecordedLocation(Context context, String tripId, Location location) {
+        try {
+            String normalizedTripId = normalizeTripId(tripId);
+            if (location == null || normalizedTripId.isEmpty() || location.getTime() <= 0L) return;
+            double latitude = location.getLatitude();
+            double longitude = location.getLongitude();
+            if (!Double.isFinite(latitude) || Math.abs(latitude) > 90d
+                    || !Double.isFinite(longitude) || Math.abs(longitude) > 180d) return;
+            if (location.hasAccuracy()
+                    && (!Float.isFinite(location.getAccuracy()) || location.getAccuracy() < 0f)) return;
+            String timestamp = ResidentLocationQueue.toIsoTimestamp(location.getTime());
+            JSONObject point = new JSONObject()
+                    .put("tripId", normalizedTripId)
+                    .put("ts", timestamp)
+                    .put("lat", latitude)
+                    .put("lng", longitude)
+                    .put("accuracy", location.hasAccuracy() ? location.getAccuracy() : JSONObject.NULL)
+                    .put("source", "background");
+            synchronized (TRACKING_INTENT_LOCK) {
+                if (!normalizedTripId.equals(getActiveTripId(context))) return;
+                synchronized (LATEST_RECORDED_LOCATION_LOCK) {
+                    JSONObject previous = getLatestRecordedLocation(context);
+                    if (previous != null && normalizedTripId.equals(previous.optString("tripId"))
+                            && previous.optString("ts").compareTo(timestamp) >= 0) return;
+                    // apply updates in-memory preferences immediately; the canonical
+                    // route point is already durable in the spool before this cache.
+                    preferences(context).edit().putString(KEY_LATEST_RECORDED_LOCATION, point.toString()).apply();
+                }
+            }
+        } catch (Exception ignored) {
+            // A best-effort cache failure must never invalidate a successful spool append.
+        }
+    }
+
+    /** Read-only: this never touches a location provider or the FIFO queue. */
+    static JSONObject getLatestRecordedLocation(Context context) {
+        try {
+            String stored = preferences(context).getString(KEY_LATEST_RECORDED_LOCATION, "");
+            return stored == null || stored.isEmpty() ? null : new JSONObject(stored);
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    static void clearLatestRecordedLocation(Context context) {
+        synchronized (LATEST_RECORDED_LOCATION_LOCK) {
+            preferences(context).edit().remove(KEY_LATEST_RECORDED_LOCATION).apply();
+        }
     }
 
     static long getRoutePauseAtMs(Context context) {

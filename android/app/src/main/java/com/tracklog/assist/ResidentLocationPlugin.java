@@ -9,11 +9,24 @@ import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
 
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
 @CapacitorPlugin(name = "ResidentLocation")
 public final class ResidentLocationPlugin extends Plugin {
+    // Capacitor invokes plugins and Bridge.execute tasks on one handler. A
+    // network refresh on that handler would prevent even the stop API entering.
+    private static final ExecutorService AUTHORIZATION_EXECUTOR =
+            Executors.newSingleThreadExecutor(runnable -> {
+                Thread thread = new Thread(runnable, "tracklog-resident-authorization");
+                thread.setDaemon(true);
+                return thread;
+            });
+
     @PluginMethod
     public void reconcile(PluginCall call) {
         long requestEpoch = ResidentLocationUploader.currentAuthorizationMutationEpoch();
+        long trackingEpoch = ResidentLocationState.beginTrackingIntent();
         boolean approved = Boolean.TRUE.equals(call.getBoolean("approved", false));
         boolean setupComplete = Boolean.TRUE.equals(call.getBoolean("setupComplete", false));
         String activeTripId = call.getString("activeTripId", "");
@@ -28,33 +41,35 @@ public final class ResidentLocationPlugin extends Plugin {
                         rawExpresswayConfig.optLong("endDurationSec", 24L)
                 );
         Context appContext = getContext().getApplicationContext();
-        getBridge().execute(() -> {
-            boolean startRequested = false;
-            synchronized (ResidentLocationUploader.AUTHORIZATION_REFRESH_LOCK) {
-                if (ResidentLocationUploader.isLatestAuthorizationMutation(requestEpoch)) {
-                    ResidentLocationState.reconcile(
-                            appContext,
-                            approved,
-                            setupComplete,
-                            activeTripId,
-                            routePauseAtMs
-                    );
-                    ResidentExpresswayStore.reconcile(
-                            appContext,
-                            activeTripId,
-                            expresswayOpen,
-                            expresswayConfig
-                    );
-                    reconcileExpresswayNotification(appContext);
-                    startRequested = ResidentLocationService.startIfEligible(appContext);
-                }
+        boolean startRequested = false;
+        synchronized (ResidentLocationState.TRACKING_INTENT_LOCK) {
+            if (ResidentLocationState.isCurrentTrackingIntent(trackingEpoch)
+                    && ResidentLocationUploader.isLatestAuthorizationMutation(requestEpoch)
+                    && (ResidentLocationUploader.isAuthorizationMutationApplied(requestEpoch)
+                            || !approved || !setupComplete)) {
+                ResidentLocationState.reconcile(
+                        appContext,
+                        approved,
+                        setupComplete,
+                        activeTripId,
+                        routePauseAtMs
+                );
+                ResidentExpresswayStore.reconcile(
+                        appContext,
+                        activeTripId,
+                        expresswayOpen,
+                        expresswayConfig
+                );
+                reconcileExpresswayNotification(appContext);
+                startRequested = ResidentLocationService.startIfEligible(appContext);
             }
-            call.resolve(buildStatus(startRequested));
-        });
+        }
+        call.resolve(buildStatus(startRequested));
     }
 
     @PluginMethod
     public void applyTrackingState(PluginCall call) {
+        long trackingEpoch = ResidentLocationState.beginTrackingIntent();
         String activeTripId = call.getString("activeTripId", "");
         long routePauseAtMs = Math.max(0L, call.getLong("routePauseAtMs", 0L));
         boolean expresswayOpen = Boolean.TRUE.equals(call.getBoolean("expresswayOpen", false));
@@ -67,9 +82,9 @@ public final class ResidentLocationPlugin extends Plugin {
                         rawExpresswayConfig.optLong("endDurationSec", 24L)
                 );
         Context appContext = getContext().getApplicationContext();
-        getBridge().execute(() -> {
-            boolean startRequested;
-            synchronized (ResidentLocationUploader.AUTHORIZATION_REFRESH_LOCK) {
+        boolean startRequested = false;
+        synchronized (ResidentLocationState.TRACKING_INTENT_LOCK) {
+            if (ResidentLocationState.isCurrentTrackingIntent(trackingEpoch)) {
                 // Do not mutate enrollment or authorization from a route-transition fast path.
                 // A stale transition can therefore never re-approve an explicitly stopped device.
                 ResidentLocationState.applyTrackingIntent(
@@ -86,8 +101,8 @@ public final class ResidentLocationPlugin extends Plugin {
                 reconcileExpresswayNotification(appContext);
                 startRequested = ResidentLocationService.startIfEligible(appContext);
             }
-            call.resolve(buildStatus(startRequested));
-        });
+        }
+        call.resolve(buildStatus(startRequested));
     }
 
     @PluginMethod
@@ -107,18 +122,20 @@ public final class ResidentLocationPlugin extends Plugin {
         }
         long requestEpoch = ResidentLocationUploader.beginAuthorizationMutation();
         Context appContext = getContext().getApplicationContext();
-        getBridge().execute(() -> {
+        AUTHORIZATION_EXECUTOR.execute(() -> {
             boolean installed = false;
             synchronized (ResidentLocationUploader.AUTHORIZATION_REFRESH_LOCK) {
-                if (ResidentLocationUploader.isLatestAuthorizationMutation(requestEpoch)) {
-                    installed = ResidentLocationState.installAuthorization(
-                            appContext,
-                            authorization
-                    );
-                    boolean applied = ResidentLocationUploader
-                            .markAuthorizationMutationApplied(requestEpoch);
-                    if (installed && applied) {
-                        ResidentLocationService.startIfEligible(appContext);
+                synchronized (ResidentLocationState.TRACKING_INTENT_LOCK) {
+                    if (ResidentLocationUploader.isLatestAuthorizationMutation(requestEpoch)) {
+                        installed = ResidentLocationState.installAuthorization(
+                                appContext,
+                                authorization
+                        );
+                        boolean applied = ResidentLocationUploader
+                                .markAuthorizationMutationApplied(requestEpoch);
+                        if (installed && applied) {
+                            ResidentLocationService.startIfEligible(appContext);
+                        }
                     }
                 }
             }
@@ -138,28 +155,42 @@ public final class ResidentLocationPlugin extends Plugin {
     @PluginMethod
     public void stop(PluginCall call) {
         long requestEpoch = ResidentLocationUploader.beginAuthorizationMutation();
+        long trackingEpoch = ResidentLocationState.beginTrackingIntent();
         boolean clearAuthorization = Boolean.TRUE.equals(call.getBoolean("clearAuthorization", false));
         boolean clearActiveTrip = Boolean.TRUE.equals(call.getBoolean("clearActiveTrip", false));
         boolean clearExpresswayData = Boolean.TRUE.equals(
                 call.getBoolean("clearExpresswayData", false)
         );
         Context appContext = getContext().getApplicationContext();
-        getBridge().execute(() -> {
+        synchronized (ResidentLocationState.TRACKING_INTENT_LOCK) {
+            if (ResidentLocationState.isCurrentTrackingIntent(trackingEpoch)) {
+                // Stop location intake before waiting for an in-flight refresh.
+                // Authentication is cleared separately under its existing lock.
+                ResidentLocationState.stopTrackingIntent(appContext, clearActiveTrip, clearAuthorization);
+                if (clearExpresswayData) {
+                    ResidentExpresswayStore.clearPrivateData(appContext);
+                    ResidentLocationState.clearLatestRecordedLocation(appContext);
+                } else if (clearActiveTrip) {
+                    ResidentExpresswayStore.deactivate(appContext);
+                }
+                ResidentExpresswayNotification.cancel(appContext);
+                ResidentLocationService.stop(appContext);
+            }
+        }
+        if (!clearAuthorization) {
+            ResidentLocationUploader.markAuthorizationMutationApplied(requestEpoch);
+            call.resolve(buildStatus(false));
+            return;
+        }
+        AUTHORIZATION_EXECUTOR.execute(() -> {
             synchronized (ResidentLocationUploader.AUTHORIZATION_REFRESH_LOCK) {
-                if (ResidentLocationUploader.isLatestAuthorizationMutation(requestEpoch)) {
-                    ResidentLocationState.stop(
-                            appContext,
-                            clearAuthorization,
-                            clearActiveTrip
-                    );
-                    if (clearExpresswayData) {
-                        ResidentExpresswayStore.clearPrivateData(appContext);
-                    } else if (clearActiveTrip) {
-                        ResidentExpresswayStore.deactivate(appContext);
-                    }
-                    ResidentExpresswayNotification.cancel(appContext);
-                    if (ResidentLocationUploader.markAuthorizationMutationApplied(requestEpoch)) {
-                        ResidentLocationService.stop(appContext);
+                synchronized (ResidentLocationState.TRACKING_INTENT_LOCK) {
+                    if (ResidentLocationUploader.isLatestAuthorizationMutation(requestEpoch)) {
+                        // Never clear a newer trip from this delayed auth task.
+                        ResidentLocationState.stop(appContext, true, false);
+                        if (ResidentLocationUploader.markAuthorizationMutationApplied(requestEpoch)) {
+                            ResidentLocationService.startIfEligible(appContext);
+                        }
                     }
                 }
             }
@@ -170,6 +201,14 @@ public final class ResidentLocationPlugin extends Plugin {
     @PluginMethod
     public void getStatus(PluginCall call) {
         call.resolve(buildStatus(false));
+    }
+
+    @PluginMethod
+    public void getLatestRecordedLocation(PluginCall call) {
+        JSObject result = new JSObject();
+        org.json.JSONObject point = ResidentLocationState.getLatestRecordedLocation(getContext());
+        result.put("point", point == null ? org.json.JSONObject.NULL : point);
+        call.resolve(result);
     }
 
     @PluginMethod
@@ -187,7 +226,7 @@ public final class ResidentLocationPlugin extends Plugin {
         long requestEpoch = ResidentLocationUploader.currentAuthorizationMutationEpoch();
         boolean force = Boolean.TRUE.equals(call.getBoolean("force", false));
         Context appContext = getContext().getApplicationContext();
-        getBridge().execute(() -> {
+        AUTHORIZATION_EXECUTOR.execute(() -> {
             try {
                 ResidentLocationUploader.AuthorizationRefreshResult result =
                         ResidentLocationUploader.refreshAuthorizationForWebView(
@@ -212,7 +251,7 @@ public final class ResidentLocationPlugin extends Plugin {
         Context appContext = getContext().getApplicationContext();
         ResidentLocationState.Authorization expected =
                 ResidentLocationState.getAuthorization(appContext);
-        getBridge().execute(() -> {
+        AUTHORIZATION_EXECUTOR.execute(() -> {
             ResidentLocationUploader.AuthorizationRefreshResult result =
                     ResidentLocationUploader.blockAuthorization(
                             appContext,

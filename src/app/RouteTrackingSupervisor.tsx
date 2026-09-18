@@ -41,7 +41,6 @@ import { getDriverIdentity } from '../services/remoteAuth';
 import { onDriverAuthStateChange } from '../services/remoteAuth';
 import { checkNativeSetupReadiness } from '../services/nativeSetup';
 import {
-  requestLocationHeartbeatNow,
   startLocationHeartbeat,
   stopLocationHeartbeat,
 } from '../services/locationHeartbeat';
@@ -68,6 +67,7 @@ import {
 } from './nativeResidentLocationPolicy';
 import {
   applyWebLocationTrackingIntent,
+  guardWebLocationTrackingActions,
   normalizeWebLocationPermissionState,
   resolveWebLocationTrackingIntent,
 } from './webLocationPermissionPolicy';
@@ -113,7 +113,6 @@ export default function RouteTrackingSupervisor() {
     let inFlight = false;
     let syncQueued = false;
     let lifecycleEpoch = 0;
-    let foregroundHeartbeatRequestedAt = 0;
     let webLocationPermissionStatus: PermissionStatus | null = null;
     let webLocationPermissionState: WebLocationPermissionState = 'unknown';
     const native = isAndroidNative();
@@ -164,8 +163,10 @@ export default function RouteTrackingSupervisor() {
     const reconcileWebLocationTracking = async (
       activeTripId: string | null,
       routePaused: boolean,
+      expectedEpoch: number,
       mode?: Parameters<typeof startRouteTracking>[1],
     ) => {
+      if (disposed || expectedEpoch !== lifecycleEpoch) return;
       const intent = resolveWebLocationTrackingIntent({
         permissionState: webLocationPermissionState,
         activeTripId,
@@ -178,7 +179,11 @@ export default function RouteTrackingSupervisor() {
         // unanswered prompt must not cause an automatic retry 15 seconds later.
         pwaActiveTripResumeAttempted = true;
       }
-      await applyWebLocationTrackingIntent(intent, webLocationTrackingActions);
+      await applyWebLocationTrackingIntent(intent, guardWebLocationTrackingActions(webLocationTrackingActions, {
+        expectedTripId: activeTripId,
+        getActiveTripId,
+        isCurrent: () => !disposed && expectedEpoch === lifecycleEpoch,
+      }));
     };
 
     const stopAllLocationWork = async (
@@ -210,19 +215,6 @@ export default function RouteTrackingSupervisor() {
       if (!native) return;
       resetNativeExpresswayDetection();
       await suspendNativeResidentLocationForApproval();
-    };
-
-    const maybeRequestForegroundHeartbeat = () => {
-      // When allowed, the PWA uses the supervisor-owned geolocation watcher.
-      // An additional getCurrentPosition request on every visibility change
-      // can create duplicate browser prompts. Android uses the app-owned
-      // foreground service, so it still needs this one-shot refresh.
-      if (!native) return;
-      if (document.visibilityState !== 'visible') return;
-      const now = Date.now();
-      if (now - foregroundHeartbeatRequestedAt < 30000) return;
-      foregroundHeartbeatRequestedAt = now;
-      void requestLocationHeartbeatNow();
     };
 
     const sync = async () => {
@@ -291,8 +283,11 @@ export default function RouteTrackingSupervisor() {
           return;
         }
 
-        startLocationHeartbeat();
         if (native) {
+          // ResidentLocationService owns both GPS and periodic location sharing.
+          // A WebView heartbeat here would acquire/upload the same location a
+          // second time. Explicit admin requests retain their separate action.
+          stopLocationHeartbeat();
           // The app-owned service is the single native route source. Keeping the
           // legacy watcher active here would record the same movement twice.
           await stopResidentLocationUpdates();
@@ -317,7 +312,6 @@ export default function RouteTrackingSupervisor() {
         }
         await ensureTracklogPushRegistration();
         await retryPendingAdminMessageLocationRequests();
-        maybeRequestForegroundHeartbeat();
         await pollTracklogAdminMessages();
 
         // Capture before reading the trip/events snapshot. An explicit No or
@@ -329,6 +323,7 @@ export default function RouteTrackingSupervisor() {
         const expresswayConfig = native ? await getAutoExpresswayConfig() : undefined;
         const tripId = await getActiveTripId();
         if (!tripId) {
+          stopLocationHeartbeat();
           resetNativeExpresswayDetection();
           if (native) {
             await reconcileNativeResidentLocation({
@@ -340,7 +335,7 @@ export default function RouteTrackingSupervisor() {
               expresswayConfig,
             });
           } else {
-            await reconcileWebLocationTracking(null, false);
+            await reconcileWebLocationTracking(null, false, syncEpoch);
           }
           const pendingPrompt = await getPendingExpresswayEndPrompt();
           const pendingDecision = await getPendingExpresswayEndDecision();
@@ -353,6 +348,7 @@ export default function RouteTrackingSupervisor() {
           }
           return;
         }
+        if (!native) startLocationHeartbeat();
         const events = await getEventsByTripId(tripId);
         const openExpressway = hasOpenExpressway(events);
         const pendingDecision = await getPendingExpresswayEndDecision();
@@ -399,7 +395,7 @@ export default function RouteTrackingSupervisor() {
               expresswayConfig,
             });
           } else {
-            await reconcileWebLocationTracking(tripId, true);
+            await reconcileWebLocationTracking(tripId, true, syncEpoch);
           }
           return;
         }
@@ -434,7 +430,7 @@ export default function RouteTrackingSupervisor() {
             ),
           });
         } else {
-          await reconcileWebLocationTracking(tripId, false, mode);
+          await reconcileWebLocationTracking(tripId, false, syncEpoch, mode);
         }
       } catch {
         // retry on next tick
@@ -449,12 +445,14 @@ export default function RouteTrackingSupervisor() {
 
     const onVisible = () => {
       if (document.visibilityState === 'visible') {
-        maybeRequestForegroundHeartbeat();
         void pollTracklogAdminMessages({ force: true });
         void sync();
       }
     };
     const onSyncRequest = () => {
+      // Invalidate snapshots held by a pending auth/DB/watcher transition before
+      // queuing reconciliation for the newly committed trip state.
+      lifecycleEpoch += 1;
       if (!native) {
         // These events follow explicit trip/record/setup operations. Unlike a
         // timer or visibility sync, an explicit operation may have just proved

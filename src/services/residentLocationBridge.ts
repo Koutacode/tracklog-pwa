@@ -15,6 +15,9 @@ export type NativeResidentLocationPoint = {
   elapsedRealtimeMs?: number;
 };
 
+export type NativeResidentLocationRecordedPoint = Pick<NativeResidentLocationPoint,
+  'tripId' | 'ts' | 'lat' | 'lng' | 'accuracy' | 'source'>;
+
 export type NativeResidentExpresswayEvent = {
   id: string;
   tripId: string;
@@ -126,6 +129,7 @@ type ResidentLocationPlugin = {
     clearExpresswayData: boolean;
   }): Promise<NativeResidentLocationStatus>;
   getStatus(): Promise<NativeResidentLocationStatus>;
+  getLatestRecordedLocation(): Promise<{ point: NativeResidentLocationRecordedPoint | null }>;
   getAuthorization(): Promise<NativeResidentLocationAuthorization>;
   refreshAuthorization(options?: { force?: boolean }): Promise<NativeResidentLocationAuthorization>;
   blockAuthorization(): Promise<NativeResidentLocationAuthorization>;

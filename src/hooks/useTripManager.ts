@@ -3,6 +3,7 @@ import { Capacitor } from '@capacitor/core';
 import {
   getActiveTripId,
   getEventsByTripId,
+  completeTripStartLocation,
   startTrip as dbStartTrip,
   endTrip as dbEndTrip,
   startRest as dbStartRest,
@@ -36,6 +37,10 @@ import {
 import { requestRouteTrackingSync } from '../app/routeTrackingSignal';
 import { prepareNativeExpresswayEventsForTripEnd } from '../services/nativeExpresswayEventHandoff';
 import { commitRouteTransitionWithNativeFastApply } from '../services/nativeTrackingFastApply';
+import { getRecordedTripEndGeo } from '../services/tripEndLocation';
+import { cancelActiveTripLocationRequests } from '../services/activeTripLocation';
+import { stopResidentLocationUpdates, stopRouteTracking } from '../services/routeTracking';
+import { stopLocationHeartbeat } from '../services/locationHeartbeat';
 
 export type TripOperation =
   | 'trip-start'
@@ -111,6 +116,10 @@ export function useTripManager() {
   const captureGeoOnce = useCallback(async () => {
     try {
       setGeoError(null);
+      if (!await getActiveTripId()) {
+        setGeoStatus(null);
+        return { geo: undefined, address: undefined };
+      }
       const { geo, address } = await getGeoWithAddress();
       if (geo) {
         setGeoStatus({
@@ -134,12 +143,17 @@ export function useTripManager() {
   const handleStartTrip = useCallback(async (odoKm: number) => {
     return runOperation('trip-start', async () => {
       const occurredAt = new Date().toISOString();
-      const { geo, address } = await captureGeoOnce();
-      const { tripId: newTripId } = await commitRouteTransitionWithNativeFastApply(
-        () => dbStartTrip({ odoKm, geo, address, occurredAt }),
+      const { tripId: newTripId, event } = await commitRouteTransitionWithNativeFastApply(
+        () => dbStartTrip({ odoKm, occurredAt }),
       );
       setTripId(newTripId);
       requestRouteTrackingSync();
+      const { geo, address } = await captureGeoOnce();
+      if (geo) {
+        await completeTripStartLocation({
+          tripId: newTripId, eventId: event.id, expectedTimestamp: event.ts, geo, address,
+        });
+      }
       await refresh();
       return newTripId;
     });
@@ -149,19 +163,33 @@ export function useTripManager() {
     if (!tripId) return;
     return runOperation('trip-end', async () => {
       const occurredAt = new Date().toISOString();
-      const { geo, address } = await captureGeoOnce();
+      // Finishing must not wait for a new GPS fix or an address network request.
+      const geo = await getRecordedTripEndGeo(tripId, Date.parse(occurredAt));
       await prepareNativeExpresswayEventsForTripEnd({
         enabled: Capacitor.isNativePlatform() && Capacitor.getPlatform() === 'android',
         tripId,
       });
       const { event } = await commitRouteTransitionWithNativeFastApply(
-        () => dbEndTrip({ tripId, odoEndKm, geo, address, occurredAt }),
+        async () => {
+          const result = await dbEndTrip({ tripId, odoEndKm, geo, occurredAt });
+          cancelActiveTripLocationRequests();
+          stopLocationHeartbeat();
+          // These functions invalidate callback acceptance before their first
+          // await. Do not wait for an auth-dependent supervisor to stop a PWA.
+          void Promise.all([stopResidentLocationUpdates(), stopRouteTracking()]).catch(() => {
+            requestRouteTrackingSync();
+          });
+          requestRouteTrackingSync();
+          return result;
+        },
       );
+      setGeoStatus(null);
+      setGeoError(null);
       requestRouteTrackingSync();
       await refresh();
       return event;
     });
-  }, [captureGeoOnce, refresh, runOperation, tripId]);
+  }, [refresh, runOperation, tripId]);
 
   const handleStartRest = useCallback(async (odoKm: number) => {
     if (!tripId) return;
@@ -305,44 +333,8 @@ export function useTripManager() {
   // Lifecycle
   useEffect(() => {
     void refresh();
-    let disposed = false;
-    let permissionStatus: PermissionStatus | null = null;
-    const captureIfAlreadyAllowed = async () => {
-      if (Capacitor.isNativePlatform()) {
-        if (!disposed) void captureGeoOnce();
-        return;
-      }
-      // Do not turn every Home mount into another browser permission prompt.
-      // The resident watcher or an explicit user operation owns the initial
-      // request; once that request is granted, refresh the Home address without
-      // prompting again.
-      if (!navigator.permissions?.query) return;
-      try {
-        permissionStatus = await navigator.permissions.query({ name: 'geolocation' as PermissionName });
-        const onPermissionChange = () => {
-          if (!disposed && permissionStatus?.state === 'granted') void captureGeoOnce();
-        };
-        permissionStatus.addEventListener('change', onPermissionChange);
-        if (permissionStatus.state === 'granted') void captureGeoOnce();
-        return () => permissionStatus?.removeEventListener('change', onPermissionChange);
-      } catch {
-        // Unsupported permission queries must not fall back to a surprise prompt.
-      }
-      return undefined;
-    };
-    let removePermissionListener: (() => void) | undefined;
-    void captureIfAlreadyAllowed().then(remove => {
-      if (disposed) {
-        remove?.();
-      } else {
-        removePermissionListener = remove;
-      }
-    });
-    return () => {
-      disposed = true;
-      removePermissionListener?.();
-    };
-  }, [refresh, captureGeoOnce]);
+    // Merely opening Home or changing a permission must never request a fix.
+  }, [refresh]);
 
   // Timers can be suspended while the PWA/WebView is in the background. A
   // visibility refresh restores a pending or approved modal immediately.

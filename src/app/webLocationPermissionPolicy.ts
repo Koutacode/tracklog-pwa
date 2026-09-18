@@ -20,6 +20,30 @@ export type WebLocationTrackingActions = {
   stopRouteTracking(): Promise<void>;
 };
 
+/** Recheck persisted trip identity and the initiating lifecycle after every await. */
+export function guardWebLocationTrackingActions(
+  actions: WebLocationTrackingActions,
+  guard: {
+    expectedTripId: string | null;
+    getActiveTripId: () => Promise<string | null>;
+    isCurrent: () => boolean;
+  },
+): WebLocationTrackingActions {
+  const runCurrent = async (action: () => Promise<void>, requiresTrip = false) => {
+    const activeTripId = await guard.getActiveTripId();
+    // This check and invoking the action share one synchronous continuation.
+    // A trip-close request invalidates the epoch while the DB read is pending.
+    if (!guard.isCurrent() || activeTripId !== guard.expectedTripId || (requiresTrip && !activeTripId)) return;
+    await action();
+  };
+  return {
+    startResidentLocationUpdates: mode => runCurrent(() => actions.startResidentLocationUpdates(mode), true),
+    startRouteTracking: (tripId, mode) => runCurrent(() => actions.startRouteTracking(tripId, mode), true),
+    stopResidentLocationUpdates: () => runCurrent(() => actions.stopResidentLocationUpdates()),
+    stopRouteTracking: () => runCurrent(() => actions.stopRouteTracking()),
+  };
+}
+
 export function normalizeWebLocationPermissionState(
   state: string | null | undefined,
 ): WebLocationPermissionState {
@@ -34,8 +58,11 @@ export function resolveWebLocationTrackingIntent(input: {
   mode?: RouteTrackingMode;
   activeTripResumeAttemptAvailable?: boolean;
 }): WebLocationTrackingIntent {
+  // Permission alone is not tracking intent. No location is acquired between
+  // trips, including an already-granted permission after an app restart.
+  if (!input.activeTripId) return { kind: 'stopped' };
   if (input.permissionState === 'granted') {
-    if (!input.activeTripId || input.routePaused) return { kind: 'resident' };
+    if (input.routePaused) return { kind: 'resident' };
     return {
       kind: 'route',
       tripId: input.activeTripId,
@@ -83,8 +110,8 @@ export async function applyWebLocationTrackingIntent(
     return;
   }
 
+  // Do not arm an idle fallback: ending this route must stop GPS outright.
+  // A pause within an active trip can explicitly select resident intent.
+  await actions.stopResidentLocationUpdates();
   await actions.startRouteTracking(intent.tripId, intent.mode);
-  // Keep resident tracking enabled so ending/pausing the trip can reuse the
-  // same watcher while changing purpose instead of briefly stopping it.
-  await actions.startResidentLocationUpdates('battery');
 }

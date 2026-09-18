@@ -4,6 +4,7 @@ import {
   buildNativeResidentLocationStopRequest,
   createNativeTrackingStateCoordinator,
   matchesInstalledNativeAuthorization,
+  parseNativeRecordedLocation,
 } from './nativeResidentLocation';
 import type { AppEvent } from '../domain/types';
 import {
@@ -26,6 +27,28 @@ function deferred() {
 }
 
 async function runAsyncTests() {
+  {
+    const recorded = {
+      tripId: 'synthetic-trip', ts: '2026-09-19T00:00:00.000Z',
+      lat: 35, lng: 139, accuracy: 12, source: 'background',
+    };
+    assertEqual(JSON.stringify(parseNativeRecordedLocation(recorded)), JSON.stringify(recorded),
+      'latest recorded location retains the original timestamp and trip without a fresh sensor fix');
+    assertEqual(parseNativeRecordedLocation(null), null, 'pre-cache APK state has no latest point');
+    assertEqual(parseNativeRecordedLocation({ ...recorded, tripId: '' }), null, 'a cached fix must own a trip');
+    assertEqual(parseNativeRecordedLocation({ ...recorded, source: 'event' }), null,
+      'an event anchor is not a recorded GPS observation');
+    for (const invalid of [
+      { ts: 'invalid' }, { lat: NaN }, { lng: 181 }, { lat: '35' },
+      { accuracy: -1 }, { accuracy: Infinity }, { accuracy: '12' },
+    ]) {
+      assertEqual(parseNativeRecordedLocation({ ...recorded, ...invalid }), null,
+        'malformed cache data is rejected and permits database fallback');
+    }
+    assertEqual(parseNativeRecordedLocation({ ...recorded, accuracy: null })?.accuracy, null,
+      'historical missing accuracy remains explicit for the caller policy');
+  }
+
   {
     const request = buildNativeResidentLocationReconcileRequest({
       approved: true,
@@ -117,15 +140,16 @@ async function runAsyncTests() {
 
     const oldFullReconcile = coordinator.enqueueCommit(async () => {
       calls.push('old:start');
-      await oldBridgeCall.promise;
+      // Native tracking writes synchronously before resolving its bridge call.
       nativeState = 'old-full';
+      await oldBridgeCall.promise;
       calls.push('old:end');
       return nativeState;
     });
     await Promise.resolve();
 
     coordinator.advanceGeneration();
-    const directDecision = coordinator.enqueueCommit(async () => {
+    const directDecision = coordinator.commitImmediately(async () => {
       calls.push('direct:start');
       nativeState = 'direct-decision';
       calls.push('direct:end');
@@ -135,17 +159,51 @@ async function runAsyncTests() {
 
     assertEqual(
       calls.join(','),
-      'old:start',
-      'a direct decision waits for an already-started bridge reconcile',
+      'old:start,direct:start,direct:end',
+      'a direct decision reaches native without waiting for an older bridge response',
     );
     oldBridgeCall.resolve();
     await Promise.all([oldFullReconcile, directDecision]);
     assertEqual(
       calls.join(','),
-      'old:start,old:end,direct:start,direct:end',
-      'bridge reconciles execute in submission order',
+      'old:start,direct:start,direct:end,old:end',
+      'an old response can complete after the explicit transition without rewriting native state',
     );
     assertEqual(nativeState, 'direct-decision', 'the explicit decision is the final native state');
+  }
+
+  {
+    const coordinator = createNativeTrackingStateCoordinator();
+    const response = deferred();
+    const calls: string[] = [];
+    const first = coordinator.enqueueCommit(async () => {
+      await response.promise;
+      return 'old-response';
+    });
+    const staleQueued = coordinator.enqueueCommit(async () => {
+      calls.push('stale-reconcile');
+      return 'stale';
+    }, async () => 'superseded');
+    coordinator.advanceGeneration();
+    await coordinator.commitImmediately(async () => { calls.push('stop'); });
+    assertEqual(calls.join(','), 'stop', 'stop dispatches while an older response is still blocked');
+    response.resolve();
+    await first;
+    assertEqual(await staleQueued, 'superseded', 'a queued old reconcile checks generation at dispatch');
+    assertEqual(calls.join(','), 'stop', 'the queued old state cannot restart a stopped trip');
+  }
+
+  {
+    const coordinator = createNativeTrackingStateCoordinator();
+    let failed = false;
+    try {
+      await coordinator.commitImmediately(() => { throw new Error('bridge unavailable'); });
+    } catch {
+      failed = true;
+    }
+    assertEqual(failed, true, 'an immediate bridge exception rejects the caller');
+    assertEqual(await coordinator.commitImmediately(async () => 'recovered'), 'recovered',
+      'a failed immediate transition cannot block a later stop');
   }
 
   {
@@ -356,7 +414,7 @@ async function runAsyncTests() {
     assertEqual(failed, true, 'fast apply failure is surfaced before UI success');
   }
 
-  console.log('nativeResidentLocation: 25 tests passed');
+  console.log('nativeResidentLocation: tracking intent and stop ordering assertions passed');
 }
 
 void runAsyncTests().catch(error => {

@@ -1,3 +1,4 @@
+import { Capacitor } from '@capacitor/core';
 import { getActiveTripId, getEventsByTripId } from '../db/repositories';
 import type { AppEvent } from '../domain/types';
 import {
@@ -10,16 +11,18 @@ import {
 import { getDriverIdentity } from './remoteAuth';
 import { subscribeLocationUpdates } from './routeTracking';
 import type { LocationPayload } from './routeTracking';
-import { resolveLocationHeartbeatPayload } from './locationHeartbeatPolicy';
+import { requestLocationHeartbeatForActiveTrip, resolveLocationHeartbeatPayload } from './locationHeartbeatPolicy';
+import { createLocationHeartbeatSubscription } from './locationHeartbeatSubscription';
+import { requestActiveTripPosition } from './activeTripLocation';
 import { updateTracklogDeviceLocationViaFunction } from './tracklogPrivilegedApi';
 
 const HEARTBEAT_INTERVAL_MS = 30 * 1000;
 const FORCE_HEARTBEAT_INTERVAL_MS = 5 * 1000;
 
-let unsubscribeLocation: (() => void) | null = null;
 let lastSentAt = 0;
 let inFlight: Promise<void> | null = null;
-let pendingLocation: LocationPayload | null = null;
+type TripLocationHeartbeat = { location: LocationPayload; tripId: string };
+let pendingLocation: TripLocationHeartbeat | null = null;
 let lastAcceptedLocationAt: number | null = null;
 
 const STATUS_TOGGLE_DEFINITIONS: ReadonlyArray<{
@@ -58,12 +61,16 @@ async function getOperationSnapshot() {
   };
 }
 
-async function sendLocation(location: LocationPayload) {
+async function sendLocation(heartbeat: TripLocationHeartbeat) {
   const identity = await getDriverIdentity();
   if (!identity.configured || !identity.authInitialized || !identity.profileComplete) return;
   if (identity.approvalStatus !== 'approved' || !identity.deviceId) return;
 
   const operation = await getOperationSnapshot();
+  // Captured/pending points belong to the trip that produced them. A delayed
+  // callback must never publish after that trip ended or as the next trip.
+  if (!operation.latestTripId || operation.latestTripId !== heartbeat.tripId) return;
+  const { location } = heartbeat;
   const sentAt = nowIso();
   await updateTracklogDeviceLocationViaFunction({
     deviceId: identity.deviceId,
@@ -87,19 +94,19 @@ function drainPending() {
   void sendEligibleLocationHeartbeat(next);
 }
 
-async function sendEligibleLocationHeartbeat(location: LocationPayload, force = false) {
+async function sendEligibleLocationHeartbeat(heartbeat: TripLocationHeartbeat, force = false) {
   if (typeof navigator !== 'undefined' && !navigator.onLine) return;
   const minInterval = force ? FORCE_HEARTBEAT_INTERVAL_MS : HEARTBEAT_INTERVAL_MS;
   if (Date.now() - lastSentAt < minInterval) {
-    if (!force) pendingLocation = location;
+    if (!force) pendingLocation = heartbeat;
     return;
   }
   if (inFlight) {
-    pendingLocation = location;
+    pendingLocation = heartbeat;
     return;
   }
 
-  inFlight = sendLocation(location)
+  inFlight = sendLocation(heartbeat)
     .catch(() => {
       console.warn('[locationHeartbeat] update failed');
     })
@@ -110,54 +117,52 @@ async function sendEligibleLocationHeartbeat(location: LocationPayload, force = 
   await inFlight;
 }
 
-async function handleLocationHeartbeat(location: LocationPayload, force = false) {
+async function handleLocationHeartbeat(location: LocationPayload, force = false, expectedTripId?: string) {
+  const tripId = await getActiveTripId();
+  if (!tripId || (expectedTripId && tripId !== expectedTripId)) return;
   const accepted = resolveLocationHeartbeatPayload(location, Date.now(), lastAcceptedLocationAt);
   if (!accepted) return;
   lastAcceptedLocationAt = accepted.time ?? null;
-  await sendEligibleLocationHeartbeat(accepted, force);
+  await sendEligibleLocationHeartbeat({ location: accepted, tripId }, force);
 }
 
+const automaticHeartbeat = createLocationHeartbeatSubscription({
+  nativeOwnsHeartbeat: () => Capacitor.isNativePlatform() && Capacitor.getPlatform() === 'android',
+  subscribe: subscribeLocationUpdates,
+  onStart: () => { lastAcceptedLocationAt = null; },
+  onLocation: location => { void handleLocationHeartbeat(location); },
+});
+
 export function startLocationHeartbeat() {
-  if (unsubscribeLocation) return;
-  lastAcceptedLocationAt = null;
-  unsubscribeLocation = subscribeLocationUpdates(location => {
-    void handleLocationHeartbeat(location);
-  });
+  automaticHeartbeat.start();
 }
 
 export function stopLocationHeartbeat() {
-  if (unsubscribeLocation) {
-    unsubscribeLocation();
-    unsubscribeLocation = null;
-  }
+  automaticHeartbeat.stop();
   pendingLocation = null;
   lastAcceptedLocationAt = null;
 }
 
+/** Explicit user/admin action; Android periodic work belongs to the native service. */
 export async function requestLocationHeartbeatNow() {
   if (typeof navigator === 'undefined' || !navigator.geolocation) return;
-  await new Promise<void>(resolve => {
-    navigator.geolocation.getCurrentPosition(
-      position => {
-        void handleLocationHeartbeat(
-          {
-            lat: position.coords.latitude,
-            lng: position.coords.longitude,
-            accuracy: position.coords.accuracy,
-            speed: position.coords.speed ?? null,
-            heading: position.coords.heading ?? null,
-            time: position.timestamp,
-            source: 'foreground',
-          },
-          true,
-        ).finally(resolve);
-      },
-      () => resolve(),
-      {
-        enableHighAccuracy: true,
-        maximumAge: 30000,
-        timeout: 10000,
-      },
-    );
+  await requestLocationHeartbeatForActiveTrip({
+    getActiveTripId,
+    acquireLocation: async () => {
+      const position = await requestActiveTripPosition({
+        enableHighAccuracy: true, maximumAge: 30000, timeout: 10000,
+      });
+      if (!position) return null;
+      return {
+        lat: position.coords.latitude,
+        lng: position.coords.longitude,
+        accuracy: position.coords.accuracy,
+        speed: position.coords.speed ?? null,
+        heading: position.coords.heading ?? null,
+        time: position.timestamp,
+        source: 'foreground',
+      };
+    },
+    send: (location, tripId) => handleLocationHeartbeat(location, true, tripId),
   });
 }

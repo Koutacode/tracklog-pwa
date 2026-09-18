@@ -19,7 +19,8 @@ public class ExampleUnitTest {
     @Test
     public void residentNotificationText_isExact() {
         assertEquals("位置記録中", ResidentLocationService.NOTIFICATION_TEXT);
-        assertEquals(0f, ResidentLocationService.MIN_DISTANCE_METERS, 0f);
+        assertEquals("運行待機中・位置取得停止", ResidentLocationService.TRIP_WAITING_TEXT);
+        assertEquals(0f, ResidentLocationSamplingPolicy.MIN_DISTANCE_METERS, 0f);
     }
 
     @Test
