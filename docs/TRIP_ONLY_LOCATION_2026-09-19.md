@@ -26,7 +26,50 @@ v0.1.60、native状態・IndexedDB・ホーム表示とも非運行のまま76�
 
 ## 検証と成果物
 
-開始前・終了後の取得拒否、終了時の未完了watch解除、開始点補完と既存手動値保護、終了位置の他運行・古い時刻・未来・低精度・event-anchor除外を合成データで検証する。nativeでは運行状態・provider変更・登録中終了・遅延callback・送信再試行・認証lock待ちの回帰テストを実施する。最終の公開・実機結果はこの文書へ追記する。
+開始前・終了後の取得拒否、終了時の未完了watch解除、開始点補完と既存手動値保護、終了位置の他運行・古い時刻・未来・低精度・event-anchor除外を合成データで検証し成功した。nativeでは運行状態・provider変更・登録中終了・遅延callback・送信再試行・認証lock待ちの回帰テストが成功した。
+
+- `npm run test:logic`、`npm run typecheck`、同期テスト12件、CSP、Web build、offline assets、Capacitor同期が成功。
+- Androidの `testDebugUnitTest`、`assembleDebug`、`assembleDebugAndroidTest` が成功。単体テスト11 suites / 81 tests、失敗・エラー・スキップ0。追加の端末向けテスト2件はコンパイルのみ確認し、利用者の端末では実行していない。
+- OneDrive外の通常ファイルmirrorとソース・assets145ファイルのSHA一致、APK内46 assetsの一致、public44/44件を確認した。
+- ローカルcandidate: `output/candidate/tracklog-assist-v0.1.61-debug.apk`、7,368,819 bytes、SHA-256 `f5e71a4af5d379c03c5dc6035d04bd1dc8c65129abdc7a60ab133b59816d9eb8`。公開APKとは区別し、実機には公開検証後のAPKを使用する。
+- [PR #8](https://github.com/Koutacode/tracklog-pwa/pull/8) は検証済みhead `91c0dc4` をmain `803b7e9` へmerge済み。[PR CI](https://github.com/Koutacode/tracklog-pwa/actions/runs/35360497409)、[main CI](https://github.com/Koutacode/tracklog-pwa/actions/runs/35360630216) は成功。
+- 独立コードレビューで認証削除待ち中の再開競合を検出・修正し、再レビューで追加blockingなし。競合タイミングを作る実機試験とは区別する。
+
+## 通常公開・配布APKの検証
+
+[Android Release](https://github.com/Koutacode/tracklog-pwa/actions/runs/35360645339) は全工程成功。v0.1.61を通常公開（draft=false、prerelease=false）した。署名・version・draft download・latest・旧版APK削除を検証し、旧版APKは連続2回の確認および独立API確認で0件。
+
+ローカルでも `npm run release:verify:apk` が成功し、公開APKで `output/tracklog-assist-debug.apk` を置換した。固定latestの公開checksum sidecarとも完全一致を確認した。
+
+- 配布URL: https://github.com/Koutacode/tracklog-pwa/releases/latest/download/tracklog-assist-debug.apk
+- package `com.tracklog.assist`、version `0.1.61`、versionCode `59`
+- 公開APK SHA-256: `acc53c7daa82acea93a0d4933017ae3cc1f3a2f16136a97e96b3a93d947b61f6`
+- 署名SHA-256: `14121cbf70043af3bd2fe17dd57833ed51b7f5dbf326459dde6b830f07cbb99c`（従来配布APKと一致）
+- build date: `2026-09-18T15:10:09.204Z`、サイズ7,413,690 bytes
+- Supabase関数の追加デプロイはなし。前版のIC初回解決改善を含む。
+
+## 実機更新
+
+更新直前にnative・WebView IndexedDB・ホームの3面で非運行を再確認し、公開検証済みAPKを `adb install -r` でSCG34へ導入した。インストール後のAPK SHAは公開版と一致し、version0.1.61/code59、firstInstallTime `2026-03-30 00:33:49` は維持された。
+
+運行イベント1,624件、ルート点230,379件、日報16件、IC298件すべて名前あり・解決済みを保持。アンインストール・データ消去・ログアウト・疑似運行作成は行っていない。ホーム表示正常、更新後FATAL/ANR 0。ResidentLocationServiceはforeground待機し、端末の実通知41139は「運行待機中・位置取得停止」と表示された。
+
+更新後、ホーム前面で76.3秒の読み取り専用測定を行い、全期間非運行を確認した。位置取得APIやテスト運行の作成は使用していない。
+
+| 指標 | 変更前・76秒 | 変更後・76.3秒 |
+| --- | ---: | ---: |
+| TrackLogの現在の位置要求 | GPS/NETWORK 2本 | 0本（測定前後とも空） |
+| GPS配信増分 | 8 | 0 |
+| NETWORK配信増分 | 6 | 0 |
+| 採用位置増分 | 8 | 0 |
+| ルート保存増分 | 0 | 0 |
+| 現在地送信試行増分 | 2 | 0 |
+
+更新後のfused配信・送信成功の増分も0。停止の根拠は成功件数だけではなく、現在の位置要求が存在せず、位置配信・採用・送信試行も0であること。OS位置履歴やlast-known値を現在の要求と取り違えない専用パーサーで確認した。
+
+背景へ移した後も位置登録0本を確認し、最後は通常のTrackLogホームへ戻した。位置・背景位置・通知権限、OS位置ON、電池最適化除外を維持。2プロセスのログでFATAL/ANRなし。ADB forwardは解除済み。実際の開始・終了操作を含む実走行や消費電力の削減率は未測定であり、開始・停止制御の合成データ回帰テストと待機中の実機測定を区別する。
+
+恒久記録は既存の[2026年9月Google Drive作業ログ](https://docs.google.com/document/d/1H15GTHTChYKs7g2i-a5YrHjrAIIsaTh9ewExkcjcsdc/edit)へ追記する。既存のNotion・Obsidian履歴は変更しない。
 
 ## 後片付けの制約
 
