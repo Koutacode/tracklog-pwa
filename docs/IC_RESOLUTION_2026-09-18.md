@@ -1,6 +1,6 @@
 # IC名が初回に取得できず、後から表示される問題の調査
 
-実施日: 2026-09-18（日本時間）。検証候補: v0.1.59 / versionCode 57。最終配布予定: v0.1.60 / versionCode 58。
+実施日: 2026-09-18（日本時間）。検証候補: v0.1.59 / versionCode 57。正式公開版: v0.1.60 / versionCode 58。
 
 ## 症状と確認できた範囲
 
@@ -43,7 +43,7 @@ Android通常ファイルミラーで単体テスト65件（8スイート、失�
 - 署名SHA256: `14121cbf70043af3bd2fe17dd57833ed51b7f5dbf326459dde6b830f07cbb99c`（現公開APKと一致）
 - 実装commit: `e128738` / branch: `codex/fix-ic-resolution`
 
-この記録時点では候補APKの生成まで完了し、本番反映・通常リリース公開・実機更新の明示承認を確認中。公開latestと端末はv0.1.58、本番IC関数はversion 2、`output/tracklog-assist-debug.apk`は変更していない。本番反映はIC関数だけを対象とし、DB/RLS/Auth設定や他の関数は変更しない。承認後はAPK公開・固定latest URL検証を行い、その公開APKを `adb install -r` で導入する。更新直前にも運行中でないことを再確認する。
+候補APK完成時点では本番反映・公開・実機更新の明示承認を確認中だった。この時点の公開latestと端末はv0.1.58、本番IC関数はversion 2。承認後の反映結果は末尾へ追記する。本番反映はIC関数だけを対象とし、DB/RLS/Auth設定や他の関数は変更しない。APK公開・固定latest URL検証を行い、その公開APKを `adb install -r` で導入する。更新直前にも運行中でないことを再確認する。
 
 追加切り分けでは、端末の現在のデフォルト回線はCELLULAR・VPNなし。画面側から認証health endpointへ1回だけ照会しても10.9秒で応答ヘッダー未受信のままタイムアウトした。ネイティブだけの問題ではない。管理APIのプロジェクト状態はACTIVE_HEALTHYだったが、これは実通信の成功を保証しない。[公式ステータス](https://status.supabase.com/)ではAuthはOperational、API GatewayはJWT拒否事象によりDegraded Performanceと表示されていた。今回のタイムアウトとの直接の因果は未確定であり、共用プロジェクトの再起動や設定変更は行っていない。
 
@@ -54,3 +54,28 @@ Android通常ファイルミラーで単体テスト65件（8スイート、失�
 利用者から本番反映・公開・携帯への更新の明示承認を得た。IC関数だけをversion 3へ反映し、ACTIVE・JWT検証有効・配備ソース一致を確認。認証なしの照会は401となることを確認した。認証通信のタイムアウトが継続しているため、認証付き実IC照会の成功は未確認。
 
 実装PR #6をマージした後、v0.1.59のAndroid Release run 35356136351がSDK準備で失敗した。`setup-android@v3` の既定指定にある廃止済み `tools` が取得できないことが原因で、APK作成・Release公開には到達していない。[setup-android公式説明](https://github.com/android-actions/setup-android#the-deprecated-tools-package)に従いv4と `packages: platform-tools` へ変更する。既存タグを変更せず、versionCodeも58へ増やしたv0.1.60として公開し、公開APK検証後に実機更新する。
+
+## 正式公開の確認結果
+
+- PR #7のCI run 35356704574は全項目成功。mainへマージしたcommit `edbb2ad6806d495a6f3927d217106ed39efc48dd` にv0.1.60タグを付けた。
+- [Android Release run 35356870174](https://github.com/Koutacode/tracklog-pwa/actions/runs/35356870174)はSDK準備、Androidテスト・ビルド、署名・版確認、draft APK検証、通常公開、latest照合、旧APK削除を含め全工程成功。
+- `npm run release:verify:apk` が成功し、`output/tracklog-assist-debug.apk` を公開APKで置換。package `com.tracklog.assist`、versionName `0.1.60`、versionCode `58`、サイズ7,395,162 bytes。
+- 公開APK SHA256: `f7e23a20a84173fac918c816a532507a9808df61ef8b6794f6e255b64b5fd957`。既存と同じ署名SHA256: `14121cbf70043af3bd2fe17dd57833ed51b7f5dbf326459dde6b830f07cbb99c`。
+- 固定latestのSHA sidecarも別途取得して一致を確認。過去の全ReleaseからAPK配布assetが除かれ、v0.1.60だけにAPKが存在することを再確認した。
+- 会社配布URL: https://github.com/Koutacode/tracklog-pwa/releases/latest/download/tracklog-assist-debug.apk
+
+公開中に追加した認証healthの1回の検査でも10秒タイムアウトが継続。公式API GatewayのJWT拒否障害は掲載されているが、今回のタイムアウトとの因果は未確定。共用プロジェクトの再起動・アップグレード・Auth/DB設定変更は実施していない。
+
+一時ビルドミラー `C:\Users\matum\AppData\Local\TrackLog\android-source-v0159-20260918` の削除は、自動承認レビューが `blocked by policy` として実行前に拒否した。具体的な理由は返されていないため、回避せず残置した。配布成果物には含まれない。
+
+公開後の `output/ic-resolution-pr-body.md`、`output/ic-sdk-pr-body.md`、`output/ic-resolution-release-notes.md` の削除も同じ自動承認レビュー理由で実行前に拒否された。別手段で回避せず、実機検証用の一時ファイル削除も停止した。端末バックアップはもともと保持対象であり、この削除とは別扱い。
+
+## 携帯への反映と最終確認
+
+更新直前に運行中でないことを確認し、公開APKを `adb install -r` で上書きした。アンインストール・データ消去・ログアウト・再登録はしていない。実機APKのSHA256は上記公開版と完全一致し、versionName `0.1.60` / versionCode `58`、初回インストール日時も保持された。
+
+更新前後で運行イベント1,624件、位置記録230,379点、日報16件、高速道路イベント298件（全件resolved）が一致。位置・背景位置・通知権限、位置情報ON、電池最適化除外、foreground `ResidentLocationService` を維持した。WebViewの411×903 viewportで通常ホーム、履歴、運行開始の表示とerror boundaryなしを確認。現行プロセスのFATAL/ANRは0件で、更新時の終了記録は `PACKAGE UPDATED` のみだった。
+
+約35秒のバックグラウンド遷移でも同一プロセスと常駐サービスが維持され、通常のTrackLogホームへ復帰した。端末の認証は自然再試行後も期限切れ・以前のアップロード成功時刻・失敗カウンター上限5の状態が続き、認証通信の回復は未確認。アプリ側の待機・再試行・候補選択の改善と、外部認証通信の未解消は区別する。実道路での初回表示速度、開始・終了ICと日報、圏外からの復帰は引き続き未検証。
+
+今後の復旧では、認証通信とAuth/API Gatewayログを確認し、通信回復後のIC取得を観察する。既存アカウント・端末データを保持し、再インストールによる初期化や認証設定の無断変更は行わない。旧APK配布によるロールバックは行わず、必要な追加修正はversionCodeを増やした新しい通常Releaseとして検証・配布する。
