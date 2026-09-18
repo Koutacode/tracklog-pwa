@@ -1,5 +1,13 @@
 # TrackLog Changelog
 
+## 2026-09-18 v0.1.60
+
+### IC取得改善版の正式配布とAndroid SDK準備の修正
+
+- v0.1.59で実装・検証した以下のIC取得改善を含む正式配布版。v0.1.59はSDK準備工程で停止したためAPKを公開していない
+- Android SDKセットアップをv4へ更新し、配布が終了した `tools` を要求せず `platform-tools` を明示するよう修正
+- Androidを `versionName=0.1.60` / `versionCode=58` に更新。失敗したv0.1.59タグは履歴として保持
+
 ## 2026-09-18 v0.1.59
 
 ### 高速道路IC取得の候補選択と通信復旧
