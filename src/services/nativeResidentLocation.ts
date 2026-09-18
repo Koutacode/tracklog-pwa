@@ -34,6 +34,7 @@ import {
   type NativeResidentLocationAuthorization,
   type NativeResidentExpresswayEvent,
   type NativeResidentLocationPoint,
+  type NativeResidentLocationRecordedPoint,
   type NativeResidentLocationSettings,
   type NativeResidentLocationStatus,
 } from './residentLocationBridge';
@@ -42,6 +43,7 @@ export type {
   NativeResidentLocationAuthorization,
   NativeResidentExpresswayEvent,
   NativeResidentLocationPoint,
+  NativeResidentLocationRecordedPoint,
   NativeResidentLocationSettings,
   NativeResidentLocationStatus,
 } from './residentLocationBridge';
@@ -162,11 +164,14 @@ export type NativeTrackingStateCoordinator = {
   getGeneration(): number;
   advanceGeneration(): number;
   isCurrent(expectedGeneration: number): boolean;
-  enqueueCommit<T>(commit: () => Promise<T>): Promise<T>;
+  enqueueCommit<T>(commit: () => Promise<T>, superseded?: () => Promise<T>): Promise<T>;
+  commitImmediately<T>(commit: () => Promise<T>): Promise<T>;
 };
 
 /**
- * Coordinates local tracking-state intent and serializes native reconcile calls.
+ * Coordinates local tracking-state intent and serializes routine reconcile calls.
+ * Explicit tracking transitions bypass response waits; native tracking methods
+ * commit synchronously on the bridge handler without waiting for network auth.
  * The settled tail deliberately absorbs failures so one rejected bridge call
  * cannot prevent a later, newer state from reaching the foreground service.
  */
@@ -181,13 +186,24 @@ export function createNativeTrackingStateCoordinator(): NativeTrackingStateCoord
       return generation;
     },
     isCurrent: expectedGeneration => expectedGeneration === generation,
-    enqueueCommit: <T>(commit: () => Promise<T>) => {
-      const result = settledCommitTail.then(commit);
+    enqueueCommit: <T>(commit: () => Promise<T>, superseded?: () => Promise<T>) => {
+      const expectedGeneration = generation;
+      const result = settledCommitTail.then(() => (
+        superseded && generation !== expectedGeneration ? superseded() : commit()
+      ));
       settledCommitTail = result.then(
         () => undefined,
         () => undefined,
       );
       return result;
+    },
+    commitImmediately: <T>(commit: () => Promise<T>) => {
+      // Dispatch now, even when an older native response is still outstanding.
+      try {
+        return commit();
+      } catch (error) {
+        return Promise.reject(error);
+      }
     },
   };
 }
@@ -203,7 +219,10 @@ async function commitNativeResidentLocationTrackingState(
 ): Promise<NativeResidentLocationStatus> {
   if (!isAndroidNative()) return EMPTY_STATUS;
   const request = buildNativeResidentLocationReconcileRequest(options);
-  return trackingStateCoordinator.enqueueCommit(() => ResidentLocation.reconcile(request));
+  return trackingStateCoordinator.enqueueCommit(
+    () => ResidentLocation.reconcile(request),
+    () => ResidentLocation.getStatus(),
+  );
 }
 
 async function commitFastNativeResidentLocationTrackingState(
@@ -211,7 +230,7 @@ async function commitFastNativeResidentLocationTrackingState(
 ): Promise<NativeResidentLocationStatus> {
   if (!isAndroidNative()) return EMPTY_STATUS;
   const request = buildNativeResidentLocationReconcileRequest(options);
-  return trackingStateCoordinator.enqueueCommit(() => ResidentLocation.applyTrackingState({
+  return trackingStateCoordinator.commitImmediately(() => ResidentLocation.applyTrackingState({
     activeTripId: request.activeTripId,
     routePauseAtMs: request.routePauseAtMs,
     expresswayOpen: request.expresswayOpen,
@@ -224,7 +243,7 @@ export async function suspendNativeResidentLocationForApproval(): Promise<Native
   if (!isAndroidNative()) return EMPTY_STATUS;
   trackingStateCoordinator.advanceGeneration();
   const request = buildNativeApprovalSuspensionRequest();
-  return trackingStateCoordinator.enqueueCommit(() => ResidentLocation.reconcile(request));
+  return trackingStateCoordinator.commitImmediately(() => ResidentLocation.reconcile(request));
 }
 
 const SUPABASE_URL = (import.meta.env?.VITE_SUPABASE_URL ?? '').trim();
@@ -602,7 +621,7 @@ export async function stopNativeResidentLocation(options: {
   }
   if (options.reason === 'manual') return ResidentLocation.getStatus();
   trackingStateCoordinator.advanceGeneration();
-  return trackingStateCoordinator.enqueueCommit(
+  return trackingStateCoordinator.commitImmediately(
     () => ResidentLocation.stop(buildNativeResidentLocationStopRequest(options.reason)),
   );
 }
@@ -610,6 +629,35 @@ export async function stopNativeResidentLocation(options: {
 export async function getNativeResidentLocationStatus(): Promise<NativeResidentLocationStatus> {
   if (!isAndroidNative()) return EMPTY_STATUS;
   return ResidentLocation.getStatus();
+}
+
+export function parseNativeRecordedLocation(value: unknown): NativeResidentLocationRecordedPoint | null {
+  if (!value || typeof value !== 'object') return null;
+  const point = value as Record<string, unknown>;
+  const tripId = typeof point.tripId === 'string' ? point.tripId.trim() : '';
+  const ts = typeof point.ts === 'string' ? point.ts : '';
+  if (!tripId || !Number.isFinite(Date.parse(ts)) || point.source !== 'background') return null;
+  if (typeof point.lat !== 'number' || !Number.isFinite(point.lat) || Math.abs(point.lat) > 90
+    || typeof point.lng !== 'number' || !Number.isFinite(point.lng) || Math.abs(point.lng) > 180) return null;
+  if (point.accuracy != null && (typeof point.accuracy !== 'number'
+    || !Number.isFinite(point.accuracy) || point.accuracy < 0)) return null;
+  return {
+    tripId, ts, lat: point.lat, lng: point.lng,
+    accuracy: typeof point.accuracy === 'number' ? point.accuracy : null,
+    source: 'background',
+  };
+}
+
+/** A single previously recorded fix, independent of FIFO upload backlog; no GPS request. */
+export async function getLatestNativeRecordedLocation(): Promise<NativeResidentLocationRecordedPoint | null> {
+  if (!isAndroidNative()) return null;
+  try {
+    const result = await ResidentLocation.getLatestRecordedLocation();
+    return parseNativeRecordedLocation(result.point);
+  } catch {
+    // Older APKs and devices without a cached fix use the existing database fallback.
+    return null;
+  }
 }
 
 export async function peekNativeResidentLocationPoints(limit = 500): Promise<{

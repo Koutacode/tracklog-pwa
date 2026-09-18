@@ -93,8 +93,9 @@ final class ResidentLocationUploader {
         return true;
     }
 
-    static Outcome upload(Context context, Location location) {
+    static Outcome upload(Context context, Location location, String expectedTripId) {
         Context appContext = context.getApplicationContext();
+        if (!canSendLocation(appContext, expectedTripId)) return Outcome.RETRY;
         AuthorizationSnapshot snapshot = getAuthorizationSnapshot(appContext);
         if (snapshot.mutationPending) return Outcome.RETRY;
         ResidentLocationState.Authorization authorization = snapshot.authorization;
@@ -107,7 +108,7 @@ final class ResidentLocationUploader {
 
         int status;
         try {
-            if (!canSendLocation(appContext)) return Outcome.RETRY;
+            if (!canSendLocation(appContext, expectedTripId)) return Outcome.RETRY;
             status = postLocation(authorization, location);
         } catch (Exception exception) {
             Log.w(TAG, "Latest location upload failed; retrying on a later location", exception);
@@ -128,7 +129,7 @@ final class ResidentLocationUploader {
 
         AuthorizationRefreshResult refreshResult;
         try {
-            if (!canSendLocation(appContext)) return Outcome.RETRY;
+            if (!canSendLocation(appContext, expectedTripId)) return Outcome.RETRY;
             refreshResult = refreshAfterUnauthorized(
                     appContext,
                     authorization,
@@ -146,7 +147,7 @@ final class ResidentLocationUploader {
         }
 
         try {
-            if (!canSendLocation(appContext)) return Outcome.RETRY;
+            if (!canSendLocation(appContext, expectedTripId)) return Outcome.RETRY;
             int retryStatus = postLocation(refreshed, location);
             ResidentLocationUploadPolicy.Action retryAction =
                     ResidentLocationUploadPolicy.classifyStatus(retryStatus, true);
@@ -176,6 +177,9 @@ final class ResidentLocationUploader {
             ResidentExpresswayStore.Probe probe
     ) {
         Context appContext = context.getApplicationContext();
+        if (!canSendProbe(appContext, probe)) {
+            return ExpresswayProbeResult.retry(ExpresswayProbeOutcome.NETWORK_RETRY);
+        }
         AuthorizationSnapshot snapshot = getAuthorizationSnapshot(appContext);
         if (snapshot.mutationPending
                 || snapshot.blocked
@@ -184,7 +188,7 @@ final class ResidentLocationUploader {
         }
         HttpResult result;
         try {
-            if (!canSendLocation(appContext)) {
+            if (!canSendProbe(appContext, probe)) {
                 return ExpresswayProbeResult.retry(ExpresswayProbeOutcome.NETWORK_RETRY);
             }
             result = postExpresswayProbe(snapshot.authorization, probe);
@@ -195,7 +199,7 @@ final class ResidentLocationUploader {
         if (result.statusCode == 401) {
             AuthorizationRefreshResult refresh;
             try {
-                if (!canSendLocation(appContext)) {
+                if (!canSendProbe(appContext, probe)) {
                     return ExpresswayProbeResult.retry(ExpresswayProbeOutcome.NETWORK_RETRY);
                 }
                 refresh = refreshAfterUnauthorized(
@@ -213,7 +217,7 @@ final class ResidentLocationUploader {
                 return ExpresswayProbeResult.retry(ExpresswayProbeOutcome.AUTHORIZATION_RETRY);
             }
             try {
-                if (!canSendLocation(appContext)) {
+                if (!canSendProbe(appContext, probe)) {
                     return ExpresswayProbeResult.retry(ExpresswayProbeOutcome.NETWORK_RETRY);
                 }
                 result = postExpresswayProbe(refresh.authorization, probe);
@@ -324,11 +328,40 @@ final class ResidentLocationUploader {
         }
     }
 
-    private static boolean canSendLocation(Context context) {
-        // A queued upload or 401 refresh may outlive the location ON state.
-        // Recheck before each new request without mutating authorization or durable probes.
-        return ResidentLocationState.isEligible(context)
+    static boolean isExpectedTripActive(String expectedTripId, String activeTripId) {
+        String expected = ResidentLocationState.normalizeTripId(expectedTripId);
+        return !expected.isEmpty()
+                && expected.equals(ResidentLocationState.normalizeTripId(activeTripId));
+    }
+
+    private static boolean canSendLocation(Context context, String expectedTripId) {
+        // A queued fix or an in-flight 401 refresh may outlive its trip. Recheck
+        // the captured trip before every new request; never reuse it for a new trip.
+        return isExpectedTripActive(expectedTripId, ResidentLocationState.getActiveTripId(context))
+                && ResidentLocationState.isEligible(context)
                 && ResidentLocationState.getReadiness(context).isReady();
+    }
+
+    static boolean isCurrentProbe(
+            ResidentExpresswayStore.Probe probe,
+            ResidentExpresswayStore.Snapshot snapshot
+    ) {
+        return probe != null
+                && snapshot != null
+                && snapshot.storageHealthy
+                && !snapshot.paused
+                && snapshot.pendingProbe != null
+                && probe.id.equals(snapshot.pendingProbe.id)
+                && isExpectedTripActive(probe.tripId, snapshot.tripId)
+                && ResidentExpresswayStore.canApplyProbe(
+                        probe.tripId, probe.expectedRevision, snapshot.tripId, snapshot.revision
+                );
+    }
+
+    private static boolean canSendProbe(Context context, ResidentExpresswayStore.Probe probe) {
+        return probe != null
+                && canSendLocation(context, probe.tripId)
+                && isCurrentProbe(probe, ResidentExpresswayStore.snapshot(context));
     }
 
     private static int postLocation(

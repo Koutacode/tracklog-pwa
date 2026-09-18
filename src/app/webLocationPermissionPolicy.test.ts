@@ -1,6 +1,7 @@
 import type { RouteTrackingMode } from '../db/repositories';
 import {
   applyWebLocationTrackingIntent,
+  guardWebLocationTrackingActions,
   normalizeWebLocationPermissionState,
   resolveWebLocationTrackingIntent,
 } from './webLocationPermissionPolicy';
@@ -74,7 +75,7 @@ async function reconcile(
 }
 
 async function main() {
-  for (const permissionState of ['prompt', 'unknown', 'denied'] as const) {
+  for (const permissionState of ['granted', 'prompt', 'unknown', 'denied'] as const) {
     const tracking = new FakeWebLocationTracking();
     // Mount/remount/visibility/interval must never request permission while no
     // trip is active, even if the document one-shot remains available.
@@ -155,18 +156,78 @@ async function main() {
     const tracking = new FakeWebLocationTracking();
     await reconcile(tracking, 'granted', null);
     await reconcile(tracking, 'granted', null);
-    assertEqual(tracking.watchPositionCalls, 1, 'resident syncs must reuse one watcher');
+    assertEqual(tracking.watchPositionCalls, 0, 'granted permission must not start idle GPS');
 
     await reconcile(tracking, 'granted', 'trip-active');
-    assertEqual(tracking.watchPositionCalls, 2, 'starting a trip switches to one route watcher');
+    assertEqual(tracking.watchPositionCalls, 1, 'starting a trip starts one route watcher');
     await reconcile(tracking, 'granted', 'trip-active', true);
-    assertEqual(tracking.watchPositionCalls, 3, 'pausing a trip switches back to resident watcher');
+    assertEqual(tracking.watchPositionCalls, 2, 'pausing an active trip switches to resident watcher');
     await reconcile(tracking, 'granted', 'trip-active', true);
-    assertEqual(tracking.watchPositionCalls, 3, 'paused sync reuses resident watcher');
+    assertEqual(tracking.watchPositionCalls, 2, 'paused sync reuses resident watcher');
 
     await reconcile(tracking, 'denied', 'trip-active');
-    assertEqual(tracking.watchPositionCalls, 3, 'revoking permission must not start another watcher');
+    assertEqual(tracking.watchPositionCalls, 2, 'revoking permission must not start another watcher');
     assertEqual(tracking.watcherKey, null, 'revoking permission stops the active watcher');
+  }
+
+  {
+    const tracking = new FakeWebLocationTracking();
+    await reconcile(tracking, 'granted', 'trip-active');
+    await reconcile(tracking, 'granted', null);
+    await reconcile(tracking, 'granted', null);
+    assertEqual(tracking.watchPositionCalls, 1, 'ending a trip must not replace GPS with an idle watcher');
+    assertEqual(tracking.clearWatchCalls, 1, 'ending a trip stops its watcher');
+    assertEqual(tracking.watcherKey, null, 'GPS remains stopped between trips');
+  }
+
+  for (const replacementTrip of [null, 'trip-next']) {
+    const tracking = new FakeWebLocationTracking();
+    let activeTrip: string | null = 'trip-active';
+    let currentEpoch = 1;
+    let releaseStop!: () => void;
+    let notifyStopping!: () => void;
+    const stopping = new Promise<void>(resolve => { notifyStopping = resolve; });
+    const stopGate = new Promise<void>(resolve => { releaseStop = resolve; });
+    const guarded = guardWebLocationTrackingActions({
+      startResidentLocationUpdates: mode => tracking.startResidentLocationUpdates(mode),
+      startRouteTracking: (tripId, mode) => tracking.startRouteTracking(tripId, mode),
+      stopRouteTracking: () => tracking.stopRouteTracking(),
+      stopResidentLocationUpdates: async () => {
+        notifyStopping();
+        await stopGate;
+        await tracking.stopResidentLocationUpdates();
+      },
+    }, {
+      expectedTripId: 'trip-active',
+      getActiveTripId: async () => activeTrip,
+      isCurrent: () => currentEpoch === 1,
+    });
+    const applying = applyWebLocationTrackingIntent({
+      kind: 'route', tripId: 'trip-active', mode: 'precision', consumesActiveTripResumeAttempt: false,
+    }, guarded);
+    await stopping;
+    activeTrip = replacementTrip;
+    currentEpoch += 1;
+    releaseStop();
+    await applying;
+    assertEqual(tracking.watchPositionCalls, 0,
+      'an old start cannot restart GPS after a trip ended/switched while stop was pending');
+  }
+
+  {
+    const tracking = new FakeWebLocationTracking();
+    let currentEpoch = 1;
+    const guarded = guardWebLocationTrackingActions(tracking, {
+      expectedTripId: 'trip-active',
+      getActiveTripId: async () => {
+        currentEpoch += 1;
+        return 'trip-active'; // stale DB result must not defeat the newer epoch
+      },
+      isCurrent: () => currentEpoch === 1,
+    });
+    await guarded.startResidentLocationUpdates('battery');
+    await guarded.startRouteTracking('trip-active', 'precision');
+    assertEqual(tracking.watchPositionCalls, 0, 'lifecycle invalidation also rejects a stale same-trip read');
   }
 
   assertEqual(normalizeWebLocationPermissionState('granted'), 'granted', 'granted normalization');

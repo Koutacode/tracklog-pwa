@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs';
+import { runInNewContext } from 'node:vm';
+import ts from 'typescript';
 import assert from 'node:assert/strict';
 import {
   buildNativeSetupReadiness,
@@ -179,5 +182,56 @@ async function testNotificationPermissionFlow() {
 void testNotificationPermissionFlow().then(() => {
   console.log('nativeSetup: ordered staged readiness and resident-service handshake assertions passed');
 }).catch(error => {
+  globalThis.setTimeout(() => { throw error; }, 0);
+});
+
+async function testPermissionChecksNeverStartLocation() {
+  const source = readFileSync('src/services/nativeSetup.ts', 'utf8');
+  const compiled = ts.transpileModule(source, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  for (const native of [true, false]) {
+    for (const fails of [false, true]) {
+      let fixes = 0;
+      let watchers = 0;
+      let reads = 0;
+      let requests = 0;
+      const result = { fine: false, coarse: true, foreground: true, background: false };
+      const api = {
+        checkLocationPermissions: async () => { reads++; if (fails) throw Error('bridge unavailable'); return result; },
+        requestLocationPermission: async () => { requests++; if (fails) throw Error('bridge unavailable'); return result; },
+      };
+      const exports: Record<string, (...args: any[]) => Promise<any>> = {};
+      runInNewContext(compiled, {
+        exports,
+        require: (name: string) => {
+          if (name === '@capacitor/core') return { Capacitor: { isNativePlatform: () => native }, registerPlugin: () => api };
+          if (name === '@capacitor/local-notifications') return { LocalNotifications: {} };
+          if (name === '../app/routeTrackingSignal') return { requestRouteTrackingSync: () => {} };
+          if (name === './backgroundGeolocationPlugin') return { BackgroundGeolocation: { addWatcher: async () => { watchers++; return 'test'; }, removeWatcher: async () => {} } };
+          throw Error('Unexpected dependency: ' + name);
+        },
+        navigator: {
+          permissions: { query: async () => ({ state: 'prompt' }) },
+          geolocation: { getCurrentPosition: (ok: () => void) => { fixes++; ok(); } },
+        },
+        window: { setTimeout, clearTimeout },
+        setTimeout, clearTimeout,
+      });
+      assert.equal(await exports.checkLocationPermissionStatus(), native && !fails ? 'granted' : 'unknown');
+      assert.equal(await exports.requestLocationPermission(), native && !fails ? 'granted' : 'unknown');
+      assert.equal(reads, native ? 1 : 0);
+      assert.equal(requests, native ? 1 : 0);
+      assert.equal(fixes, 0, 'permission checks/requests must not request a fix, including bridge failure and web prompt');
+      assert.equal(watchers, 0, 'permission checks/requests must never create a background watcher');
+    }
+  }
+  const java = readFileSync('android/app/src/main/java/com/tracklog/assist/NativeSetupPlugin.java', 'utf8');
+  assert.match(java, /alias = "foregroundLocation"/);
+  assert.match(java, /requestPermissionForAlias\("foregroundLocation", call, "foregroundLocationPermissionCallback"\)/);
+  assert.doesNotMatch(java, /requestLocationUpdates|getCurrentLocation|getLastKnownLocation|FusedLocationProviderClient/,
+    'native setup plugin must remain permission-only without location-provider calls');
+}
+void testPermissionChecksNeverStartLocation().catch(error => {
   globalThis.setTimeout(() => { throw error; }, 0);
 });

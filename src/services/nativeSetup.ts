@@ -1,7 +1,6 @@
 import { Capacitor, registerPlugin } from '@capacitor/core';
 import { LocalNotifications } from '@capacitor/local-notifications';
 import { requestRouteTrackingSync } from '../app/routeTrackingSignal';
-import { BackgroundGeolocation } from './backgroundGeolocationPlugin';
 
 type NativeSetupPlugin = {
   checkBatteryOptimization(): Promise<{ supported: boolean; granted: boolean }>;
@@ -12,6 +11,7 @@ type NativeSetupPlugin = {
     background?: boolean;
     backgroundRelevant?: boolean;
   }>;
+  requestLocationPermission(): ReturnType<NativeSetupPlugin['checkLocationPermissions']>;
   requestBackgroundLocationPermission(): Promise<{ requested: boolean; granted: boolean }>;
   getSetupSnapshot(options?: { fresh?: boolean }): Promise<NativeSetupSnapshot>;
   openAppSettings(): Promise<NativeSettingsOpenResult>;
@@ -156,91 +156,14 @@ async function checkGeoPermissionByPermissionsApi(): Promise<SimplePermissionSta
   }
 }
 
-async function probeGeoPermissionByFix(): Promise<SimplePermissionState> {
-  if (!navigator.geolocation) return 'unknown';
-  return new Promise(resolve => {
-    navigator.geolocation.getCurrentPosition(
-      () => resolve('granted'),
-      err => {
-        if (err?.code === 1) {
-          resolve('denied');
-          return;
-        }
-        resolve('unknown');
-      },
-      {
-        enableHighAccuracy: false,
-        timeout: 5000,
-        maximumAge: 0,
-      },
-    );
-  });
-}
-
-async function probeGeoPermissionByBackgroundWatcher(timeoutMs = 1500): Promise<SimplePermissionState> {
-  if (!isNative()) return 'unknown';
-  return new Promise(resolve => {
-    let watcherId: string | null = null;
-    let settled = false;
-    const timer = window.setTimeout(() => {
-      finish('unknown');
-    }, timeoutMs);
-
-    const finish = (state: SimplePermissionState) => {
-      if (settled) return;
-      settled = true;
-      window.clearTimeout(timer);
-      void (async () => {
-        if (watcherId) {
-          try {
-            await BackgroundGeolocation.removeWatcher({ id: watcherId });
-          } catch {
-            // ignore cleanup errors
-          }
-        }
-        resolve(state);
-      })();
-    };
-
-    void (async () => {
-      try {
-        watcherId = await BackgroundGeolocation.addWatcher(
-          {
-            requestPermissions: false,
-            stale: true,
-            distanceFilter: 1000,
-          },
-          (location, error) => {
-            if (error?.code === 'NOT_AUTHORIZED') {
-              finish('denied');
-              return;
-            }
-            if (location) {
-              finish('granted');
-            }
-          },
-        );
-      } catch (e: any) {
-        const text = String(e?.message ?? e ?? '');
-        if (text.includes('NOT_AUTHORIZED')) {
-          finish('denied');
-          return;
-        }
-        finish('unknown');
-      }
-    })();
-  });
-}
-
 export async function checkLocationPermissionStatus(): Promise<SimplePermissionState> {
   const now = Date.now();
   if (locationStatusCache && now - locationStatusCache.at < LOCATION_STATUS_CACHE_MS) {
     return locationStatusCache.value;
   }
-  let state = await checkGeoPermissionByPermissionsApi();
-  if (state === 'unknown' && isNative()) {
-    state = await probeGeoPermissionByBackgroundWatcher();
-  }
+  const state = isNative()
+    ? (await checkNativeLocationPermissionDetail()).foreground
+    : await checkGeoPermissionByPermissionsApi();
   locationStatusCache = { value: state, at: now };
   return state;
 }
@@ -274,67 +197,24 @@ function clearLocationPermissionCache() {
 }
 
 export async function requestLocationPermission(): Promise<SimplePermissionState> {
-  if (!isNative()) {
-    const current = await checkLocationPermissionStatus();
-    if (current === 'granted' || current === 'denied') {
-      requestRouteTrackingSync();
-      return current;
-    }
-    const probed = await probeGeoPermissionByFix();
-    clearLocationPermissionCache();
-    locationStatusCache = { value: probed, at: Date.now() };
-    // The settings button is an explicit user gesture. Re-query in the route
-    // supervisor after the browser has resolved that gesture; interval and
-    // visibility syncs never receive this re-arm signal.
-    requestRouteTrackingSync();
-    return probed;
-  }
-  let watcherId: string | null = null;
-  let deniedByPlugin = false;
-  try {
-    watcherId = await BackgroundGeolocation.addWatcher(
-      {
-        requestPermissions: true,
-        stale: true,
-        distanceFilter: 1000,
-      },
-      (_location, error) => {
-        if (error?.code === 'NOT_AUTHORIZED') {
-          deniedByPlugin = true;
-        }
-      },
-    );
-    await wait(700);
-  } catch (e: any) {
-    const text = String(e?.message ?? e ?? '');
-    if (text.includes('NOT_AUTHORIZED')) {
-      deniedByPlugin = true;
-    }
-  } finally {
-    if (watcherId) {
-      try {
-        await BackgroundGeolocation.removeWatcher({ id: watcherId });
-      } catch {
-        // ignore cleanup errors
-      }
-    }
-  }
-
-  const apiState = await checkGeoPermissionByPermissionsApi();
-  if (apiState !== 'unknown') {
-    clearLocationPermissionCache();
-    locationStatusCache = { value: apiState, at: Date.now() };
-    return apiState;
-  }
-  if (deniedByPlugin) {
-    clearLocationPermissionCache();
-    locationStatusCache = { value: 'denied', at: Date.now() };
-    return 'denied';
-  }
-  const probed = await probeGeoPermissionByFix();
   clearLocationPermissionCache();
-  locationStatusCache = { value: probed, at: Date.now() };
-  return probed;
+  if (!isNative()) {
+    // Browsers cannot request only geolocation permission. The first fix and
+    // browser prompt belong to the active-trip flow, never the settings screen.
+    const current = await checkLocationPermissionStatus();
+    requestRouteTrackingSync();
+    return current;
+  }
+  try {
+    const detail = toLocationPermissionDetail(await NativeSetup.requestLocationPermission());
+    const at = Date.now();
+    locationDetailCache = { value: detail, at };
+    locationStatusCache = { value: detail.foreground, at };
+    return detail.foreground;
+  } catch {
+    // A bridge failure must not activate GPS to infer permission state.
+    return 'unknown';
+  }
 }
 
 export async function checkNotificationPermissionStatus(): Promise<SimplePermissionState> {

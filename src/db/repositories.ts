@@ -958,6 +958,21 @@ export async function getLatestRoutePoint(): Promise<RoutePoint | null> {
   return point ?? null;
 }
 
+export async function getLatestRoutePointForTrip(tripId: string, atMs: number): Promise<RoutePoint | null> {
+  if (!Number.isFinite(atMs)) return null;
+  return await db.routePoints.where('[tripId+ts]')
+    .between([tripId, new Date(atMs - 120_000).toISOString()], [tripId, new Date(atMs).toISOString()], true, true)
+    .reverse()
+    // Event anchors may copy an older detected location with a later confirmation
+    // timestamp. Only real fixes can establish a fresh end-of-trip position.
+    .filter(point => point.source !== 'event'
+      && Number.isFinite(point.lat) && Math.abs(point.lat) <= 90
+      && Number.isFinite(point.lng) && Math.abs(point.lng) <= 180
+      && (point.accuracy == null || (Number.isFinite(point.accuracy)
+        && point.accuracy >= 0 && point.accuracy <= 150)))
+    .first() ?? null;
+}
+
 export async function getEventsByTripId(tripId: string): Promise<AppEvent[]> {
   const arr = await db.events.where('tripId').equals(tripId).toArray();
   arr.sort((a, b) => a.ts.localeCompare(b.ts));
@@ -1007,6 +1022,29 @@ export async function startTrip(params: {
   if (!event) throw new Error('運行開始イベントを保存できませんでした');
   notifyRemoteMutation('trip-start');
   return { tripId, event };
+}
+
+/** Complete only the still-current, unedited start after tracking has begun. */
+export async function completeTripStartLocation(params: {
+  tripId: string;
+  eventId: string;
+  expectedTimestamp: string;
+  geo: Geo;
+  address?: string;
+}): Promise<boolean> {
+  let updated = false;
+  await db.transaction('rw', db.events, db.meta, db.routePoints, async () => {
+    if (await getActiveTripId() !== params.tripId) return;
+    const event = await db.events.get(params.eventId);
+    if (!event || event.type !== 'trip_start' || event.tripId !== params.tripId
+      || event.ts !== params.expectedTimestamp || event.geo || event.address) return;
+    await putEventWithRoutePointTx({
+      ...event, geo: params.geo, address: params.address, syncStatus: 'pending',
+    });
+    updated = true;
+  });
+  if (updated) notifyRemoteMutation('trip-start-location');
+  return updated;
 }
 
 export async function endTrip(params: {

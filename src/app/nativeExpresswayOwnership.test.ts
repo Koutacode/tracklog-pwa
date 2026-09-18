@@ -31,4 +31,28 @@ assert.match(
   'TS notification listener must ignore Java-owned actions',
 );
 
-console.log('nativeExpresswayOwnership: 4 tests passed');
+assert.doesNotMatch(
+  supervisorSource,
+  /requestLocationHeartbeatNow|navigator\.geolocation\.getCurrentPosition/,
+  'normal supervisor ticks and resume must not acquire a second WebView location',
+);
+assert.match(
+  supervisorSource,
+  /if \(native\) \{\s*(?:\/\/[^\n]*\n\s*)*stopLocationHeartbeat\(\)/,
+  'Android automatic location sharing must stay with the native owner',
+);
+assert.match(
+  supervisorSource,
+  /if \(!native\) startLocationHeartbeat\(\)/,
+  'PWA keeps its existing shared watcher heartbeat',
+);
+const adminMessagesSource = readFileSync(
+  new URL('../services/adminMessages.ts', import.meta.url), 'utf8',
+);
+assert.match(
+  adminMessagesSource,
+  /await requestLocationHeartbeatNow\(\)/,
+  'explicit administrator current-location requests retain their one-shot acquisition',
+);
+
+console.log('nativeExpresswayOwnership: 8 tests passed');

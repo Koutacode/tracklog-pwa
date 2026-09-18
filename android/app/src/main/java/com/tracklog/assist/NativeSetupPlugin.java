@@ -26,6 +26,10 @@ import com.getcapacitor.annotation.PermissionCallback;
         name = "NativeSetup",
         permissions = {
                 @Permission(
+                        alias = "foregroundLocation",
+                        strings = { Manifest.permission.ACCESS_COARSE_LOCATION, Manifest.permission.ACCESS_FINE_LOCATION }
+                ),
+                @Permission(
                         alias = "backgroundLocation",
                         strings = { Manifest.permission.ACCESS_BACKGROUND_LOCATION }
                 )
@@ -244,6 +248,21 @@ public class NativeSetupPlugin extends Plugin {
         ret.put("background", background);
         ret.put("backgroundRelevant", backgroundRelevant);
         call.resolve(ret);
+    }
+
+    @PluginMethod
+    public void requestLocationPermission(PluginCall call) {
+        if (isPermissionGranted(Manifest.permission.ACCESS_FINE_LOCATION)) {
+            checkLocationPermissions(call);
+            return;
+        }
+        // Permission UI only: setup must never register a location listener.
+        requestPermissionForAlias("foregroundLocation", call, "foregroundLocationPermissionCallback");
+    }
+
+    @PermissionCallback
+    private void foregroundLocationPermissionCallback(PluginCall call) {
+        checkLocationPermissions(call);
     }
 
     @PluginMethod
