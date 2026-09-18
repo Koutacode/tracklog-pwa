@@ -4,7 +4,7 @@ import {
   markExpresswayResolveFailure,
   updateExpresswayResolved,
 } from '../db/repositories';
-import type { EventType, Geo, RoutePoint } from '../domain/types';
+import type { BaseEvent, EventType, Geo, RoutePoint } from '../domain/types';
 import {
   getRetryableIcResolverErrorCategory,
   resolveNearestIC,
@@ -59,9 +59,14 @@ const EXPRESSWAY_EVENT_TYPES = new Set<ExpresswayEventType>([
   'expressway_end',
 ]);
 export const IC_GEO_FALLBACK_WINDOW_MS = 90 * 1000;
+export const IC_GEO_FUTURE_WINDOW_MS = 30 * 1000;
 export const IC_GEO_UNKNOWN_ACCURACY_WINDOW_MS = 15 * 1000;
 export const IC_GEO_MAX_ACCURACY_M = 100;
-const inFlightByEventId = new Map<string, Promise<ExpresswayIcResolutionOutcome>>();
+export const IC_GEO_SUPPLEMENT_LIMIT = 3;
+const IC_GEO_MIN_SEPARATION_M = 200;
+const IC_GEO_MAX_EVENT_DISTANCE_M = 2000;
+type IcRoutePoint = Pick<RoutePoint, 'ts' | 'lat' | 'lng' | 'accuracy' | 'source'>;
+type IcResolutionRouteFix = Geo & { ts: string };
 let retryBatchInFlight: Promise<boolean> | null = null;
 
 function isOnline() {
@@ -92,21 +97,46 @@ export function isUsableIcResolutionGeo(geo: Geo | undefined): geo is Geo {
     || (Number.isFinite(geo.accuracy) && geo.accuracy >= 0 && geo.accuracy <= IC_GEO_MAX_ACCURACY_M);
 }
 
-export function selectIcResolutionRoutePoint(
-  points: readonly Pick<RoutePoint, 'ts' | 'lat' | 'lng' | 'accuracy'>[],
+/** The stored end timestamp is the driver's confirmation, while geo belongs to detection. */
+export function getIcResolutionReferenceTs(event: Pick<BaseEvent, 'type' | 'ts' | 'extras'>): string {
+  const reason = event.extras?.autoDecision;
+  if (event.type !== 'expressway_end' || !reason || typeof reason !== 'object') return event.ts;
+  const decision = reason as Record<string, unknown>;
+  if (decision.source !== 'native-auto' || decision.action !== 'end-prompt') return event.ts;
+  const detectionMs = typeof decision.evaluatedAt === 'string' ? Date.parse(decision.evaluatedAt) : NaN;
+  const eventMs = Date.parse(event.ts);
+  return Number.isFinite(detectionMs) && Number.isFinite(eventMs) && detectionMs <= eventMs
+    ? new Date(detectionMs).toISOString()
+    : event.ts;
+}
+
+function distanceMeters(a: Geo, b: Geo): number {
+  const toRad = Math.PI / 180;
+  const dLat = (b.lat - a.lat) * toRad;
+  const dLng = (b.lng - a.lng) * toRad;
+  const h = Math.sin(dLat / 2) ** 2
+    + Math.cos(a.lat * toRad) * Math.cos(b.lat * toRad) * Math.sin(dLng / 2) ** 2;
+  return 6_371_000 * 2 * Math.asin(Math.sqrt(Math.min(1, Math.max(0, h))));
+}
+
+function rankedRoutePoints(
+  points: readonly IcRoutePoint[],
   eventTs: string,
   eventType?: ExpresswayEventType,
-): Geo | undefined {
+) {
   const eventMs = Date.parse(eventTs);
-  if (!Number.isFinite(eventMs)) return undefined;
-
-  let best: {
+  const candidates: {
     geo: Geo;
+    pointMs: number;
     deltaMs: number;
     directionRank: number;
     accuracyRank: number;
-  } | undefined;
+  }[] = [];
+  if (!Number.isFinite(eventMs)) return candidates;
   for (const point of points) {
+    // Event route points only duplicate the original geo and are not an
+    // independent GPS observation (their timestamp may be confirmation time).
+    if (point.source === 'event') continue;
     const pointMs = Date.parse(point.ts);
     const geo: Geo = {
       lat: point.lat,
@@ -115,7 +145,7 @@ export function selectIcResolutionRoutePoint(
     };
     if (!Number.isFinite(pointMs) || !isUsableIcResolutionGeo(geo)) continue;
     const deltaMs = Math.abs(pointMs - eventMs);
-    if (deltaMs > IC_GEO_FALLBACK_WINDOW_MS) continue;
+    if (pointMs < eventMs - IC_GEO_FALLBACK_WINDOW_MS || pointMs > eventMs + IC_GEO_FUTURE_WINDOW_MS) continue;
     if (point.accuracy == null && deltaMs > IC_GEO_UNKNOWN_ACCURACY_WINDOW_MS) continue;
     const directionRank = eventType === 'expressway_start'
       ? (pointMs >= eventMs ? 0 : 1)
@@ -123,21 +153,66 @@ export function selectIcResolutionRoutePoint(
         ? (pointMs <= eventMs ? 0 : 1)
         : 0;
     const accuracyRank = point.accuracy ?? Number.POSITIVE_INFINITY;
-    if (
-      !best
-      || deltaMs < best.deltaMs
-      || (
-        deltaMs === best.deltaMs
-        && (
-          directionRank < best.directionRank
-          || (directionRank === best.directionRank && accuracyRank < best.accuracyRank)
-        )
-      )
-    ) {
-      best = { geo, deltaMs, directionRank, accuracyRank };
-    }
+    candidates.push({ geo, pointMs, deltaMs, directionRank, accuracyRank });
   }
-  return best?.geo;
+  return candidates.sort((a, b) => a.deltaMs - b.deltaMs
+    || a.directionRank - b.directionRank
+    || a.accuracyRank - b.accuracyRank
+    || a.pointMs - b.pointMs
+    || a.geo.lat - b.geo.lat
+    || a.geo.lng - b.geo.lng);
+}
+
+export function selectIcResolutionRoutePoint(
+  points: readonly IcRoutePoint[],
+  eventTs: string,
+  eventType?: ExpresswayEventType,
+): Geo | undefined {
+  return rankedRoutePoints(points, eventTs, eventType)[0]?.geo;
+}
+
+/** Select a small, distinct set of real fixes; never expand the geographic search without a bound. */
+export function selectIcResolutionSupplementalPoints(
+  points: readonly IcRoutePoint[],
+  eventTs: string,
+  eventType: ExpresswayEventType,
+  primaryGeo: Geo,
+): IcResolutionRouteFix[] {
+  if (!isUsableIcResolutionGeo(primaryGeo)) return [];
+  let candidates = rankedRoutePoints(points, eventTs, eventType).filter(point => {
+    const distance = distanceMeters(primaryGeo, point.geo);
+    return point.geo.accuracy != null
+      && distance >= IC_GEO_MIN_SEPARATION_M
+      && distance <= IC_GEO_MAX_EVENT_DISTANCE_M;
+  });
+  const selected: typeof candidates = [];
+  while (candidates.length && selected.length < IC_GEO_SUPPLEMENT_LIMIT) {
+    // Start nearest in time, then cover the remaining time span. The spatial
+    // separation filter also prevents dense/duplicate fixes wasting requests.
+    if (selected.length) {
+      const timeSeparation = (point: typeof candidates[number]) =>
+        Math.min(...selected.map(other => Math.abs(point.pointMs - other.pointMs)));
+      candidates.sort((a, b) => timeSeparation(b) - timeSeparation(a) || a.deltaMs - b.deltaMs);
+    }
+    const next = candidates[0];
+    selected.push(next);
+    candidates = candidates.filter(point => distanceMeters(next.geo, point.geo) >= IC_GEO_MIN_SEPARATION_M);
+  }
+  return selected.map(point => ({ ...point.geo, ts: new Date(point.pointMs).toISOString() }));
+}
+
+async function loadRoutePoints(tripId: string, referenceTs: string): Promise<RoutePoint[]> {
+  const eventMs = Date.parse(referenceTs);
+  if (!Number.isFinite(eventMs)) return [];
+  return db.routePoints
+    .where('[tripId+ts]')
+    .between(
+      [tripId, new Date(eventMs - IC_GEO_FALLBACK_WINDOW_MS).toISOString()],
+      [tripId, new Date(eventMs + IC_GEO_FUTURE_WINDOW_MS).toISOString()],
+      true,
+      true,
+    )
+    .toArray();
 }
 
 async function loadEventGeo(eventId: string, suppliedGeo?: Geo) {
@@ -147,29 +222,79 @@ async function loadEventGeo(eventId: string, suppliedGeo?: Geo) {
     throw new Error('高速道路イベントではありません');
   }
   const expectedVersion = captureIcResolutionEventVersion(event);
-  if (isUsableIcResolutionGeo(suppliedGeo)) return { geo: suppliedGeo, expectedVersion };
-  if (isUsableIcResolutionGeo(event.geo)) return { geo: event.geo, expectedVersion };
-
-  const eventMs = Date.parse(event.ts);
-  if (!Number.isFinite(eventMs)) return { geo: undefined, expectedVersion };
-  const windowStart = new Date(eventMs - IC_GEO_FALLBACK_WINDOW_MS).toISOString();
-  const windowEnd = new Date(eventMs + IC_GEO_FALLBACK_WINDOW_MS).toISOString();
-  const points = await db.routePoints
-    .where('[tripId+ts]')
-    .between([event.tripId, windowStart], [event.tripId, windowEnd], true, true)
-    .toArray();
+  const referenceTs = getIcResolutionReferenceTs(event);
+  const context = { expectedVersion, referenceTs, tripId: event.tripId, eventType: event.type };
+  if (isUsableIcResolutionGeo(suppliedGeo)) {
+    return { ...context, geo: suppliedGeo, geoSource: 'event' as const, geoOffsetSeconds: 0 };
+  }
+  if (isUsableIcResolutionGeo(event.geo)) {
+    return { ...context, geo: event.geo, geoSource: 'event' as const, geoOffsetSeconds: 0 };
+  }
+  const points = await loadRoutePoints(event.tripId, referenceTs);
+  const nearest = rankedRoutePoints(points, referenceTs, event.type)[0];
   return {
-    geo: selectIcResolutionRoutePoint(points, event.ts, event.type),
-    expectedVersion,
+    ...context,
+    geo: nearest?.geo,
+    geoSource: 'route' as const,
+    geoOffsetSeconds: nearest ? (nearest.pointMs - Date.parse(referenceTs)) / 1000 : 0,
+    points,
   };
+}
+
+function normalizedIcName(name: string): string {
+  return name.normalize('NFKC').toLowerCase().replace(/\s+/g, '').replace(/インターチェンジ/g, 'ic');
+}
+
+async function resolveAtNearbyPoints(
+  context: Awaited<ReturnType<typeof loadEventGeo>>,
+  geo: Geo,
+  resolveIc: typeof resolveNearestIC,
+): Promise<{
+  result: IcResult;
+  geoSource: 'event' | 'route';
+  geoOffsetSeconds: number;
+} | null> {
+  const primaryResult = await resolveIc(geo.lat, geo.lng);
+  if (primaryResult) {
+    return { result: primaryResult, geoSource: context.geoSource, geoOffsetSeconds: context.geoOffsetSeconds };
+  }
+  const points = 'points' in context && context.points
+    ? context.points
+    : await loadRoutePoints(context.tripId, context.referenceTs);
+  const supplementalGeos = selectIcResolutionSupplementalPoints(
+    points, context.referenceTs, context.eventType, geo,
+  );
+  const names = new Set<string>();
+  let best: { result: IcResult; geoSource: 'route'; geoOffsetSeconds: number } | null = null;
+  for (const supplementalGeo of supplementalGeos) {
+    // A thrown request must propagate, even after an earlier candidate: unseen
+    // responses could disagree, and transport failure is not a map-data miss.
+    const candidate = await resolveIc(supplementalGeo.lat, supplementalGeo.lng);
+    if (!candidate) continue;
+    names.add(normalizedIcName(candidate.icName));
+    // The API returns distance, not IC coordinates. Triangle inequality gives
+    // a conservative 2 km upper bound from the original event/fallback fix.
+    if (distanceMeters(geo, supplementalGeo) + candidate.distanceM > IC_GEO_MAX_EVENT_DISTANCE_M) continue;
+    if (!best || candidate.distanceM < best.result.distanceM) {
+      best = {
+        result: candidate,
+        geoSource: 'route',
+        geoOffsetSeconds: (Date.parse(supplementalGeo.ts) - Date.parse(context.referenceTs)) / 1000,
+      };
+    }
+  }
+  if (names.size > 1) throw new Error('付近の軌跡でIC候補が一致しないため自動確定できません');
+  return best;
 }
 
 async function performResolution(
   request: ExpresswayIcResolutionRequest,
+  resolveIc: typeof resolveNearestIC,
 ): Promise<ExpresswayIcResolutionOutcome> {
   const eventId = request.eventId.trim();
   if (!eventId) throw new Error('eventId is required');
-  const { geo, expectedVersion } = await loadEventGeo(eventId, request.geo);
+  const context = await loadEventGeo(eventId, request.geo);
+  const { geo, expectedVersion } = context;
   const guard = {
     expectedVersion,
     allowExistingManual: request.source === 'manual',
@@ -194,13 +319,16 @@ async function performResolution(
   }
 
   try {
-    const result = await resolveNearestIC(geo.lat, geo.lng);
-    if (!result) throw new Error('近傍ICを取得できませんでした');
+    const resolved = await resolveAtNearbyPoints(context, geo, resolveIc);
+    if (!resolved) throw new Error('近傍ICを取得できませんでした');
+    const { result } = resolved;
     await updateExpresswayResolved({
       eventId,
       status: 'resolved',
       icName: result.icName,
       icDistanceM: result.distanceM,
+      resolutionSource: resolved.geoSource,
+      resolutionOffsetSeconds: resolved.geoOffsetSeconds,
       clearManualResolution: request.source === 'manual',
       guard,
     });
@@ -239,23 +367,24 @@ async function performResolution(
   }
 }
 
-export function resolveExpresswayIcResolution(
-  request: ExpresswayIcResolutionRequest,
-): Promise<ExpresswayIcResolutionOutcome> {
-  const eventId = request.eventId.trim();
-  const current = inFlightByEventId.get(eventId);
-  if (current) return current;
-
-  const next = performResolution({ ...request, eventId });
-  inFlightByEventId.set(eventId, next);
-  const clear = () => {
-    if (inFlightByEventId.get(eventId) === next) {
-      inFlightByEventId.delete(eventId);
-    }
+/** Keep the production database/write guards when substituting the network adapter. */
+export function createExpresswayIcResolutionRunner(resolveIc = resolveNearestIC) {
+  const inFlightByEventId = new Map<string, Promise<ExpresswayIcResolutionOutcome>>();
+  return (request: ExpresswayIcResolutionRequest): Promise<ExpresswayIcResolutionOutcome> => {
+    const eventId = request.eventId.trim();
+    const current = inFlightByEventId.get(eventId);
+    if (current) return current;
+    const next = performResolution({ ...request, eventId }, resolveIc);
+    inFlightByEventId.set(eventId, next);
+    const clear = () => {
+      if (inFlightByEventId.get(eventId) === next) inFlightByEventId.delete(eventId);
+    };
+    void next.then(clear, clear);
+    return next;
   };
-  void next.then(clear, clear);
-  return next;
 }
+
+export const resolveExpresswayIcResolution = createExpresswayIcResolutionRunner();
 
 /** Starts resolution after event persistence and returns without waiting for network I/O. */
 export function enqueueExpresswayIcResolution(request: EnqueueRequest) {

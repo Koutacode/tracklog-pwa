@@ -280,7 +280,10 @@ final class ResidentLocationUploader {
                 authorization.supabaseUrl + "/functions/v1/tracklog-ic-resolver",
                 authorization.anonKey,
                 authorization.accessToken,
-                payload
+                payload,
+                // IC lookup can exhaust six 4.5-second upstream attempts.
+                // Keep the road probe alive until that bounded failover completes.
+                35_000
         );
     }
 
@@ -601,11 +604,21 @@ final class ResidentLocationUploader {
             String accessToken,
             JSONObject payload
     ) throws Exception {
+        return postJson(endpoint, apiKey, accessToken, payload, READ_TIMEOUT_MS);
+    }
+
+    private static HttpResult postJson(
+            String endpoint,
+            String apiKey,
+            String accessToken,
+            JSONObject payload,
+            int readTimeoutMs
+    ) throws Exception {
         HttpURLConnection connection = (HttpURLConnection) new URL(endpoint).openConnection();
         try {
             connection.setRequestMethod("POST");
             connection.setConnectTimeout(CONNECT_TIMEOUT_MS);
-            connection.setReadTimeout(READ_TIMEOUT_MS);
+            connection.setReadTimeout(readTimeoutMs);
             connection.setDoOutput(true);
             connection.setUseCaches(false);
             connection.setRequestProperty("Accept", "application/json");

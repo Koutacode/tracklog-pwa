@@ -32,6 +32,9 @@ const MAX_RADIUS_M = 12000;
 export const MAX_PRIMARY_IC_DISTANCE_M = 1200;
 export const MAX_CORROBORATED_IC_DISTANCE_M = 2000;
 const SESSION_REFRESH_MARGIN_MS = 60_000;
+// The server can try six upstream requests (4.5 s each). Bound the entire
+// function response, including its body, without cutting off that failover.
+const IC_RESOLVER_REQUEST_TIMEOUT_MS = 35_000;
 let sessionRefreshInFlight: Promise<Session> | null = null;
 
 export type IcResolverHttpFailureCategory =
@@ -43,7 +46,7 @@ function isAndroidNative() {
   return Capacitor.isNativePlatform() && Capacitor.getPlatform() === 'android';
 }
 
-class IcResolverError extends Error {
+export class IcResolverError extends Error {
   readonly retryable: boolean;
   readonly status: number | null;
   readonly category: IcResolverHttpFailureCategory;
@@ -151,7 +154,7 @@ function parseSignal(value: unknown): ExpresswaySignal {
   };
 }
 
-async function getFunctionErrorDetails(error: unknown): Promise<{
+export async function getFunctionErrorDetails(error: unknown, timeoutMs = 2000): Promise<{
   message: string;
   status: number | null;
 }> {
@@ -162,14 +165,22 @@ async function getFunctionErrorDetails(error: unknown): Promise<{
   if (typeof Response === 'undefined' || !(context instanceof Response)) {
     return { message: fallback, status: null };
   }
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    const body = await context.clone().json() as { error?: unknown };
+    // functions.invoke clears its timer as soon as a non-2xx header arrives.
+    // A stalled error body must not pin the event and retry batch forever.
+    const body = await Promise.race([
+      context.json() as Promise<{ error?: unknown }>,
+      new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), timeoutMs); }),
+    ]);
     return {
       message: typeof body?.error === 'string' && body.error.trim() ? body.error.trim() : fallback,
       status: context.status,
     };
   } catch {
     return { message: fallback, status: context.status };
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 
@@ -192,6 +203,22 @@ function recoverableAuthorizationError(message: string) {
   return new IcResolverError(message, true, null, 'authorization-recoverable');
 }
 
+/** Native refresh already owns permanent rejection and its shared cooldown. */
+export async function runIcResolverNativeSessionRestore(restore: () => Promise<unknown>): Promise<void> {
+  try {
+    await restore();
+  } catch (error) {
+    // A native bridge/network failure is not evidence of a rejected login.
+    // Treating it as authorization failure delays IC recovery for 15 minutes.
+    throw new IcResolverError(
+      authErrorMessage(error, 'ログイン状態を一時的に更新できませんでした'),
+      true,
+      null,
+      'temporary',
+    );
+  }
+}
+
 async function refreshResolverSession(current: Session): Promise<Session> {
   if (!driverAuthSupabase) throw recoverableAuthorizationError('Supabase が未設定です');
   if (sessionRefreshInFlight) return sessionRefreshInFlight;
@@ -200,7 +227,7 @@ async function refreshResolverSession(current: Session): Promise<Session> {
     try {
       const result = isAndroidNative()
         ? await (async () => {
-            await restoreNativeResidentLocationSession({ forceRefresh: true });
+            await runIcResolverNativeSessionRestore(() => restoreNativeResidentLocationSession({ forceRefresh: true }));
             return driverAuthSupabase.auth.getSession();
           })()
         : await driverAuthSupabase.auth.refreshSession({
@@ -231,9 +258,10 @@ async function getResolverSession(): Promise<Session> {
   if (!driverAuthSupabase) throw recoverableAuthorizationError('Supabase が未設定です');
   let result;
   try {
-    await restoreNativeResidentLocationSession();
+    await runIcResolverNativeSessionRestore(() => restoreNativeResidentLocationSession());
     result = await driverAuthSupabase.auth.getSession();
   } catch (error) {
+    if (error instanceof IcResolverError) throw error;
     throw recoverableAuthorizationError(authErrorMessage(error, 'ログイン状態を確認できませんでした'));
   }
   const { data, error } = result;
@@ -259,6 +287,7 @@ async function invokeWithSession(
     {
       body,
       headers: { Authorization: `Bearer ${session.access_token}` },
+      timeout: IC_RESOLVER_REQUEST_TIMEOUT_MS,
     },
   );
 }
@@ -284,12 +313,13 @@ async function invokeIcResolver(lat: number, lon: number, radiusM: number): Prom
     throw new IcResolverError(authErrorMessage(error, 'IC解決サーバーへの接続に失敗しました'), true);
   }
 
-  if (response.error) {
-    const firstError = await getFunctionErrorDetails(response.error);
-    if (firstError.status === 401) {
+  let errorDetails = response.error ? await getFunctionErrorDetails(response.error) : null;
+  if (errorDetails) {
+    if (errorDetails.status === 401) {
       session = await refreshResolverSession(session);
       try {
         response = await invokeWithSession(session, body);
+        errorDetails = null;
       } catch (error) {
         throw new IcResolverError(authErrorMessage(error, 'IC解決サーバーへの接続に失敗しました'), true);
       }
@@ -298,7 +328,7 @@ async function invokeIcResolver(lat: number, lon: number, radiusM: number): Prom
 
   const { data, error } = response;
   if (error) {
-    const details = await getFunctionErrorDetails(error);
+    const details = errorDetails ?? await getFunctionErrorDetails(error);
     throw new IcResolverError(details.message, isRetryableHttpStatus(details.status), details.status);
   }
   if (!data?.ok) {

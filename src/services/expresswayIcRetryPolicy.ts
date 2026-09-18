@@ -1,10 +1,10 @@
 export const IC_RESOLVE_RETRY_LIMIT = 6;
 // Bump this when resolver behavior changes so previously exhausted failures retry.
-export const IC_RESOLVE_ALGORITHM_VERSION = 11;
+export const IC_RESOLVE_ALGORITHM_VERSION = 12;
 
 const IC_RESOLVE_BACKOFF_BASE_MS = 2 * 60 * 1000;
 const IC_RESOLVE_BACKOFF_CAP_MS = 60 * 60 * 1000;
-const IC_RESOLVE_TEMPORARY_BACKOFF_BASE_MS = 2 * 60 * 1000;
+const IC_RESOLVE_TEMPORARY_BACKOFF_BASE_MS = 15 * 1000;
 export const IC_RESOLVE_TEMPORARY_BACKOFF_CAP_MS = 60 * 60 * 1000;
 const IC_RESOLVE_AUTH_BACKOFF_BASE_MS = 15 * 60 * 1000;
 export const IC_RESOLVE_AUTH_BACKOFF_CAP_MS = 12 * 60 * 60 * 1000;

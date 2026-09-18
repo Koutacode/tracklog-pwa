@@ -778,6 +778,8 @@ export async function updateExpresswayIcNameManual(eventId: string, icName: stri
   extras.icResolveManualUpdatedAt = nowIso();
   extras.icResolveRetryCount = 0;
   delete extras.icDistanceM;
+  delete extras.icResolveGeoSource;
+  delete extras.icResolveGeoOffsetSeconds;
   delete extras.icResolveNextRetryAt;
   delete extras.icResolveLastAttemptAt;
   delete extras.icResolveError;
@@ -2014,6 +2016,8 @@ export async function updateExpresswayResolved(params: {
   status: 'resolved' | 'failed' | 'pending';
   icName?: string;
   icDistanceM?: number;
+  resolutionSource?: 'event' | 'route';
+  resolutionOffsetSeconds?: number;
   nextRetryAt?: string | null;
   errorMessage?: string;
   retryCount?: number;
@@ -2046,6 +2050,13 @@ export async function updateExpresswayResolved(params: {
     if (params.status === 'resolved') {
       if (params.icName) extras.icName = params.icName;
       if (params.icDistanceM != null) extras.icDistanceM = params.icDistanceM;
+      if (params.resolutionSource) extras.icResolveGeoSource = params.resolutionSource;
+      else delete extras.icResolveGeoSource;
+      if (Number.isFinite(params.resolutionOffsetSeconds)) {
+        extras.icResolveGeoOffsetSeconds = params.resolutionOffsetSeconds;
+      } else {
+        delete extras.icResolveGeoOffsetSeconds;
+      }
       extras.icResolveRetryCount = 0;
       delete extras.icResolveNextRetryAt;
       delete extras.icResolveLastAttemptAt;
