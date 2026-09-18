@@ -35,6 +35,16 @@
 
 `npm run typecheck`、`npm run test:logic`、`npm run test:sync`（12件）、`npm run check:csp`、`npm run build`、`npm run check:offline`、`npm run cap:sync:android`、`git diff --check`が成功。新しいIC解決統合テスト15件、サーバーの14件、認証復元失敗分類とHTTPエラー本文停滞の回帰試験を含む。独立レビューでも重大回帰は検出されなかった。
 
-公開前にAndroid通常ファイルミラーでのビルド・署名・バージョン検証を行う。本番反映はIC関数だけを対象とし、DB/RLS/Auth設定や他の関数は変更しない。APK公開後は固定latest URLを検証し、その公開APKを `adb install -r` で導入する。更新直前にも運行中でないことを再確認する。
+Android通常ファイルミラーで単体テスト65件（8スイート、失敗・スキップ0）とassembleDebugが成功。変更ソース14ファイルと同期資産46ファイルは元の作業内容とSHA256が一致した。
+
+- 候補APK: `output/candidate/tracklog-assist-v0.1.59-debug.apk`（7,366,711 bytes）
+- package: `com.tracklog.assist` / versionName `0.1.59` / versionCode `57`
+- APK SHA256: `ef2d205d42fb9e2392ed916581ad730f8a36f749b9095ac04319832095775752`
+- 署名SHA256: `14121cbf70043af3bd2fe17dd57833ed51b7f5dbf326459dde6b830f07cbb99c`（現公開APKと一致）
+- 実装commit: `e128738` / branch: `codex/fix-ic-resolution`
+
+この記録時点では候補APKの生成まで完了し、本番反映・通常リリース公開・実機更新の明示承認を確認中。公開latestと端末はv0.1.58、本番IC関数はversion 2、`output/tracklog-assist-debug.apk`は変更していない。本番反映はIC関数だけを対象とし、DB/RLS/Auth設定や他の関数は変更しない。承認後はAPK公開・固定latest URL検証を行い、その公開APKを `adb install -r` で導入する。更新直前にも運行中でないことを再確認する。
+
+追加切り分けでは、端末の現在のデフォルト回線はCELLULAR・VPNなし。画面側から認証health endpointへ1回だけ照会しても10.9秒で応答ヘッダー未受信のままタイムアウトした。ネイティブだけの問題ではない。管理APIのプロジェクト状態はACTIVE_HEALTHYだったが、これは実通信の成功を保証しない。[公式ステータス](https://status.supabase.com/)ではAuthはOperational、API GatewayはJWT拒否事象によりDegraded Performanceと表示されていた。今回のタイムアウトとの直接の因果は未確定であり、共用プロジェクトの再起動や設定変更は行っていない。
 
 実道路での初回表示までの時間、開始・終了ICと日報への反映、圏外からの回復は未確認。通信自体が応答しない間の即時取得は保証できない。公開後の端末確認では、既存データ保持、起動、認証回復、常駐サービスを区別して記録する。
