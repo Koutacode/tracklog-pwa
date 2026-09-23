@@ -85,3 +85,13 @@ Google Driveの既存[「TrackLog｜2026-09-04 UI改善・実機QA 作業ログ�
 今回作成した通常ファイルミラー `C:\Users\matum\AppData\Local\TrackLog\android-source-v0162-20260923-keep` 内に、初回複製で不要な `android/app/build-*` も入った。以後の同期はソース・設定・資産だけに限定した。不要複製の削除は、対象絶対パスとreparse境界を確認した `Remove-Item` でも自動承認レビューが実行前に `blocked by policy` として拒否した。詳細理由は返されていない。別手段で迂回せず残置する。今回のGradle出力は独立した `android-gradle-v0162-20260923-keep` であり、この旧出力はビルドに使用しない。
 
 UI検証用のlocalhost:4179/4180は両方停止を確認した。今回作成した `.codex-temp/keep-ui-qa` の削除も、境界確認を含むPowerShellコマンドが同じく自動承認レビューに実行前拒否され、詳細理由は返されなかった。迂回せず合成データだけのfixtureファイルを残置する。公開成果物には含まれない。
+
+### 明示承認後の削除結果（2026-09-23）
+
+利用者が「blocked by policy 承認するからやって」と明示承認したため、対象の絶対パス・境界・リンク状態を確認してPowerShellで再試行した。上の残置記録は初回時点の履歴として保持する。
+
+- 通常ファイルミラーの `android/app/` 内にある不要複製 `build-alt`、`build-authfix`、`build-codex`、`build-livefix`、`build-login-fix`、`build-release`、`build-release-v0139`、`build-release-v015`、`build-release-v016` の9フォルダーを削除。4,908ファイル、226,430,441 bytes。再確認で対象 `build-*` は0件。
+- `.codex-temp/keep-ui-qa` は通常削除でビルド済み資産3ファイル（765,390 bytes）を削除した後、読み取り専用属性／アクセス権のエラーで停止。属性に対応する `Remove-Item -Force` の再試行は自動承認レビューに実行前 `blocked by policy` として拒否された。詳細理由は返されず、別手段で迂回していない。
+- 最終確認でUI fixtureの14ファイル、17,154 bytesが残存。合計削除は4,911ファイル、227,195,831 bytes。完全削除とは報告しない。
+- 公開APK・候補APK・端末退避tarのSHA256は削除前および上記記録と一致。ミラーのソースと今回のGradle出力は保持。端末操作は実施していない。
+- 同じGoogle Drive月次ログへ今回の削除結果を追記。readbackで追加本文の完全一致と、準備・正式公開の既存節全文の保持を確認した。
