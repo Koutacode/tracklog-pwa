@@ -38,11 +38,13 @@ import {
 } from './nativeResidentLocation';
 import {
   clearDriverExplicitSignOut,
+  isDriverExplicitSignOutRequested,
   markDriverExplicitSignOut,
 } from './authStorageKeys';
 import { isPermanentDriverAuthFailure as isPermanentDriverAuthFailureDirect } from './driverAuthFailurePolicy';
 import {
   beginDriverAuthIntent,
+  getDriverAuthIntentGeneration,
   isCurrentDriverAuthIntent,
   withDriverAuthMutation,
 } from './driverAuthMutationLock';
@@ -61,6 +63,8 @@ import {
   sameEmailAddress,
   validateDriverProfile,
 } from './driverProfileValidation';
+import { ResidentLocation } from './residentLocationBridge';
+import { getNativeAuthorizationEmail, resolveNativeStartupIdentity } from '../app/driverIdentityStartup';
 
 const META_DEVICE_ID = 'device_id';
 const META_DEVICE_DISPLAY_NAME = 'device_display_name';
@@ -551,6 +555,27 @@ export async function getDriverIdentity(): Promise<DriverIdentity> {
       allowPersistedAuth: !isPermanentDriverAuthFailure(error),
     });
   }
+}
+
+/** Reads the Android enrollment without token refresh or any cloud request. */
+export async function getDriverStartupIdentity(): Promise<DriverIdentity | null> {
+  if (!Capacitor.isNativePlatform() || Capacitor.getPlatform() !== 'android') return null;
+  const authIntent = getDriverAuthIntentGeneration();
+  const [{ stableDeviceKey }, authorization] = await Promise.all([
+    getStableDeviceKey(),
+    ResidentLocation.getAuthorization(),
+  ]);
+  const identity = await getPersistedDriverIdentity(stableDeviceKey, null, {
+    allowPersistedAuth: true,
+  });
+  if (!isCurrentDriverAuthIntent(authIntent)) return null;
+  return resolveNativeStartupIdentity({
+    identity,
+    authorizationConfigured: authorization.configured,
+    authorizationBlocked: authorization.blocked,
+    authorizationEmail: getNativeAuthorizationEmail(authorization.accessToken),
+    explicitSignOut: isDriverExplicitSignOutRequested(),
+  });
 }
 
 async function getProfileIdentity() {

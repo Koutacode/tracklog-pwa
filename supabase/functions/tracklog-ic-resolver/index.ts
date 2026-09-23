@@ -1,5 +1,6 @@
 import { createClient } from 'npm:@supabase/supabase-js@2.58.0';
 import { normalizeRadiusM, OverpassUnavailableError, resolveExpresswayFromOverpass } from './resolver.ts';
+import { normalizeIcSearchQuery, searchExpresswayIcByName } from './name-search.ts';
 
 type JsonRecord = Record<string, unknown>;
 
@@ -119,6 +120,15 @@ Deno.serve(async (req: Request) => {
     const user = await requireUser(req);
     const deviceId = requiredText(payload, 'deviceId');
     await requireApprovedDevice(deviceId, user);
+
+    if (payload.action === 'search-name') {
+      const query = requiredText(payload, 'query');
+      try { normalizeIcSearchQuery(query); }
+      catch { throw new HttpError(400, 'IC名を2〜80文字で入力してください'); }
+      const data = await searchExpresswayIcByName(query);
+      return jsonResponse({ ok: true, data });
+    }
+    if (payload.action != null) throw new HttpError(400, 'Unknown resolver action');
 
     const lat = requiredCoordinate(payload, 'lat', -90, 90);
     const lon = requiredCoordinate(payload, 'lon', -180, 180);

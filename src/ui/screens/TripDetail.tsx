@@ -39,6 +39,12 @@ import { copyNativeText } from '../../services/nativeShare';
 import { deleteTripEverywhere } from '../../services/tripDeletion';
 import { resolveExpresswayIcManually } from '../../services/expresswayIcResolution';
 import {
+  prepareExpresswayIcManualSelection,
+  searchExpresswayIcNames,
+  type ExpresswayIcManualSelection,
+  type ExpresswayIcNameCandidate,
+} from '../../services/expresswayIcManualEdit';
+import {
   buildTripDetailWorkTimelineForDay,
   formatTripDetailWorkTimelineRow,
   type TripDetailDayTimeline,
@@ -145,6 +151,10 @@ type NumericEditDef = {
 type IcEditState = {
   id: string;
   value: string;
+  candidates?: ExpresswayIcNameCandidate[];
+  selected?: ExpresswayIcManualSelection;
+  searching?: boolean;
+  message?: string;
 };
 
 type AiCopySession = {
@@ -348,7 +358,9 @@ function getIcResolveStatusLabel(ev: AppEvent): { label: string; detail: string;
     const retry = nextRetryAt ? ` / 次回 ${fmtLocal(nextRetryAt)}` : '';
     return { label: name || 'IC取得失敗', detail: `${error || '近傍ICを取得できませんでした'}${retry}`, level: 'danger' };
   }
-  return { label: name || 'IC検索待ち', detail: 'オンライン時に位置情報から再取得します', level: 'warn' };
+  const retry = nextRetryAt ? ` / 次回 ${fmtLocal(nextRetryAt)}` : '';
+  return { label: name || 'IC検索待ち',
+    detail: `${error || 'オンライン時に保存済みの位置情報から再取得します'}${retry}`, level: 'warn' };
 }
 
 function getDayIndexByStamp(dayStamp: number, startDayStamp: number) {
@@ -687,6 +699,7 @@ export default function TripDetail() {
   const [addressEditing, setAddressEditing] = useState<{ id: string; value: string } | null>(null);
   const [numberEditing, setNumberEditing] = useState<{ id: string; field: NumericEditField; value: string } | null>(null);
   const [icEditing, setIcEditing] = useState<IcEditState | null>(null);
+  const icSearchRequestRef = useRef(0);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [sharing, setSharing] = useState(false);
@@ -908,11 +921,12 @@ export default function TripDetail() {
   }
 
   async function handleSaveIcName() {
-    if (!icEditing) return;
+    if (!icEditing || icEditing.searching) return;
     setSaving(true);
     setWorkingId(icEditing.id);
     try {
-      await updateExpresswayIcNameManual(icEditing.id, icEditing.value);
+      await updateExpresswayIcNameManual(icEditing.id, icEditing.value, icEditing.selected);
+      icSearchRequestRef.current += 1;
       setIcEditing(null);
       await load();
     } catch (e: any) {
@@ -920,6 +934,47 @@ export default function TripDetail() {
     } finally {
       setSaving(false);
       setWorkingId(null);
+    }
+  }
+
+  async function handleSearchIcNames() {
+    if (!icEditing || icEditing.searching) return;
+    const edit = icEditing;
+    const request = ++icSearchRequestRef.current;
+    setIcEditing({ ...edit, selected: undefined, candidates: undefined, searching: true, message: 'IC候補を検索中…' });
+    try {
+      const candidates = await searchExpresswayIcNames(edit.value);
+      if (request !== icSearchRequestRef.current) return;
+      setIcEditing(current => current?.id === edit.id ? {
+        ...current, searching: false, candidates,
+        message: candidates.length ? '該当するICを選んで、名称と住所を確認してください。' : '候補が見つかりません。名前だけを保存するか、入力を変えて検索できます。',
+      } : current);
+    } catch {
+      if (request !== icSearchRequestRef.current) return;
+      setIcEditing(current => current?.id === edit.id ? {
+        ...current, searching: false,
+        message: '候補を取得できませんでした。通信・ログイン状態を確認するか、名前だけを保存できます。',
+      } : current);
+    }
+  }
+
+  async function handleSelectIcCandidate(candidate: ExpresswayIcNameCandidate) {
+    if (!icEditing || icEditing.searching) return;
+    const edit = icEditing;
+    const request = ++icSearchRequestRef.current;
+    setIcEditing({ ...edit, searching: true, message: '選択したICの住所を確認中…' });
+    try {
+      const selected = await prepareExpresswayIcManualSelection(candidate);
+      if (request !== icSearchRequestRef.current) return;
+      setIcEditing(current => current?.id === edit.id ? {
+        ...current, value: selected.icName, selected, searching: false,
+        message: selected.address ? '保存すると、IC名と住所を更新します。' : '住所を取得できませんでした。候補のIC名を保存できます（住所は変更されません）。',
+      } : current);
+    } catch {
+      if (request !== icSearchRequestRef.current) return;
+      setIcEditing(current => current?.id === edit.id ? {
+        ...current, searching: false, message: '住所を取得できませんでした。候補を選び直すか、名前だけを保存できます。',
+      } : current);
     }
   }
 
@@ -1490,15 +1545,47 @@ export default function TripDetail() {
                                     <input
                                       type="text"
                                       value={icEditing.value}
-                                      onChange={e => setIcEditing({ id: ev.id, value: e.target.value })}
+                                      onChange={e => {
+                                        icSearchRequestRef.current += 1;
+                                        setIcEditing({ id: ev.id, value: e.target.value });
+                                      }}
                                       disabled={saving}
                                       className="trip-input"
                                       placeholder="例: 札幌南IC"
+                                      aria-label="高速IC名"
+                                      maxLength={80}
                                     />
                                     <div className="trip-edit__inline-actions">
-                                      <button onClick={handleSaveIcName} disabled={saving} className="trip-btn">保存</button>
-                                      <button onClick={() => setIcEditing(null)} disabled={saving} className="trip-btn trip-btn--ghost">取消</button>
+                                      <button onClick={handleSearchIcNames} disabled={saving || icEditing.searching || icEditing.value.trim().length < 2} className="trip-btn trip-btn--ghost">
+                                        {icEditing.searching ? '確認中…' : '名前からIC候補を検索'}
+                                      </button>
+                                      <button onClick={handleSaveIcName} disabled={saving || icEditing.searching || !icEditing.value.trim()} className="trip-btn">
+                                        {icEditing.selected?.address ? 'IC名と住所を保存' : 'IC名だけ保存'}
+                                      </button>
+                                      <button onClick={() => { icSearchRequestRef.current += 1; setIcEditing(null); }} disabled={saving} className="trip-btn trip-btn--ghost">取消</button>
                                     </div>
+                                    <div className="trip-item__meta">候補を選ぶと、地図上のIC名と住所を確認できます。名前だけの保存では住所は変わりません。</div>
+                                    {icEditing.message && <div role="status" className="trip-item__meta">{icEditing.message}</div>}
+                                    {icEditing.candidates && icEditing.candidates.length > 0 && (
+                                      <div className="trip-edit__stack" aria-label="高速IC候補">
+                                        {icEditing.candidates.map(candidate => (
+                                          <button key={candidate.id} type="button" className="trip-btn trip-btn--ghost"
+                                            disabled={saving || icEditing.searching}
+                                            aria-pressed={icEditing.selected?.id === candidate.id}
+                                            onClick={() => handleSelectIcCandidate(candidate)}>
+                                            {candidate.icName}{candidate.address ? ` / ${candidate.address}` : ''}
+                                            {icEditing.selected?.id === candidate.id ? '（選択中）' : ''}
+                                          </button>
+                                        ))}
+                                        <span className="trip-item__meta">© OpenStreetMap contributors</span>
+                                      </div>
+                                    )}
+                                    {icEditing.selected && (
+                                      <div className="trip-edit__address-preview">
+                                        選択IC: {icEditing.selected.icName}<br />
+                                        住所: {icEditing.selected.address ?? '未取得（現在の住所を保持）'}
+                                      </div>
+                                    )}
                                   </div>
                                 ) : (
                                   <div className="trip-edit__stack">
@@ -1508,12 +1595,13 @@ export default function TripDetail() {
                                     </div>
                                     <div className="trip-edit__inline-actions">
                                       <button
-                                        onClick={() =>
+                                        onClick={() => {
+                                          icSearchRequestRef.current += 1;
                                           setIcEditing({
                                             id: ev.id,
                                             value: typeof (ev as any).extras?.icName === 'string' ? (ev as any).extras.icName : '',
-                                          })
-                                        }
+                                          });
+                                        }}
                                         disabled={saving}
                                         className="trip-btn"
                                       >
