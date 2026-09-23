@@ -12,10 +12,7 @@ import {
   selectPreferredPersistedAuthSession,
 } from './nativeResidentSessionPolicy';
 import { ResidentLocation } from './residentLocationBridge';
-import {
-  deferNativeAuthRecovery,
-  resetNativeAuthRecoveryBackoff,
-} from './nativeAuthRecoveryBackoff';
+import { getDriverAuthIntentGeneration, isCurrentDriverAuthIntent } from './driverAuthMutationLock';
 
 async function readIndexedDriverSession(): Promise<string | null> {
   if (typeof indexedDB === 'undefined') return null;
@@ -41,22 +38,42 @@ async function readIndexedDriverSession(): Promise<string | null> {
   }
 }
 
-/** Seeds the WebView before supabase-js can refresh an older stored token. */
-export async function seedNativeDriverSessionBeforeClient(): Promise<boolean> {
+/** A timed-out seed must never overwrite storage after the clients are created. */
+export async function runBoundedNativeSessionSeed(
+  seed: (isActive: () => boolean) => Promise<boolean>,
+  timeoutMs = 2_000,
+): Promise<boolean> {
+  let active = true;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<boolean>(resolve => {
+    timer = setTimeout(() => {
+      active = false;
+      resolve(false);
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([Promise.resolve().then(() => seed(() => active)), timeout]);
+  } finally {
+    active = false;
+    clearTimeout(timer);
+  }
+}
+
+/** Seeds the WebView from native storage without waiting for the network. */
+export function seedNativeDriverSessionBeforeClient(): Promise<boolean> {
+  return runBoundedNativeSessionSeed(seedNativeDriverSession);
+}
+
+async function seedNativeDriverSession(isActive: () => boolean): Promise<boolean> {
   if (!Capacitor.isNativePlatform() || Capacitor.getPlatform() !== 'android') return false;
   if (typeof window === 'undefined') return false;
   if (isDriverExplicitSignOutRequested()) return false;
+  const authIntent = getDriverAuthIntentGeneration();
 
-  // Android owns refresh-token rotation. This returns immediately while the
-  // access token is healthy and refreshes natively before WebView startup when needed.
-  let authorization;
-  try {
-    authorization = await ResidentLocation.refreshAuthorization();
-    resetNativeAuthRecoveryBackoff();
-  } catch (error) {
-    deferNativeAuthRecovery(error);
-    throw error;
-  }
+  // Seed from the native owner's current snapshot before creating clients.
+  // Token refresh belongs to background recovery, never the first render.
+  const authorization = await ResidentLocation.getAuthorization();
+  if (!isActive()) return false;
   if (!authorization.configured || authorization.blocked) return false;
 
   let localRaw: string | null;
@@ -75,6 +92,7 @@ export async function seedNativeDriverSessionBeforeClient(): Promise<boolean> {
   } catch {
     // Native and localStorage remain sufficient if IndexedDB is unavailable.
   }
+  if (!isActive() || !isCurrentDriverAuthIntent(authIntent) || isDriverExplicitSignOutRequested()) return false;
   const persistedRaw = selectPreferredPersistedAuthSession(localRaw, indexedRaw);
   const nextSession = buildNativeBootstrappedSession({
     nativeAccessToken: authorization.accessToken,

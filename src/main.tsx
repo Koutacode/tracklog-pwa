@@ -27,24 +27,17 @@ async function bootstrap() {
   }
 
   if (Capacitor.isNativePlatform()) {
-    try {
-      const launchUrl = await CapacitorApp.getLaunchUrl();
+    void CapacitorApp.getLaunchUrl().then(launchUrl => {
       if (launchUrl?.url && isTracklogNativeAuthCallbackUrl(launchUrl.url)) {
         persistNativeAuthCallbackUrl(launchUrl.url);
       }
-    } catch {
-      // Native launch URL capture is best-effort.
-    }
+    }).catch(() => undefined);
 
-    try {
-      await CapacitorApp.addListener('appUrlOpen', ({ url }) => {
-        if (isTracklogNativeAuthCallbackUrl(url)) {
-          persistNativeAuthCallbackUrl(url);
-        }
-      });
-    } catch {
-      // Listener registration is best-effort.
-    }
+    void CapacitorApp.addListener('appUrlOpen', ({ url }) => {
+      if (isTracklogNativeAuthCallbackUrl(url)) {
+        persistNativeAuthCallbackUrl(url);
+      }
+    }).catch(() => undefined);
   }
 
   // App imports create the Supabase clients. Keep them after the native seed so
@@ -53,16 +46,16 @@ async function bootstrap() {
     import('./app/App'),
     import('./services/nativeResidentLocation'),
   ]);
-  try {
-    await restoreNativeResidentLocationSession();
-  } catch (error) {
-    console.warn('[resident-location] startup session restore skipped', error);
-  }
   root.render(
     <React.StrictMode>
       <App />
     </React.StrictMode>,
   );
+  // The registration gate can use the approved native enrollment immediately.
+  // A slow refresh must not delay mounting the app or local operation records.
+  void restoreNativeResidentLocationSession().catch(error => {
+    console.warn('[resident-location] startup session restore skipped', error);
+  });
 }
 
 void bootstrap();

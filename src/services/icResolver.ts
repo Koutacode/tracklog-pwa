@@ -2,7 +2,8 @@ import { Capacitor } from '@capacitor/core';
 import type { Session } from '@supabase/supabase-js';
 import { getStableDeviceKey } from './deviceIdentity';
 import { restoreNativeResidentLocationSession } from './nativeResidentLocation';
-import { driverAuthSupabase, driverSupabase, SUPABASE_CONFIGURED } from './supabase';
+import { driverAuthSupabase, SUPABASE_CONFIGURED } from './supabase';
+import { invokeIcResolverFunction, withIcResolverTimeout } from './icResolverClient';
 
 export type IcResult = { icName: string; distanceM: number };
 
@@ -25,17 +26,13 @@ type EdgeExpresswaySignal = Omit<ExpresswaySignal, 'provider'> & {
   provider: 'overpass';
 };
 
-const EDGE_FUNCTION_NAME = 'tracklog-ic-resolver';
 const DEFAULT_RADIUS_M = 8000;
 const MIN_RADIUS_M = 250;
 const MAX_RADIUS_M = 12000;
 export const MAX_PRIMARY_IC_DISTANCE_M = 1200;
 export const MAX_CORROBORATED_IC_DISTANCE_M = 2000;
 const SESSION_REFRESH_MARGIN_MS = 60_000;
-// The server can try six upstream requests (4.5 s each). Bound the entire
-// function response, including its body, without cutting off that failover.
-const IC_RESOLVER_REQUEST_TIMEOUT_MS = 35_000;
-let sessionRefreshInFlight: Promise<Session> | null = null;
+const runSharedSessionRefresh = createIcResolverSessionTaskRunner<Session>();
 
 export type IcResolverHttpFailureCategory =
   | 'authorization-recoverable'
@@ -204,9 +201,12 @@ function recoverableAuthorizationError(message: string) {
 }
 
 /** Native refresh already owns permanent rejection and its shared cooldown. */
-export async function runIcResolverNativeSessionRestore(restore: () => Promise<unknown>): Promise<void> {
+export async function runIcResolverNativeSessionRestore(
+  restore: () => Promise<unknown>,
+  timeoutMs?: number,
+): Promise<void> {
   try {
-    await restore();
+    await withIcResolverTimeout(restore, timeoutMs);
   } catch (error) {
     // A native bridge/network failure is not evidence of a rejected login.
     // Treating it as authorization failure delays IC recovery for 15 minutes.
@@ -220,17 +220,16 @@ export async function runIcResolverNativeSessionRestore(restore: () => Promise<u
 }
 
 async function refreshResolverSession(current: Session): Promise<Session> {
-  if (!driverAuthSupabase) throw recoverableAuthorizationError('Supabase が未設定です');
-  if (sessionRefreshInFlight) return sessionRefreshInFlight;
-
-  sessionRefreshInFlight = (async () => {
+  const client = driverAuthSupabase;
+  if (!client) throw recoverableAuthorizationError('Supabase が未設定です');
+  return runSharedSessionRefresh(async () => {
     try {
       const result = isAndroidNative()
         ? await (async () => {
             await runIcResolverNativeSessionRestore(() => restoreNativeResidentLocationSession({ forceRefresh: true }));
-            return driverAuthSupabase.auth.getSession();
+            return client.auth.getSession();
           })()
-        : await driverAuthSupabase.auth.refreshSession({
+        : await client.auth.refreshSession({
             refresh_token: current.refresh_token,
           });
       const { data, error } = result;
@@ -245,13 +244,7 @@ async function refreshResolverSession(current: Session): Promise<Session> {
       if (error instanceof IcResolverError) throw error;
       throw recoverableAuthorizationError(authErrorMessage(error, 'ログイン状態を更新できませんでした'));
     }
-  })();
-
-  try {
-    return await sessionRefreshInFlight;
-  } finally {
-    sessionRefreshInFlight = null;
-  }
+  });
 }
 
 async function getResolverSession(): Promise<Session> {
@@ -277,38 +270,51 @@ async function getResolverSession(): Promise<Session> {
   return session;
 }
 
-async function invokeWithSession(
+async function invokeWithSession<T>(
   session: Session,
-  body: { deviceId: string; lat: number; lon: number; radiusM: number },
+  body: Record<string, unknown>,
 ) {
-  if (!driverSupabase) throw new IcResolverError('Supabase が未設定です', true);
-  return driverSupabase.functions.invoke<FunctionResponse<EdgeExpresswaySignal>>(
-    EDGE_FUNCTION_NAME,
-    {
-      body,
-      headers: { Authorization: `Bearer ${session.access_token}` },
-      timeout: IC_RESOLVER_REQUEST_TIMEOUT_MS,
-    },
-  );
+  if (!invokeIcResolverFunction) throw new IcResolverError('Supabase が未設定です', true);
+  return invokeIcResolverFunction<FunctionResponse<T>>(session.access_token, body);
 }
 
-async function invokeIcResolver(lat: number, lon: number, radiusM: number): Promise<ExpresswaySignal> {
-  if (!SUPABASE_CONFIGURED || !driverSupabase) {
+export async function runIcResolverSessionTask<T>(task: () => Promise<T>, timeoutMs?: number): Promise<T> {
+  try {
+    return await withIcResolverTimeout(task, timeoutMs);
+  } catch (error) {
+    if (error instanceof IcResolverError) throw error;
+    throw new IcResolverError(authErrorMessage(error, 'ログイン状態を一時的に確認できませんでした'), true, null, 'temporary');
+  }
+}
+
+/** Share a bounded waiter; native code continues owning any underlying refresh mutation. */
+export function createIcResolverSessionTaskRunner<T>(timeoutMs?: number) {
+  let inFlight: Promise<T> | null = null;
+  return (task: () => Promise<T>): Promise<T> => {
+    if (inFlight) return inFlight;
+    const pending = runIcResolverSessionTask(task, timeoutMs);
+    inFlight = pending;
+    const clear = () => { if (inFlight === pending) inFlight = null; };
+    void pending.then(clear, clear);
+    return pending;
+  };
+}
+
+export async function invokeIcResolverAction<T>(requestBody: Record<string, unknown>): Promise<T> {
+  if (!SUPABASE_CONFIGURED || !invokeIcResolverFunction) {
     throw new Error('Supabase が未設定のためIC名を取得できません');
   }
 
-  let session = await getResolverSession();
-  const { stableDeviceKey } = await getStableDeviceKey();
+  let session = await runIcResolverSessionTask(getResolverSession);
+  const { stableDeviceKey } = await runIcResolverSessionTask(getStableDeviceKey);
   const body = {
+    ...requestBody,
     deviceId: stableDeviceKey,
-    lat,
-    lon,
-    radiusM,
   };
 
   let response;
   try {
-    response = await invokeWithSession(session, body);
+    response = await invokeWithSession<T>(session, body);
   } catch (error) {
     throw new IcResolverError(authErrorMessage(error, 'IC解決サーバーへの接続に失敗しました'), true);
   }
@@ -316,9 +322,9 @@ async function invokeIcResolver(lat: number, lon: number, radiusM: number): Prom
   let errorDetails = response.error ? await getFunctionErrorDetails(response.error) : null;
   if (errorDetails) {
     if (errorDetails.status === 401) {
-      session = await refreshResolverSession(session);
+      session = await runIcResolverSessionTask(() => refreshResolverSession(session));
       try {
-        response = await invokeWithSession(session, body);
+        response = await invokeWithSession<T>(session, body);
         errorDetails = null;
       } catch (error) {
         throw new IcResolverError(authErrorMessage(error, 'IC解決サーバーへの接続に失敗しました'), true);
@@ -334,7 +340,7 @@ async function invokeIcResolver(lat: number, lon: number, radiusM: number): Prom
   if (!data?.ok) {
     throw new Error(data?.error?.trim() || 'IC解決サーバー処理に失敗しました');
   }
-  return parseSignal(data.data);
+  return data.data as T;
 }
 
 /** Resolves the nearest IC through the authenticated TrackLog Edge Function. */
@@ -356,5 +362,5 @@ export async function detectExpresswaySignal(
   if (typeof navigator !== 'undefined' && !navigator.onLine) {
     return unresolvedSignal();
   }
-  return invokeIcResolver(lat, lon, normalizeRadius(radiusM));
+  return parseSignal(await invokeIcResolverAction<EdgeExpresswaySignal>({ lat, lon, radiusM: normalizeRadius(radiusM) }));
 }

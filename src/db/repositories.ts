@@ -49,6 +49,7 @@ import {
 } from '../domain/expresswayEndRequest';
 import { reverseGeocode } from '../services/geo';
 import { resolveNearestIC } from '../services/icResolver';
+import { validateExpresswayIcManualSelection, type ExpresswayIcManualSelection } from '../services/expresswayIcManualEdit';
 import { notifyTrackLogEventsChanged } from '../services/localEventsChanged';
 import {
   canApplyIcResolutionResult,
@@ -664,8 +665,17 @@ export async function setRemoteRoutePointsUploadedThrough(value: string | null):
 // Event CRUD
 
 export async function updateEventAddress(eventId: string, address?: string) {
-  await db.events.update(eventId, { address });
-  notifyRemoteMutation('event-address-update');
+  if (!address?.trim()) return false;
+  const updated = await db.transaction('rw', db.events, async () => {
+    const event = await db.events.get(eventId);
+    // A reverse lookup may finish after the user selected an IC address or
+    // manually corrected this event. Backfill only a still-missing value.
+    if (!event || event.address?.trim()) return false;
+    await db.events.update(eventId, { address: address.trim(), syncStatus: 'pending' });
+    return true;
+  });
+  if (updated) notifyRemoteMutation('event-address-update');
+  return updated;
 }
 
 export async function updateEventTimestamp(eventId: string, ts: string) {
@@ -764,9 +774,15 @@ function assertExpresswayEvent(ev: AppEvent) {
   }
 }
 
-export async function updateExpresswayIcNameManual(eventId: string, icName: string) {
+export async function updateExpresswayIcNameManual(
+  eventId: string,
+  icName: string,
+  selection?: ExpresswayIcManualSelection,
+) {
   const name = icName.trim();
   if (!name) throw new Error('IC名を入力してください');
+  if (name.length > 80) throw new Error('IC名は80文字以内で入力してください');
+  if (selection) validateExpresswayIcManualSelection(name, selection);
   const ev = await db.events.get(eventId);
   if (!ev) throw new Error('イベントが見つかりません');
   assertExpresswayEvent(ev);
@@ -783,7 +799,19 @@ export async function updateExpresswayIcNameManual(eventId: string, icName: stri
   delete extras.icResolveNextRetryAt;
   delete extras.icResolveLastAttemptAt;
   delete extras.icResolveError;
-  await db.events.update(eventId, { extras, syncStatus: 'pending' });
+  delete extras.icNameSearchSourceId;
+  delete extras.icNameSearchAddressUpdated;
+  if (selection) {
+    extras.icNameSearchSourceId = selection.id;
+    extras.icNameSearchAddressUpdated = !!selection.address;
+  }
+  // geo remains the observed event position; a chosen IC address is a label
+  // correction and must not move route anchors or recorded trip evidence.
+  await db.events.update(eventId, {
+    extras,
+    ...(selection?.address ? { address: selection.address.trim() } : {}),
+    syncStatus: 'pending',
+  });
   notifyRemoteMutation('expressway-ic-manual');
   notifyTrackLogEventsChanged();
 }
@@ -2265,9 +2293,9 @@ export async function backfillMissingAddresses(limit = 30, batches = 2): Promise
       try {
         const addr = await reverseGeocode(geo);
         if (addr) {
-          await updateEventAddress(ev.id, addr);
-          updatedAny = true;
-          updatedBatch = true;
+          const updated = await updateEventAddress(ev.id, addr);
+          updatedAny = updatedAny || updated;
+          updatedBatch = updatedBatch || updated;
         }
       } catch {
         // ignore failures; will retry later
@@ -2811,9 +2839,23 @@ export async function refreshEventAddressFromGeo(eventId: string): Promise<strin
   if (!ev) throw new Error('イベントが見つかりません');
   const geo = (ev as any).geo as Geo | undefined;
   if (!geo) throw new Error('このイベントには位置情報が保存されていません');
+  const expectedVersion = captureIcResolutionEventVersion(ev);
   const addr = await reverseGeocode(geo);
   if (addr) {
-    await db.events.update(eventId, { address: addr, syncStatus: 'pending' });
+    await db.transaction('rw', db.events, async () => {
+      const current = await db.events.get(eventId);
+      if (!current) throw new Error('対象の記録が削除されたため、住所は更新していません');
+      if (current.address !== ev.address ||
+        !canApplyIcResolutionResult(expectedVersion, current, { allowExistingManual: true })) {
+        throw new Error('住所の再取得中に記録が更新されたため、新しい内容を保持しました');
+      }
+      await db.events.update(eventId, {
+        address: addr,
+        ...(current.extras?.icNameSearchAddressUpdated === true
+          ? { extras: { ...current.extras, icNameSearchAddressUpdated: false } } : {}),
+        syncStatus: 'pending',
+      });
+    });
     notifyRemoteMutation('event-address-refresh');
   }
   return addr;

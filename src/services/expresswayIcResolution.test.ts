@@ -2,15 +2,17 @@ import 'fake-indexeddb/auto';
 import assert from 'node:assert/strict';
 import { withRemoteSyncSignalsSuppressed } from '../app/remoteSyncSignal';
 import { db } from '../db/db';
-import { updateExpresswayIcNameManual } from '../db/repositories';
+import { updateEventAddress, updateExpresswayIcNameManual } from '../db/repositories';
 import type { AppEvent, Geo, RoutePoint } from '../domain/types';
 import {
   createExpresswayIcResolutionRunner,
+  createExpresswayIcRetryBatchRunner,
   getIcResolutionReferenceTs,
   selectIcResolutionSupplementalPoints,
 } from './expresswayIcResolution';
 import { IcResolverError, type IcResult } from './icResolver';
 import { IC_RESOLVE_ALGORITHM_VERSION } from './expresswayIcRetryPolicy';
+import { buildTripDetailReportSnapshot } from '../ui/screens/tripDetailReportSnapshot';
 
 // All fixtures are synthetic; no device/session/network data is used.
 const eventId = 'synthetic-ic-event';
@@ -60,6 +62,90 @@ async function testPrimarySuccessDoesNotQueryAdditionalPoints() {
   assert.equal((await run()).status, 'resolved');
   assert.equal(calls.length, 1);
   assert.equal((await savedExtras()).icResolveGeoSource, 'event');
+}
+
+async function testConcurrentAddressCompletionKeepsResolvedIcAndReport() {
+  await reset();
+  const before = (await db.events.get(eventId))!;
+  const run = createExpresswayIcResolutionRunner(async () => {
+    await updateEventAddress(eventId, '合成住所');
+    return { icName: '合成IC', distanceM: 50 };
+  });
+  assert.equal((await run({ eventId, source: 'manual' })).status, 'resolved');
+  const saved = (await db.events.get(eventId))!;
+  assert.equal(saved.address, '合成住所');
+  assert.ok((saved.localRevision ?? 0) > (before.localRevision ?? 0), 'real database revision hooks ran');
+  assert.equal(saved.extras?.icName, '合成IC', 'address completion does not discard the in-flight IC result');
+  const reportEvents: AppEvent[] = [
+    { ...saved, id: 'trip-start', type: 'trip_start', ts: ts(-60), extras: { odoKm: 100 } },
+    { ...saved, id: 'expressway-start', type: 'expressway_start', ts: ts(-30), extras: {} },
+    saved,
+  ];
+  const snapshot = buildTripDetailReportSnapshot({ tripId, events: reportEvents, dayRuns: [], fallbackLabel: '合成日報' }, '', timestamp);
+  const reportEvent = snapshot.days.flatMap(day => day.events).find(event => event.type === 'expressway_end');
+  assert.equal(reportEvent?.extras?.icName, '合成IC', 'rebuilt report snapshots retain the resolved name');
+  assert.equal(reportEvent?.address, '合成住所');
+}
+
+async function testRelevantEventEditsRejectStaleIcAndDoNotReportSuccess() {
+  const mutations: Array<() => Promise<unknown>> = [
+    () => db.events.update(eventId, { geo: geoAt(500) }),
+    () => db.events.update(eventId, { type: 'point_mark' }),
+    () => db.events.update(eventId, { ts: ts(10) }),
+    () => db.events.update(eventId, { tripId: 'other-trip' }),
+    () => db.events.update(eventId, { extras: { icResolveStatus: 'pending', autoDecision: {
+      source: 'native-auto', action: 'end-prompt', evaluatedAt: ts(-20),
+    } } }),
+    () => db.events.update(eventId, { extras: { icResolveStatus: 'pending', icResolveRetryCount: 2 } }),
+    () => db.events.delete(eventId),
+  ];
+  for (const mutate of mutations) {
+    await reset();
+    const run = createExpresswayIcResolutionRunner(async () => {
+      await mutate();
+      return { icName: '古い候補IC', distanceM: 40 };
+    });
+    const result = await run({ eventId, source: 'manual' });
+    assert.equal(result.status, 'deferred');
+    if (result.status === 'deferred') assert.equal(result.reason, 'superseded');
+    assert.equal((await db.events.get(eventId))?.extras?.icName, undefined);
+  }
+}
+
+async function testQueuedGeoHintCannotReplaceCorrectedSavedLocation() {
+  await reset([], { geo: geoAt(500) });
+  const run = createExpresswayIcResolutionRunner(async (lat, lng) => {
+    assert.equal(lat, geoAt(500).lat);
+    assert.equal(lng, geoAt(500).lng);
+    return { icName: '訂正地点IC', distanceM: 40 };
+  });
+  assert.equal((await run({ eventId, geo: originalGeo, source: 'retry' })).status, 'resolved');
+}
+
+async function testDiscardedFailureDoesNotReportBatchUpdate() {
+  await reset();
+  const resolve = createExpresswayIcResolutionRunner(async () => {
+    await db.events.delete(eventId);
+    throw new Error('合成検索失敗');
+  });
+  assert.equal(await createExpresswayIcRetryBatchRunner(resolve)(), false,
+    'a failure rejected by the write guard is not counted as a saved update');
+}
+
+async function testRemovedBatchItemDoesNotBlockOtherPendingIc() {
+  await reset();
+  const event = (await db.events.get(eventId))!;
+  await db.events.put({ ...event, id: 'second-event', ts: ts(10) });
+  let calls = 0;
+  const resolver = createExpresswayIcResolutionRunner(async () => ({ icName: '後続IC', distanceM: 40 }));
+  const retry = createExpresswayIcRetryBatchRunner(async request => {
+    calls += 1;
+    if (calls === 1) await db.events.delete(request.eventId);
+    return resolver(request);
+  });
+  assert.equal(await retry(), true);
+  assert.equal(calls, 2, 'the second event is still processed after the first record disappears');
+  assert.equal((await db.events.get('second-event'))?.extras?.icName, '後続IC');
 }
 
 async function testValidPrimaryMissRecoversUsingRouteAndRecordsOrigin() {
@@ -241,7 +327,8 @@ async function testConcurrentManualCorrectionWinsOverDelayedLookup() {
     },
   });
   completeLookup({ icName: '古い自動候補IC', distanceM: 50 });
-  await running;
+  const outcome = await running;
+  assert.equal(outcome.status, 'deferred', 'a discarded stale lookup must not be reported as a saved result');
   const extras = await savedExtras();
   assert.equal(extras.icName, '手動合成IC');
   assert.equal(extras.icResolvedManually, true);
@@ -270,6 +357,11 @@ async function testManualCorrectionClearsAutomaticOriginMetadata() {
 
 const tests = [
   testPrimarySuccessDoesNotQueryAdditionalPoints,
+  testConcurrentAddressCompletionKeepsResolvedIcAndReport,
+  testRelevantEventEditsRejectStaleIcAndDoNotReportSuccess,
+  testQueuedGeoHintCannotReplaceCorrectedSavedLocation,
+  testDiscardedFailureDoesNotReportBatchUpdate,
+  testRemovedBatchItemDoesNotBlockOtherPendingIc,
   testValidPrimaryMissRecoversUsingRouteAndRecordsOrigin,
   testMissingPrimaryRetainsNearestHistoricalFallback,
   testInvalidAndUnrelatedRouteFixesAreNotQueried,

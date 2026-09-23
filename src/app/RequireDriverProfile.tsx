@@ -7,8 +7,10 @@ import type { DriverIdentity } from '../domain/remoteTypes';
 import { getActiveTripId } from '../db/repositories';
 import {
   getDriverIdentity,
+  getDriverStartupIdentity,
   getDriverAuthWorkflowErrorCode,
   initializeDriverIdentity,
+  isPermanentDriverAuthFailure,
   onDriverAuthStateChange,
   sendDriverMagicLink,
   setDriverProfileLocal,
@@ -35,6 +37,8 @@ import {
 } from './driverRegistrationGateModel';
 import { TRACKLOG_EVENTS_CHANGED_EVENT } from '../services/localEventsChanged';
 import { didActiveTripEnd, shouldShowDeviceSetupGate } from './deviceSetupGatePolicy';
+import { startDriverIdentityCheck } from './driverIdentityStartup';
+import { getDriverAuthIntentGeneration, isCurrentDriverAuthIntent } from '../services/driverAuthMutationLock';
 
 type Props = {
   children: ReactElement;
@@ -544,6 +548,7 @@ export default function RequireDriverProfile({ children }: Props) {
   const navigate = useNavigate();
   const [identity, setIdentity] = useState<DriverIdentity | null>(null);
   const [loading, setLoading] = useState(true);
+  const [identityUnavailable, setIdentityUnavailable] = useState(false);
   const [setupReadiness, setSetupReadiness] = useState<NativeSetupReadiness | null>(null);
   const [setupLoading, setSetupLoading] = useState(false);
   const [activeTripState, setActiveTripState] = useState<{
@@ -552,6 +557,11 @@ export default function RequireDriverProfile({ children }: Props) {
   }>({ known: false, tripId: null });
   const wasBlockedRef = useRef(false);
   const identityRefreshVersionRef = useRef(0);
+  const identityCheckRef = useRef<ReturnType<typeof startDriverIdentityCheck> | null>(null);
+  const identityRefreshInFlightRef = useRef<{
+    authIntent: number;
+    promise: Promise<DriverIdentity>;
+  } | null>(null);
   const setupRefreshInFlightRef = useRef<Promise<void> | null>(null);
   const setupRefreshSequenceRef = useRef(0);
   const lastLifecycleSetupRefreshAtRef = useRef(0);
@@ -586,21 +596,56 @@ export default function RequireDriverProfile({ children }: Props) {
   refreshNativeSetupRef.current = refreshNativeSetup;
 
   const refreshIdentity = async () => {
+    identityCheckRef.current?.cancel();
     const refreshVersion = ++identityRefreshVersionRef.current;
+    const authIntent = getDriverAuthIntentGeneration();
+    const isCurrent = () => refreshVersion === identityRefreshVersionRef.current
+      && isCurrentDriverAuthIntent(authIntent);
     setLoading(true);
-    try {
-      let next: DriverIdentity;
-      try {
-        next = await initializeDriverIdentity();
-      } catch {
-        next = await getDriverIdentity();
-      }
-      if (refreshVersion === identityRefreshVersionRef.current) setIdentity(next);
-    } catch {
-      // Keep the last known gate state when both Auth and local persistence are unavailable.
-    } finally {
-      if (refreshVersion === identityRefreshVersionRef.current) setLoading(false);
-    }
+    setIdentityUnavailable(false);
+    const check = startDriverIdentityCheck({
+      readLocal: getDriverStartupIdentity,
+      refresh: () => {
+        if (identityRefreshInFlightRef.current?.authIntent === authIntent) {
+          return identityRefreshInFlightRef.current.promise;
+        }
+        const promise = initializeDriverIdentity({ expectedAuthIntent: authIntent }).catch(async error => {
+          if (isPermanentDriverAuthFailure(error)) throw error;
+          // Native refresh may have discovered a revoked session after the first
+          // local snapshot. Re-read its blocked state before keeping offline use.
+          const local = await getDriverStartupIdentity();
+          if (!local && !Capacitor.isNativePlatform()) return getDriverIdentity();
+          if (!local) throw error;
+          return local;
+        });
+        const pending = { authIntent, promise };
+        identityRefreshInFlightRef.current = pending;
+        void promise.finally(() => {
+          if (identityRefreshInFlightRef.current === pending) identityRefreshInFlightRef.current = null;
+        }).catch(() => undefined);
+        return promise;
+      },
+      onIdentity: next => {
+        if (!isCurrent()) return;
+        setIdentity(next);
+        setIdentityUnavailable(false);
+      },
+      onUnavailable: () => {
+        if (!isCurrent()) return;
+        setIdentity(null);
+        setIdentityUnavailable(true);
+      },
+      onFailure: error => {
+        if (!isCurrent() || !isPermanentDriverAuthFailure(error)) return;
+        setIdentity(previous => previous
+          ? { ...previous, authInitialized: false, approvalStatus: 'unregistered' }
+          : null);
+        return true;
+      },
+      onSettled: () => { if (isCurrent()) setLoading(false); },
+    });
+    identityCheckRef.current = check;
+    await check.settled;
   };
 
   const refreshIdentityRef = useRef(refreshIdentity);
@@ -610,6 +655,7 @@ export default function RequireDriverProfile({ children }: Props) {
     void refreshIdentityRef.current();
     return () => {
       identityRefreshVersionRef.current += 1;
+      identityCheckRef.current?.cancel();
     };
   }, []);
 
@@ -666,6 +712,7 @@ export default function RequireDriverProfile({ children }: Props) {
     };
     const unsubscribeAuth = onDriverAuthStateChange(event => {
       if (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED' || event === 'SIGNED_OUT') {
+        if (event === 'SIGNED_IN' || event === 'SIGNED_OUT') setIdentity(null);
         recheckIdentity();
       }
     });
@@ -754,7 +801,26 @@ export default function RequireDriverProfile({ children }: Props) {
   ]);
 
   if (!identity) {
-    return <div style={{ padding: 24, color: '#fff' }}>登録状態を確認中…</div>;
+    return (
+      <div className="screen-shell">
+        <div className="screen-card screen-card--narrow">
+          <h1 className="screen-card__title">
+            {identityUnavailable ? '登録状態を確認できませんでした' : '登録状態を確認中…'}
+          </h1>
+          <p className="settings-note" role="status" aria-live="polite">
+            {identityUnavailable
+              ? '通信状態を確認して再試行してください。保存済みの運行記録はそのまま残っています。'
+              : 'この端末の登録情報を読み込んでいます。'}
+          </p>
+          {identityUnavailable && (
+            <button className="trip-btn trip-btn--primary" type="button" disabled={loading} onClick={() => { void refreshIdentity(); }}>
+              登録状態を再確認
+            </button>
+          )}
+          <Link to="/driver-login" className="pill-link">登録済みログイン</Link>
+        </div>
+      </div>
+    );
   }
 
   if (!hasApprovedProfile(identity)) {

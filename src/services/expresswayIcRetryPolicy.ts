@@ -1,6 +1,8 @@
+import type { BaseEvent } from '../domain/types';
+
 export const IC_RESOLVE_RETRY_LIMIT = 6;
 // Bump this when resolver behavior changes so previously exhausted failures retry.
-export const IC_RESOLVE_ALGORITHM_VERSION = 12;
+export const IC_RESOLVE_ALGORITHM_VERSION = 13;
 
 const IC_RESOLVE_BACKOFF_BASE_MS = 2 * 60 * 1000;
 const IC_RESOLVE_BACKOFF_CAP_MS = 60 * 60 * 1000;
@@ -14,11 +16,9 @@ export type IcResolveDeferredCategory = 'authorization-recoverable' | 'temporary
 
 type IcResolveExtras = Record<string, unknown> | null | undefined;
 
-export type IcResolutionEventVersionSource = {
-  localRevision?: number;
-  syncMutationId?: string;
-  extras?: Record<string, unknown>;
-};
+export type IcResolutionEventVersionSource = Partial<Pick<BaseEvent,
+  'tripId' | 'type' | 'ts' | 'geo' | 'localRevision' | 'syncMutationId' | 'extras'
+>>;
 
 export type IcResolutionEventVersion = {
   localRevision: number | null;
@@ -27,6 +27,8 @@ export type IcResolutionEventVersion = {
   name: string | null;
   resolvedManually: boolean;
   manualUpdatedAt: string | null;
+  inputSignature: string | null;
+  resolutionSignature: string;
 };
 
 function normalizedVersionText(value: unknown): string | null {
@@ -37,6 +39,10 @@ export function captureIcResolutionEventVersion(
   event: IcResolutionEventVersionSource,
 ): IcResolutionEventVersion {
   const revision = event.localRevision;
+  const decision = event.extras?.autoDecision;
+  const autoDecision = decision && typeof decision === 'object'
+    ? decision as Record<string, unknown>
+    : undefined;
   return {
     localRevision: typeof revision === 'number' && Number.isFinite(revision)
       ? Math.max(0, Math.trunc(revision))
@@ -46,13 +52,25 @@ export function captureIcResolutionEventVersion(
     name: normalizedVersionText(event.extras?.icName),
     resolvedManually: event.extras?.icResolvedManually === true,
     manualUpdatedAt: normalizedVersionText(event.extras?.icResolveManualUpdatedAt),
+    // Snapshot primitive inputs instead of holding mutable geo/extras objects.
+    // Address completion and sync acknowledgement may change the general row
+    // revision while this request is running; neither invalidates an IC lookup.
+    inputSignature: event.tripId && event.type && event.ts ? JSON.stringify([
+      event.tripId, event.type, event.ts,
+      event.geo ? [event.geo.lat, event.geo.lng, event.geo.accuracy ?? null] : null,
+      event.extras?.expresswaySessionId ?? null,
+      autoDecision?.source ?? null, autoDecision?.action ?? null, autoDecision?.evaluatedAt ?? null,
+    ]) : null,
+    resolutionSignature: JSON.stringify(Object.entries(event.extras ?? {})
+      .filter(([key]) => key.startsWith('ic'))
+      .sort(([a], [b]) => a.localeCompare(b))),
   };
 }
 
 /**
- * A resolver result may update only the exact IC state it observed before its
- * network request. This protects a driver's later manual correction even for
- * legacy rows that do not yet have a local revision.
+ * Match the exact IC inputs/state observed before the network request while
+ * allowing unrelated address/sync updates. Partial legacy callers retain the
+ * stricter general revision comparison because they cannot supply all inputs.
  */
 export function canApplyIcResolutionResult(
   expected: IcResolutionEventVersion,
@@ -61,8 +79,11 @@ export function canApplyIcResolutionResult(
 ): boolean {
   const current = captureIcResolutionEventVersion(currentEvent);
   if (current.resolvedManually && options?.allowExistingManual !== true) return false;
-  return current.localRevision === expected.localRevision
-    && current.syncMutationId === expected.syncMutationId
+  const sameInput = expected.inputSignature != null && current.inputSignature != null
+    ? expected.inputSignature === current.inputSignature
+    : current.localRevision === expected.localRevision && current.syncMutationId === expected.syncMutationId;
+  return sameInput
+    && current.resolutionSignature === expected.resolutionSignature
     && current.status === expected.status
     && current.name === expected.name
     && current.resolvedManually === expected.resolvedManually
