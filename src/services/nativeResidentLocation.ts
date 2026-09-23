@@ -7,6 +7,7 @@ import {
   SUPABASE_CONFIGURED,
 } from './supabase';
 import { isDriverExplicitSignOutRequested } from './authStorageKeys';
+import { isNativeAccessTokenUsableBySdk } from './nativeOwnedAuthStorage';
 import { isPermanentDriverAuthFailure } from './driverAuthFailurePolicy';
 import {
   canApplyDriverAuthIntent,
@@ -347,7 +348,7 @@ export async function reconcileNativeResidentLocation(options: {
         verificationMarker,
       )) {
         try {
-          const { data: verified, error: verificationError } = await client.auth.getUser();
+          const { data: verified, error: verificationError } = await client.auth.getUser(session.access_token);
           if (!verificationError && verified.user) {
             await installNativeResidentLocationAuthorization(authIntent);
           } else {
@@ -527,6 +528,11 @@ export async function restoreNativeResidentLocationSession(options?: {
     if (restoreGeneration !== restoreAuthorizationGeneration) return false;
 
     // Native upload may have rotated the refresh token while the WebView was suspended.
+    // setSession refreshes expired tokens itself, bypassing the SDK read adapter.
+    // A delayed or unusable native reply must stay with its native refresh owner.
+    if (!isNativeAccessTokenUsableBySdk(authorization.accessToken)) {
+      throw new Error('端末の認証情報を更新中です。通信状態を確認して再試行してください。');
+    }
     const { data, error } = await client.auth.setSession({
       access_token: authorization.accessToken,
       refresh_token: authorization.refreshToken,

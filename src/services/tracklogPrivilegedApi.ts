@@ -6,6 +6,7 @@ import {
   driverAuthSupabase,
   driverSupabase,
 } from './supabase';
+import { tracklogExplicitTokenClient } from './tracklogExplicitTokenClient';
 
 type FunctionResponse<T> = {
   ok?: boolean;
@@ -47,39 +48,48 @@ function requireClient(client: SupabaseClient | null) {
   return client;
 }
 
-async function invokeTracklogPrivileged<T>(
-  client: SupabaseClient,
-  action: PrivilegedAction,
-  payload: Record<string, unknown>,
-  accessToken?: string | null,
-): Promise<T> {
-  const enrollmentAccessToken = accessToken?.trim() || '';
-  const { data, error } = await client.functions.invoke<FunctionResponse<T>>('tracklog-privileged', {
-    body: {
-      action,
-      ...payload,
-    },
-    ...(enrollmentAccessToken
-      ? { headers: { Authorization: `Bearer ${enrollmentAccessToken}` } }
-      : {}),
-  });
-  if (error) {
-    const wrapped = new Error(error.message || 'TrackLog サーバー処理に失敗しました') as Error & {
-      cause?: unknown;
-      status?: number;
-    };
-    wrapped.cause = error;
-    const context = 'context' in error ? error.context : null;
-    if (context && typeof context === 'object' && 'status' in context && typeof context.status === 'number') {
-      wrapped.status = context.status;
+export function createTracklogPrivilegedInvoker(explicitTokenClient: SupabaseClient | null) {
+  return async function invokeTracklogPrivileged<T>(
+    client: SupabaseClient,
+    action: PrivilegedAction,
+    payload: Record<string, unknown>,
+    accessToken?: string | null,
+  ): Promise<T> {
+    const enrollmentAccessToken = accessToken?.trim() || '';
+    // An explicit token has already been obtained from its native/foreground
+    // owner. Using the Auth client here would read and potentially refresh an
+    // older WebView session before sending this otherwise independent request.
+    const requestClient = enrollmentAccessToken ? explicitTokenClient : client;
+    if (!requestClient) throw new Error('Supabase が未設定です');
+    const { data, error } = await requestClient.functions.invoke<FunctionResponse<T>>('tracklog-privileged', {
+      body: {
+        action,
+        ...payload,
+      },
+      ...(enrollmentAccessToken
+        ? { headers: { Authorization: `Bearer ${enrollmentAccessToken}` } }
+        : {}),
+    });
+    if (error) {
+      const wrapped = new Error(error.message || 'TrackLog サーバー処理に失敗しました') as Error & {
+        cause?: unknown;
+        status?: number;
+      };
+      wrapped.cause = error;
+      const context = 'context' in error ? error.context : null;
+      if (context && typeof context === 'object' && 'status' in context && typeof context.status === 'number') {
+        wrapped.status = context.status;
+      }
+      throw wrapped;
     }
-    throw wrapped;
-  }
-  if (!data?.ok) {
-    throw new Error(data?.error || 'TrackLog サーバー処理に失敗しました');
-  }
-  return data.data as T;
+    if (!data?.ok) {
+      throw new Error(data?.error || 'TrackLog サーバー処理に失敗しました');
+    }
+    return data.data as T;
+  };
 }
+
+const invokeTracklogPrivileged = createTracklogPrivilegedInvoker(tracklogExplicitTokenClient);
 
 /** Builds an explicit Authorization override for a foreground control-plane credential. */
 export function buildTracklogPrivilegedAuthorizationHeader(accessToken?: string | null) {
@@ -94,6 +104,8 @@ export type DriverPrivilegedRequestOptions = {
    * A freshly verified foreground Auth token may be used only for explicit
    * enrollment or admin-validation control-plane calls. Normal Android data
    * traffic must keep using the native-owned driverSupabase client.
+   * When accessToken is supplied, transport uses the configured project's
+   * stateless client; this client remains the session owner for ordinary calls.
    */
   client?: SupabaseClient | null;
   accessToken?: string | null;
