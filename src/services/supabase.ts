@@ -10,6 +10,7 @@ import {
 } from './authStorageKeys';
 import { selectPreferredPersistedAuthSession } from './nativeResidentSessionPolicy';
 import { ResidentLocation } from './residentLocationBridge';
+import { createNativeOwnedAuthStorage } from './nativeOwnedAuthStorage';
 import {
   deferNativeAuthRecovery,
   getDeferredNativeAuthRecoveryError,
@@ -385,7 +386,7 @@ export async function clearPersistedDriverAuthSession(): Promise<void> {
 // native/WebView rotation races while still allowing normal PWA auto-refresh.
 export const driverAuthSupabase = buildClient(
   DRIVER_AUTH_STORAGE_KEY,
-  driverAuthStorage,
+  ANDROID_NATIVE ? createNativeOwnedAuthStorage(driverAuthStorage) : driverAuthStorage,
   !ANDROID_NATIVE,
 );
 // Android data requests use a token callback backed by the native owner. This
