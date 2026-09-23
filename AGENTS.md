@@ -32,6 +32,16 @@
 - 実機確認や復旧で作った一時スクリーンショット、抽出ログ、検証ファイルは確認後に削除する。
 - 恒久保持が必要な端末退避データだけ `output/device-backup/*.tar` のような成果物として残す。
 
+## Temporary Work / Cleanup
+- 今後のPC側の検証用ファイル・UI fixture・一時ビルド複製は、`scripts/use-tracklog-temporary-workspace.ps1` で作成する `%LOCALAPPDATA%\TrackLog\temporary-work` 配下の管理フォルダーへ置く。OneDrive配下の `.codex-temp` に新しい検証ファイルを作らない。
+- まとまった検証スクリプトは `npm run temp:run -- -Name <用途> -ScriptPath <ps1>` で実行する。検証スクリプトは `param([string]$TemporaryWorkspacePath)` を受け取り、その配下に一時出力を置く。正常終了・エラー終了のどちらも `finally` で片付ける。
+- 対話的なUI検証などでは `npm run temp:create -- -Name <用途>` の返すPathとWorkspaceIdを使用する。作業終了時に自分が起動したサーバー等を停止し、必要な証拠を要約してから `npm run temp:remove -- -WorkspaceId <ID>` を実行する。通常の片付けを利用者の手作業に残さない。
+- 次回の作業開始時は `npm run temp:list` で前回の中断による残存を確認する。不要と確認できた自分の管理IDだけを指定して削除し、用途不明や実行中のフォルダーには触れない。`Active=false` は対話作業・外部サーバーの終了を保証しない。PC停止やプロセス強制終了では `finally` が走らないことがある。
+- ミラーを作るときはソース・設定・必要な同期資産だけを複製し、既存の `build` / `build-*` / `.gradle` / 一時出力を取り込まない。必要なAPK・端末退避データは片付け前に既定の `output` へ保存・検証する。
+- この仕組みの削除対象は自身の管理情報を持つ一時フォルダーだけ。リポジトリのソース、`output`、端末DB、バックアップ、既存の管理外フォルダーは対象に含めない。任意パス・一括削除・junction/symlinkを受け付けない。
+- 自動承認レビューの拒否を解消する保証はない。拒否された既存フォルダーをここへ移す、別の削除手段・権限・バックグラウンド処理で迂回する、という使い方はしない。拒否時は対象と状態を記録する。
+- 詳細と安全確認は `docs/TEMPORARY_WORKSPACES.md`。スクリプト変更時は `npm run test:temp` で検証する。
+
 ## Device Verification
 - 実機確認の既定手順は `adb install -r -> 起動確認 -> ログ確認`。
 - 進行中の運行データが残っている可能性がある端末では、ユーザーの明示指示なしにアンインストールしない。
