@@ -55,9 +55,32 @@ Chrome上の隔離fixtureでは実際のReactコンポーネントを使用し�
 
 Google Driveの既存[「TrackLog｜2026-09-04 UI改善・実機QA 作業ログ」](https://docs.google.com/document/d/1H15GTHTChYKs7g2i-a5YrHjrAIIsaTh9ewExkcjcsdc/edit)へ、「Google Keep改善要望：起動待機・IC再取得・名前住所編集の修正版準備」を16段落で末尾追記した。readbackで本文完全一致、日付3件、見出し、既存タブと前節保持を確認。既存配置 `TrackLog/10_作業ログ/2026/09` と共有状態は維持し、重複文書を作成していない。
 
-## 一時ファイルの残置
+## 承認後の正式反映
 
-2026-09-23、利用者から「ではそれで進めて」と、v0.1.62の正式公開、IC検索サーバー反映、接続携帯のデータ保持更新への承認を得た。公開・配備・端末照合の実績は完了後に追記する。
+2026-09-23、利用者から「ではそれで進めて」と、v0.1.62の正式公開、IC検索サーバー反映、接続携帯のデータ保持更新への承認を得た。上記の未公開・未実施表記は承認前の時点を表す。
+
+- [PR #9](https://github.com/Koutacode/tracklog-pwa/pull/9) のCI成功後、mainへ統合。merge commit `d4d4bb8a6fbe0bbb153eeab97939a83a9a117d43` は検証済みソースのtreeと同一。v0.1.62タグを付与し、Android Release run `35811433791` を起動。
+- Supabase `tracklog-assist` の `tracklog-ic-resolver` はv3からv4へ反映、ACTIVE、`verify_jwt=true`を維持。公開ソース3件がアップロード元と完全一致。無認証・無効tokenのPOSTはともに401、承認済み端末確認はaction分岐より前に維持。他6Functionのversion/hash/JWT設定とDB/RLS/Auth設定は変更なし。
+- Edge公開bundle SHA256: `c7212850cc0519d9eb46a5069402e3a9cbfc62e73e02ba0036222166f603d96b`。v3退避: `output/edge-function-backup/2026-09-23-tracklog-ic-resolver-v3/`。
+- 更新前にnativeのactive trip、WebView DBのactiveTripIdとも空、画面も運行待機中・運行開始ボタンありと三点で確認。イベント1,670、ルート点244,628、日報16件。IC状態は306件中resolved301/pending5/failed0、手動修正フラグ6件（statusと重複）。精密・概略・常時位置と通知許可あり、電池最適化除外あり。Exact Alarmの実効許可は未確定。
+- 端末退避 `output/device-backup/pre-v0.1.62-20260923-keep.tar` は181,837,824 bytes、SHA256 `add8ae3e3611f2b03c50307c454ac3ad9fe1f75295f3069c7a5e771cb8bb7dda`。tar読取検証成功、253 entries、ファイル権限情報保持。稼働中プロセスからの退避のため原子的snapshotとは扱わない。端末データはローカルに保持しDrive/GitHubへアップロードしない。
+- v0.1.62は2026-09-23 11:46:13 JSTに通常Release公開（draft=false/prerelease=false）。公開APKは7,417,506 bytes、SHA256 `f9a0ea9b8ebe157180daa97fbf087f63ad911d3bc84c92d81bf061e20a610d62`、署名SHA256 `14121cbf70043af3bd2fe17dd57833ed51b7f5dbf326459dde6b830f07cbb99c`、embedded buildDate `2026-09-23T02:43:45.259Z`。
+- `npm run release:verify:apk` が成功し、latest/versionName 0.1.62/versionCode 60/package/署名/ローカルSHA一致を確認。`output/tracklog-assist-debug.apk` とsidecarは公開版へ置換済み。公開latestのsidecarも再取得してSHA一致を確認。CI内のlatest検証と旧Release APK asset削除工程は成功。会社配布URLは https://github.com/Koutacode/tracklog-pwa/releases/latest/download/tracklog-assist-debug.apk のみ。
+- Android Release run `35811433791` は最終success。APIのページング確認でも、全過去49 ReleaseのAPK assetは0件。
+- インストール直前もnative/WebView/画面の三点で運行待機中を再確認し、公開APKを `adb install -r`、Success。端末版0.1.62/code60、lastUpdateTime 2026-09-23 11:47:30、firstInstallTime 2026-03-30 00:33:49を保持。端末base.apkのSHAも公開APKと一致。
+- 更新後は登録確認待ちのまま止まらずホームを表示。既存イベント1,670、ルート点244,628、日報16件は更新前後で完全一致。運行IDは空。アンインストール、データ消去、ログアウト、再登録、疑似運行は実施していない。
+- 精密・概略・常時位置情報・通知の権限を保持し、Exact Alarmは実効grantedを確認。2026-09-23 11:53:23〜11:54:42 JSTの約79秒の背景待機で同一PIDとforeground常駐サービスを保持。現行provider一覧のTrackLog登録0を前後に確認し、ルート点件数も不変。更新後の対象PIDログはFATAL 0・ANR 0。これは全期間の位置コールバック0や実走行の証明ではない。
+- 手動再取得や候補保存を行わず、ICはresolved301→304、pending5→2、failed0、手動修正フラグ6、高速イベント306件。残るpending2件は上流サービス系エラーに分類され、両方に次回再試行時刻あり。集計は `output/candidate/pre-v0.1.62-ic-status-summary.json` と `output/candidate/post-v0.1.62-device-summary.json`。
+- 通常UIから公知名「札幌南IC」を1回検索。検索中表示は解除されたが候補0で汎用エラーとなり、本番候補検索の成功は未確認。選択・保存なし。Resource TimingでICエンドポイントのHTTP502と200を確認し、401は該当範囲でなし。手動操作近傍の502は02:51:06.673〜02:51:27.958 UTC（約21.3秒）。本文を取得していないため手動検索との対応は推定で、35秒上限の発動証拠でもない。
+- 公開Functionの502分岐は `OverpassUnavailableError` であり、外部地図検索失敗が強く示唆される。EdgeログはMCP/CLIに取得経路がなくDashboardも未ログインで取得できず、サーバーの個別endpointや負荷原因は確定していない。同一headersのPC診断では空controlが200/1.64秒、現行16 unionと条件同等2 unionの名前検索は各12秒でタイムアウト。単純なクエリ集約の有効性が示されなかったため、追加コード変更・配備は行っていない。
+- 終了時は未保存IC編集を取り消して通常ホームへ復帰。診断用ADB forwardを解除。今回の実機診断ではrawログ・スクリーンショットの一時ファイルを作成していない。
+- Google Driveの同じ月次作業ログ、同じ `t.0` タブ末尾へ「Google Keep改善：正式公開・IC関数配備・携帯更新の最終結果」を14段落で追記。readbackで本文完全一致、前回準備節全文の保持、見出し、日付2件、単一タブ維持を確認した。公開・サーバー・実機・未確認事項を区別し、重複文書は作成していない。
+
+### 残る検証と復旧手順
+
+本番での名前候補取得から住所保存までの成功、実走行での高速開始・終了IC、圏外復帰は未確認。地図サービス回復後に候補検索を再確認し、残る2件は保存済みの再試行予定に従う。運行開始・終了や候補保存を検証のために捏造しない。更新復旧が必要になった場合は既存データを保持し、旧APKの再配布・アンインストールではなく、修正版をより大きいversionCodeの通常Releaseとして公開・検証してから `adb install -r` する。退避tarは必要な復旧のためローカルに保持する。
+
+## 一時ファイルの残置
 
 今回作成した通常ファイルミラー `C:\Users\matum\AppData\Local\TrackLog\android-source-v0162-20260923-keep` 内に、初回複製で不要な `android/app/build-*` も入った。以後の同期はソース・設定・資産だけに限定した。不要複製の削除は、対象絶対パスとreparse境界を確認した `Remove-Item` でも自動承認レビューが実行前に `blocked by policy` として拒否した。詳細理由は返されていない。別手段で迂回せず残置する。今回のGradle出力は独立した `android-gradle-v0162-20260923-keep` であり、この旧出力はビルドに使用しない。
 
