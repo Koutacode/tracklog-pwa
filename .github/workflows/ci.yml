@@ -29,3 +29,14 @@ jobs:
       - run: npm run check:csp
       - run: npm run build
       - run: npm run check:offline
+
+  temporary-workspaces:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Verify temporary workspace safety in PowerShell 7
+        shell: pwsh
+        run: ./scripts/test-tracklog-temporary-workspace.ps1
+      - name: Verify temporary workspace safety in Windows PowerShell 5.1
+        shell: powershell
+        run: ./scripts/test-tracklog-temporary-workspace.ps1
