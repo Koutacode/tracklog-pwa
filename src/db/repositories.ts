@@ -2004,6 +2004,15 @@ export async function getPendingExpresswayEvents(
       const aStale = isStaleIcResolveAlgorithm(a);
       const bStale = isStaleIcResolveAlgorithm(b);
       if (aStale !== bStale) return aStale ? -1 : 1;
+      const lastAttempt = (event: AppEvent) => {
+        const value = event.extras?.icResolveLastAttemptAt;
+        const parsed = typeof value === 'string' ? Date.parse(value) : NaN;
+        return Number.isFinite(parsed) ? parsed : 0;
+      };
+      // Recovery ignores stored delays, so repeatedly taking the newest rows
+      // can starve older records. Unattempted/least recently tried rows go first.
+      const byLastAttempt = lastAttempt(a) - lastAttempt(b);
+      if (byLastAttempt) return byLastAttempt;
       return aStale ? a.ts.localeCompare(b.ts) : b.ts.localeCompare(a.ts);
     });
 }

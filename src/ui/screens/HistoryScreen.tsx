@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
+import { liveQuery } from 'dexie';
 import { Link } from 'react-router-dom';
 import { getAllEvents, listTrips, type TripSummary } from '../../db/repositories';
 import { deleteTripEverywhere } from '../../services/tripDeletion';
-import { TRACKLOG_EVENTS_CHANGED_EVENT } from '../../services/localEventsChanged';
 import {
   buildTripExpresswayHistorySummaries,
   formatTripExpresswayHistorySummary,
@@ -13,6 +13,7 @@ function fmtLocal(ts?: string) {
   if (!ts) return '-';
   const d = new Date(ts);
   return new Intl.DateTimeFormat('ja-JP', {
+    timeZone: 'Asia/Tokyo',
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
@@ -58,10 +59,18 @@ export default function HistoryScreen() {
     }
   }
   useEffect(() => {
-    void load();
-    const refresh = () => void load();
-    window.addEventListener(TRACKLOG_EVENTS_CHANGED_EVENT, refresh);
-    return () => window.removeEventListener(TRACKLOG_EVENTS_CHANGED_EVENT, refresh);
+    const subscription = liveQuery(async () => {
+      const [nextRows, events] = await Promise.all([listTrips(), getAllEvents()]);
+      return { rows: nextRows, expressways: buildTripExpresswayHistorySummaries(events) };
+    }).subscribe({
+      next: result => {
+        setRows(result.rows);
+        setExpresswayByTrip(result.expressways);
+        setErr(null);
+      },
+      error: (error: unknown) => setErr(error instanceof Error ? error.message : '読み込みに失敗しました'),
+    });
+    return () => subscription.unsubscribe();
   }, []);
   async function handleDelete(tripId: string) {
     const ok = window.confirm('この運行を削除します。よろしいですか？');

@@ -9,45 +9,24 @@ import { onDriverAuthStateChange } from '../services/remoteAuth';
  * not yet been resolved. When the browser is online it attempts to resolve
  * the nearest interchange using the device's recorded GPS coordinates. The
  * update is then persisted back into the database. Only a small number of
- * pending events are processed per interval to avoid excessive network
- * requests. The job listens for the online event to retry immediately when
- * connectivity returns.
+ * pending events are processed per timer interval to avoid excessive network
+ * requests. A recovery processes its saved candidate set once in small pages
+ * so later records do not inherit a long delay after connectivity returns.
  */
 export default function IcResolverJob() {
   useEffect(() => {
     const MAX_EVENTS_PER_TICK = 12;
     let disposed = false;
-    let running = false;
-    let rerunRequested = false;
-    let forceNextRun = false;
     let lastForegroundRecoveryAt = Date.now();
-    const runOnce = async (ignorePendingBackoff = false) => {
-      if (running) {
-        rerunRequested = true;
-        forceNextRun = forceNextRun || ignorePendingBackoff;
-        return;
-      }
-      running = true;
-      let forceCurrentRun = ignorePendingBackoff;
-      try {
-        do {
-          rerunRequested = false;
-          const force = forceCurrentRun || forceNextRun;
-          forceCurrentRun = false;
-          forceNextRun = false;
-          await retryPendingExpresswayIcResolutions(MAX_EVENTS_PER_TICK, {
-            ignorePendingBackoff: force,
-          });
-        } while (rerunRequested && !disposed);
-      } finally {
-        running = false;
-      }
-    };
-
     const start = (force = false) => {
+      if (disposed) return;
       // A deleted/edited event or a suspended database must not disable the
-      // recurring worker or leave an unhandled promise rejection.
-      void runOnce(force).catch(() => undefined);
+      // recurring worker or leave an unhandled promise rejection. The shared
+      // batch owns recovery coalescing, including TOKEN_REFRESHED raised by
+      // its own requests; a second local rerun queue could loop indefinitely.
+      void retryPendingExpresswayIcResolutions(MAX_EVENTS_PER_TICK, {
+        ignorePendingBackoff: force,
+      }).catch(() => undefined);
     };
     const onOnline = () => start(true);
     const onResume = () => {

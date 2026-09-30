@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
+import { liveQuery } from 'dexie';
 import { Link, useLocation, useSearchParams } from 'react-router-dom';
 import type { Trip, DayRecord, DayMetrics, TimeSegmentDetail, TripEvent } from '../../domain/reportTypes';
 import {
@@ -19,6 +20,7 @@ import {
 } from '../../db/reportRepository';
 import { getEventsByTripId } from '../../db/repositories';
 import { buildTripViewModel } from '../../state/selectors';
+import { TripRecordedTimes } from './TripRecordedTimes';
 import {
   EXPRESSWAY_TOGGLE_DEFINITIONS,
   resolveTogglePairing,
@@ -52,34 +54,38 @@ type ReportLocationState = {
   initialReportTrip?: Trip;
 };
 
-function upsertTrip(trips: Trip[], nextTrip: Trip): Trip[] {
-  const remaining = trips.filter(trip => trip.id !== nextTrip.id);
-  return [nextTrip, ...remaining];
-}
-
 export default function ReportDashboard() {
   const location = useLocation();
   const [searchParams, setSearchParams] = useSearchParams();
+  const initialReportTrip = (location.state as ReportLocationState | null)?.initialReportTrip ?? null;
   const [mainTab, setMainTab] = useState<MainTab>('list');
-  const [trips, setTrips] = useState<Trip[]>([]);
+  const [trips, setTrips] = useState<Trip[]>(() => initialReportTrip ? [initialReportTrip] : []);
   const [selectedTripId, setSelectedTripId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const requestedTripId = searchParams.get('tripId');
-  const initialReportTrip = (location.state as ReportLocationState | null)?.initialReportTrip ?? null;
 
   async function loadTrips() {
     try {
       const list = await listReportTrips();
-      setTrips(initialReportTrip ? upsertTrip(list, initialReportTrip) : list);
+      setTrips(list);
     } catch (e: any) {
       setError(e?.message ?? 'Failed to load trips');
     }
   }
 
-  useEffect(() => { void loadTrips(); }, []);
+  useEffect(() => {
+    const subscription = liveQuery(listReportTrips).subscribe({
+      next: list => {
+        // The location-state seed must not replace a newer database projection.
+        setTrips(list);
+        setError(null);
+      },
+      error: (error: unknown) => setError(error instanceof Error ? error.message : '日報を読み込めませんでした'),
+    });
+    return () => subscription.unsubscribe();
+  }, []);
   useEffect(() => {
     if (!initialReportTrip) return;
-    setTrips(prev => upsertTrip(prev, initialReportTrip));
     setSelectedTripId(initialReportTrip.id);
     setMainTab('report');
     setError(null);
@@ -438,7 +444,7 @@ function ReportTab({ trip, trips, requestedTripId, onSelectTrip, onRefreshLiveTr
 // =============================================
 // Sub-view: Daily Report (metrics cards)
 // =============================================
-function DailyView({ day, metrics, expresswaySessions }: {
+export function DailyView({ day, metrics, expresswaySessions }: {
   day: DayRecord;
   metrics: DayMetrics;
   expresswaySessions: ExpresswaySession[];
@@ -457,6 +463,8 @@ function DailyView({ day, metrics, expresswaySessions }: {
         <span className="report-date-header__date">{day.dateKey}</span>
         <span className="report-date-header__km">{day.km} km</span>
       </div>
+
+      <TripRecordedTimes events={day.events} />
 
       {/* Alerts */}
       {metrics.alerts.map((a, i) => (
