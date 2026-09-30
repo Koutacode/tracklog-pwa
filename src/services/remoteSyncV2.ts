@@ -1202,6 +1202,12 @@ async function getFunctionErrorMessage(error: unknown) {
   }
 }
 
+type SyncTransportRequest = {
+  protocolVersion: 2;
+  cursor: number;
+  mutations: SyncMutation[];
+};
+
 export async function performRemoteSyncV2(identity: DriverIdentity): Promise<void> {
   if (!driverSupabase || !driverAuthSupabase || !identity.deviceId) {
     throw new Error('同期に必要な端末情報がありません');
@@ -1211,6 +1217,21 @@ export async function performRemoteSyncV2(identity: DriverIdentity): Promise<voi
   if (sessionError) throw sessionError;
   const userId = sessionData.session?.user?.id?.trim();
   if (!userId || sessionData.session?.user?.is_anonymous) throw new Error('メール認証済みアカウントでログインしてください');
+  const client = driverSupabase;
+  await synchronizeRemoteOutbox(userId, async request => {
+    const { data, error } = await client.functions.invoke('tracklog-sync', {
+      body: { ...request, deviceId: identity.deviceId },
+    });
+    if (error) throw new Error(await getFunctionErrorMessage(error));
+    return data;
+  });
+}
+
+/** Run the durable outbox protocol through an authenticated transport. */
+export async function synchronizeRemoteOutbox(
+  userId: string,
+  send: (request: SyncTransportRequest) => Promise<unknown>,
+): Promise<void> {
   const boundUserId = await getMeta('remoteSyncBoundUserId');
   if (boundUserId && boundUserId !== userId) {
     throw new Error('この端末の運行データは別アカウントに紐づいています。管理者へ端末移行を依頼してください');
@@ -1224,23 +1245,25 @@ export async function performRemoteSyncV2(identity: DriverIdentity): Promise<voi
   let cursor = finiteInteger(await getMeta(cursorKey));
   let bootstrapping = (await getMeta(protocolKey)) !== '2';
   let deferredMissingParentInRun = false;
+  let needsPull = true;
 
   for (let round = 0; round < MAX_SYNC_ROUNDS; round += 1) {
     const prepared = await prepareMutations(userId);
-    const { data, error } = await driverSupabase.functions.invoke('tracklog-sync', {
-      body: {
-        protocolVersion: 2,
-        deviceId: identity.deviceId,
-        cursor,
-        mutations: bootstrapping || deferredMissingParentInRun ? [] : prepared.mutations,
-      },
+    // Every run still performs an initial pull, and hasMore always drains.
+    // After a complete response, re-read the outbox to catch writes during
+    // transport/ack handling, then omit only the terminal empty request.
+    if (!needsPull && !bootstrapping && !prepared.hasPending) return;
+    const data = await send({
+      protocolVersion: 2,
+      cursor,
+      mutations: bootstrapping || deferredMissingParentInRun ? [] : prepared.mutations,
     });
-    if (error) throw new Error(await getFunctionErrorMessage(error));
     const response = parseResponse(data);
     await applySuccessfulAcks(response.acks, prepared, userId);
     const changeResult = await applyChanges(response, prepared, userId, cursorKey);
     deferredMissingParentInRun ||= changeResult.deferredMissingParent;
     cursor = Math.max(cursor, response.cursor);
+    needsPull = response.hasMore;
 
     const rejected = response.acks.find(item => item.status === 'rejected');
     if (rejected) throw new Error(rejected.message || 'クラウド同期で変更を保存できませんでした');
@@ -1260,10 +1283,12 @@ export async function performRemoteSyncV2(identity: DriverIdentity): Promise<voi
     }
     if (response.hasMore) continue;
     if (deferredMissingParentInRun) return;
-    if (prepared.mutations.length === 0) {
-      if (prepared.hasPending) throw new Error('同期前提となる運行情報を確認できません。もう一度同期してください');
-      return;
+    if (prepared.mutations.length === 0 && prepared.hasPending) {
+      throw new Error('同期前提となる運行情報を確認できません。もう一度同期してください');
     }
+    // Even an initially empty pull can have local writes arrive while it is
+    // in flight. The next iteration rechecks before deciding the run is done.
   }
+  if (!needsPull && !bootstrapping && !(await prepareMutations(userId)).hasPending) return;
   throw new Error('同期対象が多いため一部を保存しました。もう一度「今すぐ同期」を押してください');
 }

@@ -42,6 +42,7 @@ import {
 import { restoreNativeResidentLocationSession } from './nativeResidentLocation';
 import { driverAuthSupabase, driverSupabase, SUPABASE_CONFIGURED } from './supabase';
 import { performRemoteSyncV2 } from './remoteSyncV2';
+import { createRemoteSyncScheduler } from './remoteSyncScheduler';
 
 type Listener = (state: RemoteSyncState) => void;
 
@@ -838,20 +839,23 @@ export function subscribeRemoteSyncState(listener: Listener) {
 
 export async function runRemoteSync(reason = 'manual'): Promise<RemoteSyncState> {
   if (inFlight) return inFlight;
+  // Polling, resume, reconnect and manual sync also drain the route outbox.
+  // Do not leave its old timer behind to issue a redundant empty pull later.
+  scheduledRemoteSync?.cancel();
   inFlight = (async () => {
-    await hydrateRemoteSyncState();
-    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
-      emit({
-        syncing: false,
-        lastError: null,
-      });
-      return state;
-    }
-    if (!SUPABASE_CONFIGURED || !driverSupabase) {
-      return state;
-    }
-    emit({ syncing: true, lastError: null });
     try {
+      await hydrateRemoteSyncState();
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+        emit({
+          syncing: false,
+          lastError: null,
+        });
+        return state;
+      }
+      if (!SUPABASE_CONFIGURED || !driverSupabase) {
+        return state;
+      }
+      emit({ syncing: true, lastError: null });
       const identity = await initializeDriverIdentity();
       if (!identity.authInitialized) {
         emit({
@@ -911,16 +915,20 @@ export async function runRemoteSync(reason = 'manual'): Promise<RemoteSyncState>
   return inFlight;
 }
 
-let immediateTimer: number | null = null;
+let scheduledRemoteSync: ReturnType<typeof createRemoteSyncScheduler> | null = null;
 
 export function installImmediateRemoteSyncListener() {
-  return subscribeRemoteSyncRequests((reason: string) => {
-    if (immediateTimer != null) {
-      window.clearTimeout(immediateTimer);
-    }
-    immediateTimer = window.setTimeout(() => {
-      immediateTimer = null;
-      void runRemoteSync(reason);
-    }, 1200);
+  const scheduler = createRemoteSyncScheduler({
+    sync: reason => { void runRemoteSync(reason); },
+    now: Date.now,
+    setTimer: (callback, delayMs) => window.setTimeout(callback, delayMs),
+    clearTimer: timer => window.clearTimeout(timer),
   });
+  scheduledRemoteSync = scheduler;
+  const unsubscribe = subscribeRemoteSyncRequests(scheduler.request);
+  return () => {
+    unsubscribe();
+    scheduler.cancel();
+    if (scheduledRemoteSync === scheduler) scheduledRemoteSync = null;
+  };
 }

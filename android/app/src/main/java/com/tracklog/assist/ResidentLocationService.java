@@ -82,6 +82,9 @@ public final class ResidentLocationService extends Service {
     private final AtomicBoolean expresswayProbeInFlight = new AtomicBoolean(false);
     private final String monotonicLocationSessionId = UUID.randomUUID().toString();
     private ResidentLocationQualityPolicy.Fix lastAcceptedFix;
+    private ResidentLocationQualityPolicy.Fix lastPersistedRouteFix;
+    private float lastPersistedRouteSpeed = Float.NaN;
+    private String lastPersistedRouteTripId;
     private ResidentExpresswayDetectionPolicy.State expresswayDetectionState;
     private long expresswayDetectionRevision = -1L;
     private volatile boolean waitingForLocation;
@@ -385,10 +388,19 @@ public final class ResidentLocationService extends Service {
         boolean queueWriteSucceeded = true;
         if (!sampling.accepts(request, ResidentLocationState.getActiveTripId(this))) return;
         boolean routeShouldRecord = ResidentLocationState.shouldRecordRouteAt(this, now);
-        if (routeShouldRecord) {
+        if (!tripId.equals(lastPersistedRouteTripId) || !routeShouldRecord) {
+            lastPersistedRouteFix = null;
+            lastPersistedRouteSpeed = Float.NaN;
+        }
+        float candidateSpeed = location.hasSpeed() ? location.getSpeed() : Float.NaN;
+        boolean persistRoutePoint = routeShouldRecord && ResidentRoutePersistencePolicy.shouldPersist(
+                lastPersistedRouteFix, lastPersistedRouteSpeed, candidate, candidateSpeed);
+        if (persistRoutePoint) {
             try {
                 ResidentLocationQueue.append(this, tripId, location, monotonicLocationSessionId);
-                ResidentLocationState.cacheLatestRecordedLocation(this, tripId, location);
+                lastPersistedRouteFix = candidate;
+                lastPersistedRouteSpeed = candidateSpeed;
+                lastPersistedRouteTripId = tripId;
                 ResidentLocationState.markQueueWriteSuccess(this, now);
                 handler.removeCallbacks(queueIdleSeal);
                 handler.postDelayed(queueIdleSeal, ResidentLocationQueue.ACTIVE_IDLE_SEAL_MS);
@@ -400,6 +412,9 @@ public final class ResidentLocationService extends Service {
         }
         if (queueWriteSucceeded) lastAcceptedFix = candidate;
         if (routeShouldRecord && queueWriteSucceeded) {
+            // A stationary history suppression must not stale event anchors or motorway detection.
+            // Actual append failures retain the existing retry/detection behavior.
+            ResidentLocationState.cacheLatestRecordedLocation(this, tripId, location);
             advanceExpresswayDetection(location, tripId);
         }
         uploadLatestLocation(location, tripId);

@@ -1,0 +1,495 @@
+{
+  "measuredAtJst": "2026-10-01T01:42:30+09:00",
+  "project": "tracklog-assist",
+  "projectRef": "jwqafxtphulkjhfmvwro",
+  "exactCounts": {
+    "trip_route_points": 268489,
+    "tracklog_sync_mutations": 280602
+  },
+  "tables": [
+    {
+      "measured_at": "2026-09-30 16:42:30.43416+00",
+      "relname": "trip_route_points",
+      "n_live_tup": 18708,
+      "n_dead_tup": 0,
+      "n_tup_ins": 18708,
+      "n_tup_upd": 0,
+      "n_tup_del": 0,
+      "n_tup_hot_upd": 0,
+      "last_autovacuum": null,
+      "last_autoanalyze": null,
+      "heap_bytes": 69730304,
+      "table_bytes": 69787648,
+      "index_bytes": 100999168,
+      "total_bytes": 170786816
+    },
+    {
+      "measured_at": "2026-09-30 16:42:30.43416+00",
+      "relname": "tracklog_sync_mutations",
+      "n_live_tup": 19021,
+      "n_dead_tup": 0,
+      "n_tup_ins": 19021,
+      "n_tup_upd": 0,
+      "n_tup_del": 0,
+      "n_tup_hot_upd": 0,
+      "last_autovacuum": null,
+      "last_autoanalyze": null,
+      "heap_bytes": 107569152,
+      "table_bytes": 107634688,
+      "index_bytes": 23683072,
+      "total_bytes": 131317760
+    },
+    {
+      "measured_at": "2026-09-30 16:42:30.43416+00",
+      "relname": "trip_events",
+      "n_live_tup": 1760,
+      "n_dead_tup": 317,
+      "n_tup_ins": 71,
+      "n_tup_upd": 239,
+      "n_tup_del": 0,
+      "n_tup_hot_upd": 0,
+      "last_autovacuum": null,
+      "last_autoanalyze": "2026-09-29 22:39:03.453213+00",
+      "heap_bytes": 1294336,
+      "table_bytes": 1335296,
+      "index_bytes": 909312,
+      "total_bytes": 2244608
+    },
+    {
+      "measured_at": "2026-09-30 16:42:30.43416+00",
+      "relname": "device_profiles",
+      "n_live_tup": 4,
+      "n_dead_tup": 6,
+      "n_tup_ins": 0,
+      "n_tup_upd": 5087,
+      "n_tup_del": 0,
+      "n_tup_hot_upd": 3055,
+      "last_autovacuum": "2026-09-30 05:40:25.665492+00",
+      "last_autoanalyze": "2026-09-30 07:20:30.515917+00",
+      "heap_bytes": 16384,
+      "table_bytes": 57344,
+      "index_bytes": 81920,
+      "total_bytes": 139264
+    }
+  ],
+  "indexes": [
+    {
+      "relname": "device_profiles",
+      "index_name": "idx_device_profiles_latest_location_at",
+      "bytes": 16384,
+      "idx_scan": 4016,
+      "idx_tup_read": 4027,
+      "idx_tup_fetch": 1973,
+      "indisprimary": false,
+      "indisunique": false,
+      "indisvalid": true,
+      "definition": "CREATE INDEX idx_device_profiles_latest_location_at ON public.device_profiles USING btree (latest_location_at DESC)"
+    },
+    {
+      "relname": "device_profiles",
+      "index_name": "device_profiles_pkey",
+      "bytes": 16384,
+      "idx_scan": 1609,
+      "idx_tup_read": 1787,
+      "idx_tup_fetch": 1609,
+      "indisprimary": true,
+      "indisunique": true,
+      "indisvalid": true,
+      "definition": "CREATE UNIQUE INDEX device_profiles_pkey ON public.device_profiles USING btree (device_id)"
+    },
+    {
+      "relname": "device_profiles",
+      "index_name": "idx_device_profiles_approval_status",
+      "bytes": 16384,
+      "idx_scan": 0,
+      "idx_tup_read": 0,
+      "idx_tup_fetch": 0,
+      "indisprimary": false,
+      "indisunique": false,
+      "indisvalid": true,
+      "definition": "CREATE INDEX idx_device_profiles_approval_status ON public.device_profiles USING btree (approval_status, approval_requested_at DESC)"
+    },
+    {
+      "relname": "device_profiles",
+      "index_name": "device_profiles_device_owner_key",
+      "bytes": 16384,
+      "idx_scan": 29834,
+      "idx_tup_read": 31099,
+      "idx_tup_fetch": 29832,
+      "indisprimary": false,
+      "indisunique": true,
+      "indisvalid": true,
+      "definition": "CREATE UNIQUE INDEX device_profiles_device_owner_key ON public.device_profiles USING btree (device_id, auth_user_id)"
+    },
+    {
+      "relname": "device_profiles",
+      "index_name": "idx_device_profiles_auth_user_id",
+      "bytes": 16384,
+      "idx_scan": 859,
+      "idx_tup_read": 1797,
+      "idx_tup_fetch": 859,
+      "indisprimary": false,
+      "indisunique": false,
+      "indisvalid": true,
+      "definition": "CREATE INDEX idx_device_profiles_auth_user_id ON public.device_profiles USING btree (auth_user_id)"
+    },
+    {
+      "relname": "tracklog_sync_mutations",
+      "index_name": "tracklog_sync_mutations_pkey",
+      "bytes": 18546688,
+      "idx_scan": 19021,
+      "idx_tup_read": 0,
+      "idx_tup_fetch": 0,
+      "indisprimary": true,
+      "indisunique": true,
+      "indisvalid": true,
+      "definition": "CREATE UNIQUE INDEX tracklog_sync_mutations_pkey ON public.tracklog_sync_mutations USING btree (owner_user_id, mutation_id)"
+    },
+    {
+      "relname": "tracklog_sync_mutations",
+      "index_name": "idx_tracklog_mutations_device_owner",
+      "bytes": 2768896,
+      "idx_scan": 0,
+      "idx_tup_read": 0,
+      "idx_tup_fetch": 0,
+      "indisprimary": false,
+      "indisunique": false,
+      "indisvalid": true,
+      "definition": "CREATE INDEX idx_tracklog_mutations_device_owner ON public.tracklog_sync_mutations USING btree (device_id, owner_user_id)"
+    },
+    {
+      "relname": "tracklog_sync_mutations",
+      "index_name": "idx_tracklog_sync_mutations_processed",
+      "bytes": 2367488,
+      "idx_scan": 0,
+      "idx_tup_read": 0,
+      "idx_tup_fetch": 0,
+      "indisprimary": false,
+      "indisunique": false,
+      "indisvalid": true,
+      "definition": "CREATE INDEX idx_tracklog_sync_mutations_processed ON public.tracklog_sync_mutations USING btree (processed_at)"
+    },
+    {
+      "relname": "trip_route_points",
+      "index_name": "idx_trip_route_points_trip_id",
+      "bytes": 33480704,
+      "idx_scan": 0,
+      "idx_tup_read": 0,
+      "idx_tup_fetch": 0,
+      "indisprimary": false,
+      "indisunique": false,
+      "indisvalid": true,
+      "definition": "CREATE INDEX idx_trip_route_points_trip_id ON public.trip_route_points USING btree (trip_id, ts)"
+    },
+    {
+      "relname": "trip_route_points",
+      "index_name": "idx_trip_route_points_device_id",
+      "bytes": 29040640,
+      "idx_scan": 0,
+      "idx_tup_read": 0,
+      "idx_tup_fetch": 0,
+      "indisprimary": false,
+      "indisunique": false,
+      "indisvalid": true,
+      "definition": "CREATE INDEX idx_trip_route_points_device_id ON public.trip_route_points USING btree (device_id, ts DESC)"
+    },
+    {
+      "relname": "trip_route_points",
+      "index_name": "trip_route_points_pkey",
+      "bytes": 20881408,
+      "idx_scan": 18710,
+      "idx_tup_read": 0,
+      "idx_tup_fetch": 0,
+      "indisprimary": true,
+      "indisunique": true,
+      "indisvalid": true,
+      "definition": "CREATE UNIQUE INDEX trip_route_points_pkey ON public.trip_route_points USING btree (id)"
+    },
+    {
+      "relname": "trip_route_points",
+      "index_name": "idx_trip_route_points_owner_change",
+      "bytes": 14737408,
+      "idx_scan": 1479,
+      "idx_tup_read": 18708,
+      "idx_tup_fetch": 18708,
+      "indisprimary": false,
+      "indisunique": false,
+      "indisvalid": true,
+      "definition": "CREATE INDEX idx_trip_route_points_owner_change ON public.trip_route_points USING btree (owner_user_id, change_seq)"
+    },
+    {
+      "relname": "trip_route_points",
+      "index_name": "idx_tracklog_route_points_trip_device_owner",
+      "bytes": 2760704,
+      "idx_scan": 0,
+      "idx_tup_read": 0,
+      "idx_tup_fetch": 0,
+      "indisprimary": false,
+      "indisunique": false,
+      "indisvalid": true,
+      "definition": "CREATE INDEX idx_tracklog_route_points_trip_device_owner ON public.trip_route_points USING btree (trip_id, device_id, owner_user_id)"
+    }
+  ],
+  "statements": [
+    {
+      "measured_at": "2026-09-30 16:42:33.142048+00",
+      "queryid": "4020878061196523857",
+      "query_kind": "tracklog_sync_v2",
+      "calls": 1479,
+      "mean_exec_time": 228.048369612576,
+      "total_exec_time": 337283.538657,
+      "rows": 1479,
+      "shared_blks_hit": 2142631,
+      "shared_blks_read": 4828,
+      "shared_blks_dirtied": 23862,
+      "shared_blks_written": 2590,
+      "temp_blks_read": 0,
+      "temp_blks_written": 0,
+      "wal_records": 242086,
+      "wal_bytes": "97792444",
+      "stats_since": "2026-09-28 13:17:16.555094+00"
+    },
+    {
+      "measured_at": "2026-09-30 16:42:33.142048+00",
+      "queryid": "-2052630842711867896",
+      "query_kind": "supabase_monitor_health",
+      "calls": 3220,
+      "mean_exec_time": 1.30399135931677,
+      "total_exec_time": 4198.852177,
+      "rows": 3220,
+      "shared_blks_hit": 24463,
+      "shared_blks_read": 4,
+      "shared_blks_dirtied": 0,
+      "shared_blks_written": 0,
+      "temp_blks_read": 0,
+      "temp_blks_written": 0,
+      "wal_records": 0,
+      "wal_bytes": "0",
+      "stats_since": "2026-09-28 10:37:25.503662+00"
+    }
+  ],
+  "points7d": [
+    {
+      "source": "background",
+      "points_7d": 21118,
+      "stationary_good_accuracy": 8389,
+      "avg_gap_seconds_under_5m": "9.77",
+      "median_gap_seconds_under_5m": 9,
+      "gap_samples": 21111
+    },
+    {
+      "source": "event",
+      "points_7d": 76,
+      "stationary_good_accuracy": 0,
+      "avg_gap_seconds_under_5m": "161.88",
+      "median_gap_seconds_under_5m": 202.505,
+      "gap_samples": 4
+    }
+  ],
+  "http": {
+    "result": [
+      {
+        "endpoint": "/rest/v1/rpc/tracklog_sync_v2",
+        "http_status": "200",
+        "requests": 931
+      }
+    ]
+  },
+  "feed": {
+    "empty": {
+      "before": {
+        "executionMs": 125.531,
+        "planningMs": 52.21,
+        "shared_blks_read": 4,
+        "shared_blks_hit": 48,
+        "shared_blks_dirtied": 3,
+        "shared_blks_written": 0,
+        "routeNodes": [
+          {
+            "nodeType": "Index Scan",
+            "index": "idx_trip_route_points_owner_change",
+            "rows": 0,
+            "loops": 1
+          }
+        ]
+      },
+      "proposedSelectOnly": {
+        "executionMs": 61.491,
+        "planningMs": 153.175,
+        "shared_blks_read": 1,
+        "shared_blks_hit": 45,
+        "shared_blks_dirtied": 0,
+        "shared_blks_written": 0,
+        "routeNodes": [
+          {
+            "nodeType": "Index Scan",
+            "index": "idx_trip_route_points_owner_change",
+            "rows": 0,
+            "loops": 1
+          }
+        ]
+      }
+    },
+    "recent": {
+      "before": {
+        "executionMs": 16.001,
+        "planningMs": 4.834,
+        "shared_blks_read": 0,
+        "shared_blks_hit": 68,
+        "shared_blks_dirtied": 3,
+        "shared_blks_written": 0,
+        "routeNodes": [
+          {
+            "nodeType": "Index Scan",
+            "index": "idx_trip_route_points_owner_change",
+            "rows": 48,
+            "loops": 1
+          }
+        ]
+      },
+      "proposedSelectOnly": {
+        "executionMs": 10.253,
+        "planningMs": 4.964,
+        "shared_blks_read": 0,
+        "shared_blks_hit": 55,
+        "shared_blks_dirtied": 1,
+        "shared_blks_written": 0,
+        "routeNodes": [
+          {
+            "nodeType": "Index Scan",
+            "index": "idx_trip_route_points_owner_change",
+            "rows": 48,
+            "loops": 1
+          }
+        ]
+      }
+    },
+    "initial": {
+      "before": {
+        "executionMs": 4102.434,
+        "planningMs": 3.319,
+        "shared_blks_read": 9258,
+        "shared_blks_hit": 11457,
+        "shared_blks_dirtied": 80,
+        "shared_blks_written": 0,
+        "routeNodes": [
+          {
+            "nodeType": "Index Scan",
+            "index": "idx_trip_route_points_owner_change",
+            "rows": 132911,
+            "loops": 2
+          }
+        ]
+      },
+      "proposedSelectOnly": {
+        "executionMs": 134.569,
+        "planningMs": 3.946,
+        "shared_blks_read": 0,
+        "shared_blks_hit": 717,
+        "shared_blks_dirtied": 0,
+        "shared_blks_written": 0,
+        "routeNodes": [
+          {
+            "nodeType": "Index Scan",
+            "index": "idx_trip_route_points_owner_change",
+            "rows": 592,
+            "loops": 1
+          }
+        ]
+      }
+    }
+  },
+  "limitations": [
+    "Counts from pg_stat_user_tables were reset/inaccurate; use exactCounts.",
+    "EXPLAIN SELECTs only; no production RPC writes or synthetic trips.",
+    "Before and proposed have different cache state; not a disk IO budget reduction proof.",
+    "EXPLAIN and exact counts can dirty hint bits despite no application-row changes."
+  ],
+  "appliedMigration": {
+    "version": "20260930165335",
+    "name": "tracklog_sync_v2_reduce_disk_io",
+    "databaseApplied": true,
+    "clientApkPublished": false,
+    "bodyMatchesFile": true,
+    "aclUnchanged": true,
+    "securityDefiner": false
+  },
+  "postTables": [
+    {
+      "measured_at": "2026-09-30 16:54:03.410192+00",
+      "table_name": "trip_route_points",
+      "exact_rows": 268489,
+      "table_bytes": 69787648,
+      "index_bytes": 100999168,
+      "total_bytes": 170786816
+    },
+    {
+      "measured_at": "2026-09-30 16:54:03.410192+00",
+      "table_name": "tracklog_sync_mutations",
+      "exact_rows": 280602,
+      "table_bytes": 107634688,
+      "index_bytes": 23683072,
+      "total_bytes": 131317760
+    }
+  ],
+  "postStatements": [
+    {
+      "measured_at": "2026-09-30 16:54:11.385826+00",
+      "calls": 1479,
+      "mean_exec_time": 228.048369612576,
+      "shared_blks_read": 4828,
+      "shared_blks_dirtied": 23862,
+      "shared_blks_written": 2590,
+      "wal_bytes": "97792444",
+      "stats_since": "2026-09-28 13:17:16.555094+00"
+    }
+  ],
+  "edgeHttpBaseline": {
+    "result": [
+      {
+        "http_status": "200",
+        "requests": 1394,
+        "source": "function_edge_logs"
+      },
+      {
+        "http_status": "520",
+        "requests": 1,
+        "source": "function_edge_logs"
+      }
+    ]
+  },
+  "deployedFeed": {
+    "executionMs": 248.41,
+    "shared_blks_read": 0,
+    "shared_blks_hit": 717,
+    "shared_blks_dirtied": 0,
+    "shared_blks_written": 0
+  },
+  "simulations": {
+    "stationary10sOneHour": {
+      "before": 360,
+      "after": 60
+    },
+    "moving10sOneHour": {
+      "before": 360,
+      "after": 360
+    },
+    "sync10sOneHour45sPoll": {
+      "beforeRpc": 800,
+      "afterRpc": 160,
+      "points": 360
+    },
+    "profile20ImmediateRpc": {
+      "beforeWrites": 20,
+      "afterWrites": 0
+    }
+  },
+  "validation": {
+    "syncIntegrationChecks": 19,
+    "feedFixtureChanges": 11418,
+    "feedPages": 8,
+    "androidTests": 85,
+    "androidFailures": 0,
+    "androidErrors": 0
+  }
+}

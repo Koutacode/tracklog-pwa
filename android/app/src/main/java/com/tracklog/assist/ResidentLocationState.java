@@ -176,7 +176,7 @@ final class ResidentLocationState {
         return normalizeTripId(preferences(context).getString(KEY_ACTIVE_TRIP_ID, ""));
     }
 
-    /** Called only after the existing route spool has accepted this real fix. */
+    /** Cache a quality-accepted fix after a successful append or deliberate stationary suppression. */
     static void cacheLatestRecordedLocation(Context context, String tripId, Location location) {
         try {
             String normalizedTripId = normalizeTripId(tripId);
@@ -201,8 +201,8 @@ final class ResidentLocationState {
                     JSONObject previous = getLatestRecordedLocation(context);
                     if (previous != null && normalizedTripId.equals(previous.optString("tripId"))
                             && previous.optString("ts").compareTo(timestamp) >= 0) return;
-                    // apply updates in-memory preferences immediately; the canonical
-                    // route point is already durable in the spool before this cache.
+                    // apply updates in-memory preferences immediately. This cache also stays
+                    // fresh between stationary history points so important events keep their fix.
                     preferences(context).edit().putString(KEY_LATEST_RECORDED_LOCATION, point.toString()).apply();
                 }
             }
