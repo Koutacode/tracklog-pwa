@@ -1,5 +1,6 @@
 import type { AppEvent } from './types';
 import type { Trip, TripEvent } from './reportTypes';
+import { hasNewPendingReportSourceMutation } from './reportSourceEvents';
 
 const EXPRESSWAY_TYPES = new Set(['expressway', 'expressway_start', 'expressway_end']);
 const IC_FIELDS = [
@@ -34,8 +35,8 @@ function mayReplaceSavedIc(saved: TripEvent, current: AppEvent, trip: Trip): boo
     && current.remoteChangeSeq > trip.remoteChangeSeq;
   const savedLocalAt = Date.parse(trip.localUpdatedAt ?? '');
   const currentLocalAt = Date.parse(current.localUpdatedAt ?? '');
-  const newerLocal = Number.isFinite(savedLocalAt) && Number.isFinite(currentLocalAt)
-    && currentLocalAt > savedLocalAt;
+  const newerLocal = (Number.isFinite(savedLocalAt) && Number.isFinite(currentLocalAt)
+    && currentLocalAt > savedLocalAt) || hasNewPendingReportSourceMutation(trip, saved, current);
   if (saved.extras?.icResolvedManually === true) {
     const savedAt = Date.parse(text(saved.extras.icResolveManualUpdatedAt) ?? '');
     const currentAt = Date.parse(text(current.extras?.icResolveManualUpdatedAt) ?? '');

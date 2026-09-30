@@ -201,6 +201,7 @@ function installRemoteSyncHooks() {
       localUpdatedAt: nowIso(),
       localRevision: (obj.localRevision ?? 0) + 1,
       syncMutationId: newMutationId(),
+      previousSyncMutationId: obj.syncMutationId,
     };
   });
   db.events.hook('deleting', () => {

@@ -1,6 +1,7 @@
 import type { DeletedEventTombstone } from '../db/db';
 import type { Trip, TripEvent } from './reportTypes';
 import type { AppEvent } from './types';
+import { hasNewPendingReportSourceMutation, readReportSourceEvents } from './reportSourceEvents';
 
 const SESSION_KEYS = ['expresswaySessionId', 'restSessionId', 'breakSessionId', 'loadSessionId', 'unloadSessionId', 'ferrySessionId', 'waitSessionId', 'workSessionId'];
 const HIGHWAY_TYPES = new Set(['expressway', 'expressway_start', 'expressway_end']);
@@ -30,6 +31,7 @@ export function canAutomaticallyReplaceReportSnapshot(
   deletions: readonly DeletedEventTombstone[],
 ): boolean {
   const nextEvents = incoming.days.flatMap(day => day.events);
+  const sourceEvents = readReportSourceEvents(saved);
   const updatedAt = Date.parse(saved.localUpdatedAt ?? saved.createdAt);
   return saved.days.flatMap(day => day.events).every(event => {
     const exact = nextEvents.filter(next => next.type === event.type && sameTime(next, event));
@@ -48,6 +50,18 @@ export function canAutomaticallyReplaceReportSnapshot(
       (current.type === event.type && sameTime(current, event)) || sameSession(event, current)
     ));
     if (source.length === 1) return true; // A complete source may legitimately change pairing projection.
+
+    const identities = sourceEvents.filter(recorded => recorded.type === event.type && sameTime(recorded, event));
+    if (identities.length > 0) {
+      if (identities.length !== 1) return false;
+      const editedById = canonical.filter(current => current.id === identities[0].id && current.syncStatus === 'pending'
+        && (Date.parse(current.localUpdatedAt ?? '') > updatedAt || hasNewPendingReportSourceMutation(saved, event, current)));
+      // Identity and a later write (or its direct predecessor) distinguish a
+      // new edit from older pending rows and unrelated partially downloaded rows.
+      return editedById.length === 1 && nextEvents.some(next => (
+        next.type === editedById[0].type && sameTime(next, editedById[0])
+      ));
+    }
 
     // Legacy report events have no source ID. Allow an unambiguous pending
     // timestamp/type edit only with a later local write and matching content

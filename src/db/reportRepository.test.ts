@@ -47,6 +47,20 @@ function recordedEnd(trip: Trip | undefined) {
   return trip?.days.flatMap(day => day.events).find(event => event.type === 'trip_end')?.ts;
 }
 
+async function withFixedClock(run: () => Promise<void>): Promise<void> {
+  const NativeDate = Date;
+  const fixedNow = NativeDate.parse(currentTs);
+  globalThis.Date = class extends NativeDate {
+    constructor(value?: string | number) { super(value ?? fixedNow); }
+    static now() { return fixedNow; }
+  } as DateConstructor;
+  try {
+    await run();
+  } finally {
+    globalThis.Date = NativeDate;
+  }
+}
+
 async function testTripEndPersistenceAndHistoryWithoutLocation(): Promise<void> {
   await resetDatabase();
   await db.events.clear();
@@ -284,6 +298,7 @@ async function testAutomaticSnapshotAllowsIcTimeEditAndExplicitDeletion(): Promi
 }
 
 async function testAutomaticSnapshotAllowsPendingRefuelTimeAndOperationalTypeEdits(): Promise<void> {
+  await withFixedClock(async () => {
   await resetDatabase();
   const work: AppEvent[] = [
     { id: 'fuel-edit', tripId, type: 'refuel', ts: '2026-09-05T00:10:00.000Z', syncStatus: 'pending', extras: { liters: 40 } },
@@ -291,14 +306,92 @@ async function testAutomaticSnapshotAllowsPendingRefuelTimeAndOperationalTypeEdi
     { id: 'load-edit-end', tripId, type: 'load_end', ts: '2026-09-05T00:30:00.000Z', syncStatus: 'pending', extras: { loadSessionId: 'synthetic-load' } },
   ];
   await db.events.bulkPut(work);
-  await saveReportTripSnapshot(buildTripDetailReportSnapshot({ ...source, events: [...source.events, ...work] }, source.fallbackLabel, currentTs));
+  await saveReportTripSnapshot(buildTripDetailReportSnapshot({ ...source, events: await db.events.toArray() }, source.fallbackLabel, currentTs));
   await updateEventTimestamp(work[0].id, '2026-09-05T00:11:00.000Z');
+  assert.equal((await db.events.get(work[0].id))?.localUpdatedAt, (await db.reportTrips.get(tripId))?.localUpdatedAt,
+    'the fixture deliberately edits within the same clock millisecond');
   await updateEventType(work[1].id, 'unload_start');
   await saveReportTripSnapshot(buildTripDetailReportSnapshot({ ...source, events: await db.events.toArray() }, source.fallbackLabel, currentTs));
   const refreshed = (await db.reportTrips.get(tripId))?.days.flatMap(day => day.events);
   assert.equal(refreshed?.find(event => event.type === 'refuel')?.ts, '2026-09-05T00:11:00.000Z', 'a unique pending instant-event time edit remains supported');
   assert.equal(refreshed?.some(event => event.type === 'unload_start'), true, 'an explicit operational type conversion remains supported');
   assert.equal(refreshed?.some(event => event.type === 'load_start'), false);
+  });
+}
+
+async function testSameMillisecondIcCorrectionsUseMutationEvidence(): Promise<void> {
+  await withFixedClock(async () => {
+    await resetDatabase();
+    const highway = highwayEvents();
+    await db.events.bulkPut(highway);
+    const saveCurrent = async () => saveReportTripSnapshot(buildTripDetailReportSnapshot({ ...source, events: await db.events.toArray() }, source.fallbackLabel, currentTs));
+    const icName = (report: Trip | undefined) => report?.days.flatMap(day => day.events).find(event => event.type === 'expressway_start')?.extras?.icName;
+    await saveCurrent();
+    await db.events.update(highway[0].id, { extras: { ...highway[0].extras, icName: '合成手動IC一', icResolvedManually: true, icResolveManualUpdatedAt: currentTs } });
+    assert.equal((await db.events.get(highway[0].id))?.localUpdatedAt, (await db.reportTrips.get(tripId))?.localUpdatedAt);
+    assert.equal(icName(await getReportTrip(tripId)), '合成手動IC一', 'a new local mutation can correct an automatic IC within the same millisecond');
+    await saveCurrent();
+    const firstManual = await db.events.get(highway[0].id);
+    await db.events.update(highway[0].id, { extras: { ...firstManual?.extras, icName: '合成手動IC二' } });
+    assert.equal(icName(await getReportTrip(tripId)), '合成手動IC二', 'a second proven mutation can correct a manual IC without a clock tick');
+    await saveCurrent();
+    const current = await db.events.get(highway[0].id);
+    await db.events.put({ ...current!, extras: { ...current?.extras, icName: '古い合成IC' }, __remoteSyncApply: true });
+    assert.equal(icName(await getReportTrip(tripId)), '合成手動IC二', 'the same mutation with stale content is not proof of a new correction');
+  });
+}
+
+async function testSimilarPendingEventCannotReplaceMissingSource(): Promise<void> {
+  await resetDatabase();
+  const original: AppEvent = { id: 'original-fuel', tripId, type: 'refuel', ts: '2026-09-05T00:10:00.000Z', syncStatus: 'pending', extras: { liters: 40 } };
+  await db.events.put(original);
+  await saveReportTripSnapshot(buildTripDetailReportSnapshot({ ...source, events: [...source.events, original] }, source.fallbackLabel, currentTs));
+  const stored = await db.reportTrips.get(tripId);
+  await db.events.delete(original.id); // Partial download, without an explicit deletion receipt.
+  await db.events.put({ ...original, id: 'different-fuel', ts: '2026-09-05T00:11:00.000Z' });
+  await saveReportTripSnapshot(buildTripDetailReportSnapshot({ ...source, events: await db.events.toArray() }, source.fallbackLabel, currentTs));
+  assert.deepEqual(await db.reportTrips.get(tripId), stored, 'a different pending event with identical content is not a timestamp edit of the missing source');
+}
+
+async function testOlderPendingSourceCannotRegressSnapshotWithIdentities(): Promise<void> {
+  await withFixedClock(async () => {
+    await resetDatabase();
+    const fuel: AppEvent = { id: 'old-pending-fuel', tripId, type: 'refuel', ts: '2026-09-05T00:10:00.000Z', syncStatus: 'pending', extras: { liters: 40 } };
+    const highway = highwayEvents();
+    await db.events.bulkPut([fuel, ...highway]);
+    const oldFuel = await db.events.get(fuel.id);
+    const oldIc = await db.events.get(highway[0].id);
+    const saveCurrent = async () => saveReportTripSnapshot(buildTripDetailReportSnapshot({ ...source, events: await db.events.toArray() }, source.fallbackLabel, currentTs));
+    await saveCurrent();
+    await updateEventTimestamp(fuel.id, '2026-09-05T00:11:00.000Z');
+    await db.events.update(highway[0].id, { extras: { ...oldIc?.extras, icName: '新しい合成IC', icResolvedManually: true, icResolveManualUpdatedAt: currentTs } });
+    await saveCurrent();
+    const stored = await db.reportTrips.get(tripId);
+    // Simulate an older local pending state still present after partial sync.
+    const olderAt = '2026-09-05T01:59:59.000Z';
+    await db.events.bulkPut([{ ...oldFuel!, localUpdatedAt: olderAt, __remoteSyncApply: true }, { ...oldIc!, localUpdatedAt: olderAt, __remoteSyncApply: true }]);
+    assert.equal((await getReportTrip(tripId))?.days.flatMap(day => day.events).find(event => event.type === 'expressway_start')?.extras?.icName, '新しい合成IC', 'a different older mutation ID cannot regress a resolved IC');
+    await saveCurrent();
+    assert.deepEqual(await db.reportTrips.get(tripId), stored, 'source identity alone cannot turn an older pending timestamp into a new edit');
+  });
+}
+
+async function testAmbiguousSourceIdentitiesCannotAuthorizeTimeEdit(): Promise<void> {
+  await withFixedClock(async () => {
+    await resetDatabase();
+    const fuel: AppEvent = { id: 'ambiguous-fuel', tripId, type: 'refuel', ts: '2026-09-05T00:10:00.000Z', syncStatus: 'pending', extras: { liters: 40 } };
+    await db.events.put(fuel);
+    await saveReportTripSnapshot(buildTripDetailReportSnapshot({ ...source, events: await db.events.toArray() }, source.fallbackLabel, currentTs));
+    const stored = (await db.reportTrips.get(tripId))!;
+    const raw = JSON.parse(stored.rawJson);
+    raw.sourceEvents.push({ ...raw.sourceEvents.find((event: { id: string }) => event.id === fuel.id), id: 'other-ambiguous-fuel' });
+    const ambiguous = { ...stored, rawJson: JSON.stringify(raw) };
+    await db.reportTrips.put({ ...ambiguous, __remoteSyncApply: true });
+    const beforeEdit = await db.reportTrips.get(tripId);
+    await updateEventTimestamp(fuel.id, '2026-09-05T00:11:00.000Z');
+    await saveReportTripSnapshot(buildTripDetailReportSnapshot({ ...source, events: await db.events.toArray() }, source.fallbackLabel, currentTs));
+    assert.deepEqual(await db.reportTrips.get(tripId), beforeEdit, 'multiple saved IDs at the same recorded type and time do not prove an edit');
+  });
 }
 
 async function testNewSnapshotAndNormalUpdate(): Promise<void> {
@@ -439,6 +532,10 @@ const tests = [
   testHeaderOnlyAutomaticSnapshotPreservesNamedIcAndSourceEvents,
   testAutomaticSnapshotAllowsIcTimeEditAndExplicitDeletion,
   testAutomaticSnapshotAllowsPendingRefuelTimeAndOperationalTypeEdits,
+  testSameMillisecondIcCorrectionsUseMutationEvidence,
+  testSimilarPendingEventCannotReplaceMissingSource,
+  testOlderPendingSourceCannotRegressSnapshotWithIdentities,
+  testAmbiguousSourceIdentitiesCannotAuthorizeTimeEdit,
   testNewSnapshotAndNormalUpdate,
   testLocalDeletionIsPreserved,
   testRemoteDeletionAndExplicitRestore,

@@ -521,6 +521,9 @@ export function buildReportTripFromAppEvents(params: {
   const raw = {
     recordType: 'app_trip_snapshot',
     sourceTripId: params.tripId,
+    // Keep identity through the report projection, which otherwise omits IDs.
+    // This lets a later edit be recognized even when both writes share a millisecond.
+    sourceEvents: params.events.map(event => ({ id: event.id, type: event.type, ts: event.ts, syncMutationId: event.syncMutationId })),
     ...(params.label ? { label: params.label } : {}),
     dayRuns: buildImportableDayRunsFromAppEvents(params.events, params.dayRuns, {
       currentTs: params.currentTs,

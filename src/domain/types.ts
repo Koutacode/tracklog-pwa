@@ -34,6 +34,7 @@ export type BaseEvent = {
   localUpdatedAt?: string;
   localRevision?: number;
   syncMutationId?: string;
+  previousSyncMutationId?: string; // local proof of the immediately preceding event edit
   __remoteSyncApply?: boolean;
   ownerUserId?: string;
   originDeviceId?: string;

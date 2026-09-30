@@ -50,3 +50,17 @@ Androidは管理workspaceの通常ファイルmirrorでJDK21を使用し、`:app
 GitHub CI・APK正式公開の結果は後続追記する。実機導入・実走行は未実施。既存データ・端末・本番DBへの追加変更は行っていない。
 
 既存の `docs/CLOUD_RESEND_2026-10-01.md` と `error.log` はこの作業のcommit対象に含めず保持する。
+
+## CIで判明した同一ミリ秒の編集競合
+
+PR #12の初回CI（run 36791477150 / HEAD 575d596）はAndroid・temporary-workspaces成功、logicの日報時刻編集1件が失敗した。日報とeventのlocalUpdatedAtが同一ミリ秒になると、厳密な時刻比較だけでは明示編集を識別できなかった。
+
+新しいapp snapshotのrawJsonに元eventのID/type/ts/mutation IDを保持し、ローカルevent更新には直前mutation IDを1件保持する。日報保護は元IDと後続の直接的な編集、または厳密に後の時刻を要求する。単に時刻比較を >= に緩めたり、異なるUUIDだけで新しい変更と判断したりしない。ICの手動修正も同じ根拠を使う。旧形式の日報の保守的判定は維持し、DB schema migrationは不要。直前mutation IDはevent RPC payloadへ送信しない。
+
+固定した時計で時刻/type編集、automatic IC→manual→再manualを確認した。別IDの同内容イベント、同mutationの古いIC、同IDの古いpending、曖昧な元IDが保存済み日報を巻き戻さないことも確認し、日報repository 26件が成功。型検査・build・offline・cap syncを再実施した。統合logicとCIの再確認は後続追記する。
+
+## 利用者から追加された作業範囲
+
+今回の公開APKは接続携帯へinstall -rで導入する。更新前はSCG34 / v0.1.63 / code61、nativeとWebViewのactive tripなし、初回install日時を確認し、既定output/device-backupへ退避した。退避は稼働中取得で復元試験は未実施。
+
+公開・実機更新後に、Cloudでの編集からpush・正式workflow公開・照合・Drive保存までを再現可能にする環境と共有専用スキルを整備すること、今後のTrackLog改善のpush/公開を任せること、正式APKとSHAをGoogle Driveにも保存することが利用者から明示された。署名鍵や端末退避データはDrive保存対象に含めない。
