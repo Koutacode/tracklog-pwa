@@ -4,6 +4,11 @@ import { db } from '../db/db';
 import { withRemoteSyncSignalsSuppressed } from '../app/remoteSyncSignal';
 import { synchronizeRemoteOutbox } from './remoteSyncV2';
 import { SUPABASE_CONFIGURED } from './supabase';
+import { updateEventTimestamp, updateExpresswayIcNameManual } from '../db/repositories';
+import { getReportTrip, listReportTrips, saveReportTripSnapshot } from '../db/reportRepository';
+import { buildTripDetailReportSnapshot } from '../ui/screens/tripDetailReportSnapshot';
+import type { AppEvent } from '../domain/types';
+import type { Trip } from '../domain/reportTypes';
 
 type Request = Parameters<Parameters<typeof synchronizeRemoteOutbox>[1]>[0];
 const USER = '11111111-1111-4111-8111-111111111111';
@@ -56,7 +61,128 @@ async function captureRun(send?: (request: Request, call: number) => Promise<unk
   return calls;
 }
 
+const END_TS = '2026-10-01T01:00:00.000Z';
+function integrationEvents(): AppEvent[] {
+  const event = (id: string, type: AppEvent['type'], ts: string, extras: AppEvent['extras']): AppEvent => ({
+    id, tripId: TRIP, type, ts, extras, syncStatus: 'synced', ownerUserId: USER,
+    originDeviceId: 'synthetic-other-device', remoteRevision: 1, remoteChangeSeq: 1, __remoteSyncApply: true,
+  });
+  return [
+    event('integration-start', 'trip_start', TS, { odoKm: 100 }),
+    event('integration-ic-start', 'expressway_start', '2026-10-01T00:10:00.000Z', {
+      expresswaySessionId: 'integration-expressway', icName: '合成開始IC', icResolveStatus: 'resolved',
+    }),
+    event('integration-ic-end', 'expressway_end', '2026-10-01T00:40:00.000Z', {
+      expresswaySessionId: 'integration-expressway', icName: '合成終了IC', icResolveStatus: 'resolved',
+    }),
+    event('integration-end', 'trip_end', END_TS, { odoKm: 120 }),
+  ];
+}
+
+function integrationReport(events: AppEvent[]): Trip {
+  return buildTripDetailReportSnapshot({ tripId: TRIP, events, dayRuns: [], fallbackLabel: '合成統合日報' }, '', END_TS);
+}
+
+function reportEvent(report: Trip | undefined, type: AppEvent['type']) {
+  return report?.days.flatMap(day => day.events).find(event => event.type === type);
+}
+
+async function testTripEndEditDuringHeaderAckPreservesEventAndReport() {
+  await reset();
+  const originalEvents = integrationEvents();
+  await db.events.bulkPut(originalEvents);
+  await db.reportTrips.put({ ...integrationReport(originalEvents), syncStatus: 'synced', __remoteSyncApply: true });
+  await updateEventTimestamp('integration-end', END_TS);
+  const firstEndMutation = (await db.events.get('integration-end'))?.syncMutationId;
+  const correctedEnd = '2026-10-01T00:55:00.000Z';
+  const calls = await captureRun(async (request, call) => {
+    if (call === 1) {
+      assert.equal(request.mutations[0]?.entityType, 'trip');
+      assert.equal(request.mutations[0]?.payload?.end_ts, END_TS);
+      // The user corrects the occurrence time while the old header is in flight.
+      await updateEventTimestamp('integration-end', correctedEnd);
+      await saveReportTripSnapshot(integrationReport(await db.events.where('tripId').equals(TRIP).toArray()));
+      assert.notEqual((await db.events.get('integration-end'))?.syncMutationId, firstEndMutation);
+    }
+    return success(request);
+  });
+  const headers = calls.flatMap(call => call.mutations).filter(mutation => mutation.entityType === 'trip');
+  assert.deepEqual(headers.map(mutation => mutation.payload?.end_ts), [END_TS, correctedEnd],
+    'the old header ack does not mark the corrected boundary as already applied');
+  assert.notEqual(headers[0].mutationId, headers[1].mutationId);
+  assert.equal(headers[1].baseRevision, 2, 'the corrected header uses the acknowledged prior revision');
+  const eventMutation = calls.flatMap(call => call.mutations).find(mutation => mutation.entityId === 'integration-end');
+  assert.equal(eventMutation?.payload?.ts, correctedEnd);
+  const reportMutation = calls.flatMap(call => call.mutations).find(mutation => mutation.entityType === 'report');
+  assert.equal(reportEvent(reportMutation?.payload?.payload_json as Trip, 'trip_end')?.ts, correctedEnd);
+  assert.equal((await db.events.get('integration-end'))?.ts, correctedEnd);
+  assert.equal((await db.events.get('integration-end'))?.syncStatus, 'synced');
+  assert.equal(reportEvent(await getReportTrip(TRIP), 'trip_end')?.ts, correctedEnd);
+  assert.equal((await db.reportTrips.get(TRIP))?.syncStatus, 'synced');
+  assert.equal(calls.length, 3, 'two header versions and one event/report batch finish without an empty terminal RPC');
+  console.log('PASS integrated trip-end correction during old header acknowledgement');
+}
+
+async function testPagedDownloadProtectsReportThenSendsIcCorrection() {
+  await reset(true);
+  const completeEvents = integrationEvents();
+  const completeReport = integrationReport(completeEvents);
+  let firstPageReport: Trip | undefined;
+  const calls = await captureRun(async (request, call) => {
+    assert.equal(request.mutations.length, 0, 'bootstrap pages never upload partially derived reports');
+    if (call === 1) {
+      return success(request, { hasMore: true, cursor: 20, changes: {
+        trips: [{
+          trip_id: TRIP, device_id: 'synthetic-other-device', owner_user_id: USER,
+          start_ts: TS, end_ts: END_TS, odo_start: 100, odo_end: 120,
+          status: 'closed', updated_at: END_TS, revision: 1, change_seq: 1,
+        }],
+        reports: [{
+          trip_id: TRIP, device_id: 'synthetic-other-device', owner_user_id: USER,
+          updated_at: END_TS, revision: 4, change_seq: 20, payload_json: completeReport,
+        }],
+      } });
+    }
+    assert.equal(call, 2, 'partial snapshot protection cannot create an upload loop');
+    firstPageReport = await db.reportTrips.get(TRIP);
+    const partialEvents = await db.events.where('tripId').equals(TRIP).toArray();
+    assert.equal(partialEvents.some(event => event.type === 'expressway_start'), false);
+    // This is the production persistence call made when detail observes only
+    // synthetic header boundaries before the event page has arrived.
+    await saveReportTripSnapshot(integrationReport(partialEvents));
+    assert.deepEqual(await db.reportTrips.get(TRIP), firstPageReport,
+      'the partial page cannot replace saved IC names, the end, or sync metadata');
+    assert.equal(await db.reportTrips.where('syncStatus').equals('pending').count(), 0);
+    return success(request, { hasMore: false, cursor: 24, changes: {
+      events: completeEvents.map((event, index) => ({
+        id: event.id, trip_id: TRIP, device_id: 'synthetic-other-device', owner_user_id: USER,
+        type: event.type, ts: event.ts, extras: event.extras, geo: null, address: null,
+        sync_status: 'synced', updated_at: END_TS, revision: 1, change_seq: 21 + index,
+      })),
+    } });
+  });
+  assert.equal(calls.length, 2);
+  assert.equal((await db.meta.get(cursorKey))?.value, '24');
+  assert.equal(reportEvent(await getReportTrip(TRIP), 'expressway_start')?.extras?.icName, '合成開始IC');
+  await listReportTrips();
+  await getReportTrip(TRIP);
+  assert.deepEqual(await db.reportTrips.get(TRIP), firstPageReport, 'post-download read projection adds no write or mutation');
+
+  await updateExpresswayIcNameManual('integration-ic-start', '合成修正IC');
+  await saveReportTripSnapshot(integrationReport(await db.events.where('tripId').equals(TRIP).toArray()));
+  const uploadCalls = await captureRun();
+  assert.equal(uploadCalls.length, 1, 'a real post-download IC edit and report save share one RPC');
+  const event = uploadCalls[0].mutations.find(mutation => mutation.entityId === 'integration-ic-start');
+  assert.equal((event?.payload?.extras as Record<string, unknown>)?.icName, '合成修正IC');
+  const report = uploadCalls[0].mutations.find(mutation => mutation.entityType === 'report');
+  assert.equal(reportEvent(report?.payload?.payload_json as Trip, 'expressway_start')?.extras?.icName, '合成修正IC');
+  assert.equal((await db.reportTrips.get(TRIP))?.syncStatus, 'synced');
+  console.log('PASS integrated paged report/event download, partial-save guard, and IC correction upload');
+}
+
 async function main() {
+  await testTripEndEditDuringHeaderAckPreservesEventAndReport();
+  await testPagedDownloadProtectsReportThenSendsIcCorrection();
   await reset();
   assert.equal((await captureRun()).length, 1, 'idle polling retains one pull for other-device changes');
 
