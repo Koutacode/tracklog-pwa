@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Capacitor } from '@capacitor/core';
 import { App as CapacitorApp } from '@capacitor/app';
+import { liveQuery } from 'dexie';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import {
   deleteEvent,
@@ -50,6 +51,7 @@ import {
   type TripDetailDayTimeline,
 } from './tripDetailTimeline';
 import { buildTripDetailLocationInfo } from './tripDetailLocationInfo';
+import { TripRecordedTimes } from './TripRecordedTimes';
 import { commitTripDetailOperationalMutation } from './tripDetailOperationalMutation';
 import {
   createTripDetailReportSnapshotPersistence,
@@ -204,6 +206,8 @@ export function DayReportSummary({
         </div>
         <div className="trip-day-summary__distance">{day.km} km</div>
       </div>
+
+      <TripRecordedTimes events={day.events} />
 
       <div className="trip-day-report">
         <h3 className="trip-day-summary__section-title">項目別時間</h3>
@@ -734,7 +738,18 @@ export default function TripDetail() {
     }
   }
   useEffect(() => {
-    load();
+    if (!tripId) return;
+    // Observe the event rows themselves so local IC resolution and remote sync
+    // refresh an already open detail/report, including completed operations.
+    const subscription = liveQuery(() => getEventsByTripId(tripId)).subscribe({
+      next: nextEvents => {
+        setErr(null);
+        setVm(buildTripViewModel(tripId, nextEvents));
+        setEvents(nextEvents);
+      },
+      error: error => setErr(error instanceof Error ? error.message : '読み込みに失敗しました'),
+    });
+    return () => subscription.unsubscribe();
   }, [tripId]);
 
   useEffect(() => {

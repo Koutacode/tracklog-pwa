@@ -2243,6 +2243,36 @@ a:hover {
   background: #fff;
 }
 
+.trip-recorded-times {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 24px;
+  margin: 0 0 16px;
+  color: #f8fafc;
+}
+
+.trip-recorded-times dt {
+  color: #cbd5e1;
+  font-size: 13px;
+}
+
+.trip-recorded-times dd {
+  margin: 0;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
+.trip-day-summary > .trip-recorded-times {
+  margin: 0;
+  padding: 16px 20px;
+  color: #0f172a;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.trip-day-summary > .trip-recorded-times dt {
+  color: #475569;
+}
+
 .trip-day-summary__head {
   display: flex;
   align-items: center;

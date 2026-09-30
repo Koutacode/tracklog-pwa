@@ -26,9 +26,35 @@ jobs:
       - run: npm run typecheck
       - run: npm run test:logic
       - run: npm run test:sync
+      - run: npm run test:release-apk
       - run: npm run check:csp
       - run: npm run build
       - run: npm run check:offline
+
+  android-validation:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'zulu'
+          cache: gradle
+      - uses: android-actions/setup-android@v4
+        with:
+          packages: 'platform-tools platforms;android-36 build-tools;36.0.0'
+      - run: npm ci
+      - run: npm run build
+      - run: npm run cap:sync:android
+      - name: Compile Android and run local unit tests without production configuration
+        working-directory: android
+        run: bash ./gradlew --no-daemon :app:testDebugUnitTest :app:assembleDebugAndroidTest :app:assembleDebug
 
   temporary-workspaces:
     runs-on: windows-latest
