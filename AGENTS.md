@@ -1,6 +1,16 @@
 # TrackLog Agent Rules
 
-この `AGENTS.md` は `C:\Users\matum\OneDrive\デスクトップ\TrackLog` 配下でのみ有効。
+この `AGENTS.md` は、このファイルがある TrackLog リポジトリとその配下で有効。Windows のローカル作業、Git worktree、Codex Cloud の Linux checkout に同じ製品ルールを適用する。
+
+## Codex Cloud / Linux
+- 説明・作業記録は日本語を基本とする。環境の作成・検証方法は `docs/CODEX_CLOUD.md` を参照する。
+- Node.js 22 を使用し、初回は `npm ci` を実行する。基本検証は `npm run typecheck`、`npm run test:logic`、`npm run test:sync`、`npm run check:csp`、`npm run build`、`npm run check:offline`。
+- Android のコンパイル確認には JDK 21 と Android SDK が必要。`npm run cap:sync:android` の後、`android` で `bash ./gradlew assembleDebug` を実行する。
+- Windows 専用の `powershell` / `.ps1` / `.bat` コマンドは Linux で実行しない。Windows の一時作業ルールは PC 側に適用し、Linux の一時ファイルは `mktemp -d` で作った自分の専用ディレクトリへ置き、終了時にそのディレクトリだけ片付ける。
+- Cloud のコード修正・自動テストに本番の認証情報や端末データを持ち込まない。本番接続なしのビルド成功はログイン・通知・位置記録の実動作確認を意味しない。
+- Cloud で作成した通常の debug APK は正式配布に使わない。正式な APK は既存の Android Release workflow と Build / Artifact の検証手順を使う。
+- 接続実機がない Cloud では、ADB、実走行、バックグラウンド GPS、通知、電池最適化の確認を未検証として報告する。
+- Google Drive が利用できる場合は既存月次文書へ記録する。利用できない Cloud では非秘密の作業記録を `docs/` に残し、Drive 未反映と次の同期手順を明記する。
 
 ## Current Product Policy
 - TrackLog は運行記録アプリ。最重要機能は「バックグラウンドでのルート記録」と「高速道路の開始・終了判定」。
