@@ -2,7 +2,7 @@ import type { BaseEvent } from '../domain/types';
 
 export const IC_RESOLVE_RETRY_LIMIT = 6;
 // Bump this when resolver behavior changes so previously exhausted failures retry.
-export const IC_RESOLVE_ALGORITHM_VERSION = 13;
+export const IC_RESOLVE_ALGORITHM_VERSION = 14;
 
 const IC_RESOLVE_BACKOFF_BASE_MS = 2 * 60 * 1000;
 const IC_RESOLVE_BACKOFF_CAP_MS = 60 * 60 * 1000;

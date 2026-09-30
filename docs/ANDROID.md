@@ -3,9 +3,11 @@
 運転者向けTrackLogアプリの正式対応は **Android APKのみ** とする。Androidアプリは Capacitor Native として扱い、パッケージID `com.tracklog.assist` を維持する。管理者Web画面と現在地共有サイトは別用途として維持し、既存PWAは互換・保守目的に限定する。
 
 ## 0. 事前準備
-- PC: Node.js 20+、Android Studio（SDK含む）
+- PC: Node.js 22、JDK 21、Android Studio（SDK 36含む）
 - リポジトリを最新に更新: `git pull`
-- 依存をインストール: `npm install`
+- 依存をインストール: `npm ci`
+
+携帯からCloudへ修正を依頼する場合は [携帯からの修正依頼と正式APK更新](PHONE_CLOUD_RELEASE.md) を参照する。
 
 ## 1. 標準ビルド手順
 配布候補は、次の順序を崩さずに検査・生成する。
@@ -48,7 +50,7 @@ npm run release:prepare
 - 端末から抽出したバックアップAPKは `output/device-backup/` に退避する
 - GitHub Release 添付名（固定）: `tracklog-assist-debug.apk`
 - `output/*.apk` はGit管理しない（バイナリ混入防止）
-- PC上の `src` をビルド元の正とする。端末APKから抽出した `dist` は一時復旧用であり、次回ビルドで上書きしてよい。
+- レビューしたGitHubコミットのソースをビルド元の正とする。端末APKから抽出した `dist` は一時復旧用であり、次回ビルドで上書きしてよい。
 
 ## 3. 実機インストール
 - 運行データを保持する端末では、アンインストールやデータ消去を行わず `adb -s <serial> install -r output\tracklog-assist-debug.apk` で更新する

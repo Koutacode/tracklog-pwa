@@ -1,4 +1,6 @@
 import { useEffect } from 'react';
+import { App as CapacitorApp } from '@capacitor/app';
+import { Capacitor } from '@capacitor/core';
 import { hydrateRemoteSyncState, installImmediateRemoteSyncListener, runRemoteSync } from '../services/remoteSync';
 import { restoreNativeResidentLocationSession } from '../services/nativeResidentLocation';
 
@@ -6,10 +8,12 @@ export default function RemoteSyncBootstrap() {
   useEffect(() => {
     let disposed = false;
     let timer: number | null = null;
+    let appStateListener: { remove(): Promise<void> } | null = null;
+    let lastActiveState = document.visibilityState === 'visible';
 
-    const syncOnce = async () => {
+    const syncOnce = async (reason = 'bootstrap') => {
       if (disposed) return;
-      await runRemoteSync('bootstrap');
+      await runRemoteSync(reason);
     };
 
     void (async () => {
@@ -22,27 +26,39 @@ export default function RemoteSyncBootstrap() {
       await syncOnce();
     })();
 
-    const onVisible = () => {
-      if (document.visibilityState === 'visible') {
-        void syncOnce();
-      }
+    const onActiveStateChanged = (isActive: boolean) => {
+      // Native appStateChange and WebView visibilitychange can describe the
+      // same transition. Flush once before suspension and once on return.
+      if (lastActiveState === isActive) return;
+      lastActiveState = isActive;
+      void syncOnce(isActive ? 'resume' : 'background');
     };
+    const onVisible = () => onActiveStateChanged(document.visibilityState === 'visible');
     const onOnline = () => {
-      void syncOnce();
+      void syncOnce('online');
     };
 
     timer = window.setInterval(() => {
-      void syncOnce();
+      void syncOnce('poll');
     }, 45000);
 
     document.addEventListener('visibilitychange', onVisible);
     window.addEventListener('online', onOnline);
+    if (Capacitor.isNativePlatform()) {
+      void CapacitorApp.addListener('appStateChange', ({ isActive }) => {
+        onActiveStateChanged(isActive);
+      }).then(listener => {
+        if (disposed) void listener.remove();
+        else appStateListener = listener;
+      });
+    }
     const unsubscribeImmediate = installImmediateRemoteSyncListener();
     return () => {
       disposed = true;
       if (timer != null) window.clearInterval(timer);
       document.removeEventListener('visibilitychange', onVisible);
       window.removeEventListener('online', onOnline);
+      void appStateListener?.remove();
       unsubscribeImmediate();
     };
   }, []);

@@ -24,6 +24,9 @@ Android ツールの取得に失敗しても、通常の Node.js セットアッ
 
 ## 修正するとき
 
+携帯からの依頼、Cloud/CI検証、公開承認、正式APKの照合、携帯での手動更新は
+[携帯からの修正依頼と正式APK更新](PHONE_CLOUD_RELEASE.md) を参照する。
+
 「Work in → Cloud → TrackLog」を選び、修正内容を依頼する。修正ブランチと PR を使い、差分と CI を確認して main へ取り込む。ローカルへ戻るときは未コミット変更の有無を確認したうえで `git pull --ff-only` する。
 
 初回確認の依頼例:

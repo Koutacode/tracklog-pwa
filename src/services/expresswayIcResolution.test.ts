@@ -1,8 +1,9 @@
 import 'fake-indexeddb/auto';
 import assert from 'node:assert/strict';
+import { liveQuery } from 'dexie';
 import { withRemoteSyncSignalsSuppressed } from '../app/remoteSyncSignal';
 import { db } from '../db/db';
-import { updateEventAddress, updateExpresswayIcNameManual } from '../db/repositories';
+import { getEventsByTripId, updateEventAddress, updateExpresswayIcNameManual } from '../db/repositories';
 import type { AppEvent, Geo, RoutePoint } from '../domain/types';
 import {
   createExpresswayIcResolutionRunner,
@@ -146,6 +147,240 @@ async function testRemovedBatchItemDoesNotBlockOtherPendingIc() {
   assert.equal(await retry(), true);
   assert.equal(calls, 2, 'the second event is still processed after the first record disappears');
   assert.equal((await db.events.get('second-event'))?.extras?.icName, '後続IC');
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>(complete => { resolve = complete; });
+  return { promise, resolve };
+}
+
+async function within<T>(promise: Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('synthetic IC test did not make progress')), 2000);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function addPendingEvents(count: number, futureBackoff = false) {
+  const base = (await db.events.get(eventId))!;
+  await db.events.bulkPut(Array.from({ length: count }, (_, index) => ({
+    ...base,
+    id: index === 0 ? eventId : `synthetic-following-${index}`,
+    ts: ts(index),
+    extras: {
+      icResolveStatus: 'pending',
+      icResolveAlgorithmVersion: IC_RESOLVE_ALGORITHM_VERSION,
+      ...(futureBackoff ? {
+        icResolveRetryCount: 12,
+        icResolveNextRetryAt: new Date(Date.now() + 12 * 60 * 60 * 1000).toISOString(),
+      } : {}),
+    },
+  } as AppEvent)));
+}
+
+async function testSlowFirstRequestDoesNotBlockLaterEventsAndConcurrencyIsBounded() {
+  await reset();
+  await addPendingEvents(5);
+  const blocked = deferred<IcResult>();
+  const laterSaved = deferred<void>();
+  let active = 0;
+  let maximumActive = 0;
+  let calls = 0;
+  const resolver = createExpresswayIcResolutionRunner(async () => {
+    const call = ++calls;
+    maximumActive = Math.max(maximumActive, ++active);
+    try {
+      if (call === 1) return await blocked.promise;
+      return { icName: '後続合成IC', distanceM: 40 };
+    } finally {
+      active -= 1;
+    }
+  });
+  let saved = 0;
+  const batch = createExpresswayIcRetryBatchRunner(async request => {
+    const outcome = await resolver(request);
+    if (++saved === 4) laterSaved.resolve();
+    return outcome;
+  })(5);
+  try {
+    await within(laterSaved.promise);
+    assert.equal(calls, 5, 'the second worker advances through later records while the first is waiting');
+    assert.equal((await db.events.toArray()).filter(event => event.extras?.icName).length, 4);
+    assert.equal(maximumActive, 2, 'network concurrency stays at two');
+  } finally {
+    blocked.resolve({ icName: '先頭合成IC', distanceM: 40 });
+    await batch;
+  }
+}
+
+async function testRecoveryDuringTimerBatchIsNotDiscarded() {
+  await reset();
+  await addPendingEvents(2, true);
+  await db.events.update(eventId, { extras: {
+    icResolveStatus: 'pending', icResolveAlgorithmVersion: IC_RESOLVE_ALGORITHM_VERSION,
+  } });
+  const started = deferred<void>();
+  const complete = deferred<IcResult>();
+  const requested: Array<{ id: string; recovery: boolean }> = [];
+  const resolver = createExpresswayIcResolutionRunner(async () => {
+    if (requested.length === 1) {
+      started.resolve();
+      return complete.promise;
+    }
+    return { icName: '復旧合成IC', distanceM: 40 };
+  });
+  const retry = createExpresswayIcRetryBatchRunner(request => {
+    requested.push({ id: request.eventId, recovery: request.resetDeferredBackoff === true });
+    return resolver(request);
+  });
+  const timerBatch = retry(1);
+  await within(started.promise);
+  const recovery = retry(12, { ignorePendingBackoff: true });
+  complete.resolve({ icName: '先頭合成IC', distanceM: 40 });
+  assert.equal(await recovery, true);
+  await timerBatch;
+  assert.deepEqual(requested, [
+    { id: eventId, recovery: false },
+    { id: 'synthetic-following-1', recovery: true },
+  ]);
+  assert.equal((await db.events.get('synthetic-following-1'))?.extras?.icName, '復旧合成IC');
+}
+
+async function testOneRecoveryDrainsMoreThanOnePageWithoutRepeatingFailures() {
+  await reset();
+  await addPendingEvents(13, true);
+  const requested = new Map<string, number>();
+  let retry!: ReturnType<typeof createExpresswayIcRetryBatchRunner>;
+  const resolver = createExpresswayIcResolutionRunner(async () => {
+    // Model TOKEN_REFRESHED raised by the resolver's own refresh request.
+    void retry(12, { ignorePendingBackoff: true });
+    throw new IcResolverError('synthetic device approval unavailable', true, 403);
+  });
+  retry = createExpresswayIcRetryBatchRunner(request => {
+    requested.set(request.eventId, (requested.get(request.eventId) ?? 0) + 1);
+    return resolver(request);
+  });
+  assert.equal(await within(retry(12, { ignorePendingBackoff: true })), false);
+  assert.equal(requested.size, 13, 'one recovery also reaches the thirteenth delayed event');
+  assert.ok([...requested.values()].every(count => count === 1), 'each event is attempted once per recovery');
+  const saved = await db.events.toArray();
+  assert.ok(saved.every(event => event.extras?.icResolveRetryCount === 1));
+  assert.equal(await retry(12), false, 'ordinary ticks respect the new authorization delay');
+  assert.equal([...requested.values()].reduce((sum, count) => sum + count, 0), 13);
+}
+
+async function testTimerBatchSelectionDoesNotStarveUnattemptedRecords() {
+  await reset();
+  await addPendingEvents(5);
+  const actualNow = Date.now;
+  let now = actualNow();
+  Date.now = () => now;
+  const requested: string[] = [];
+  const resolver = createExpresswayIcResolutionRunner(async () => {
+    throw new IcResolverError('synthetic transport failure', true);
+  });
+  const retry = createExpresswayIcRetryBatchRunner(request => {
+    requested.push(request.eventId);
+    return resolver(request);
+  });
+  try {
+    await retry(2);
+    now += 20_000;
+    await retry(2);
+    assert.equal(new Set(requested).size, 4, 'a due retry of the newest rows does not hide unattempted older rows');
+  } finally {
+    Date.now = actualNow;
+  }
+}
+
+async function testForcedJoinRetriesDeferredImmediateRequestOnce() {
+  await reset();
+  const started = deferred<void>();
+  const continueFirst = deferred<void>();
+  let calls = 0;
+  let run!: ReturnType<typeof createExpresswayIcResolutionRunner>;
+  run = createExpresswayIcResolutionRunner(async () => {
+    if (++calls === 1) {
+      started.resolve();
+      await continueFirst.promise;
+      throw new IcResolverError('synthetic expired session', true, 401);
+    }
+    void run({ eventId, source: 'retry', resetDeferredBackoff: true });
+    return { icName: '復旧合成IC', distanceM: 40 };
+  });
+  const immediate = run({ eventId, source: 'immediate' });
+  await within(started.promise);
+  const recovery = run({ eventId, source: 'retry', resetDeferredBackoff: true });
+  assert.equal(immediate, recovery, 'joining callers retain one shared request');
+  continueFirst.resolve();
+  assert.equal((await within(recovery)).status, 'resolved');
+  assert.equal(calls, 2, 'the joined recovery runs once after the pre-recovery request defers');
+  assert.equal((await savedExtras()).icName, '復旧合成IC');
+}
+
+async function testRepeatedAuthorizationFailureCannotLoopThroughRecovery() {
+  await reset();
+  const requested: string[] = [];
+  let retry!: ReturnType<typeof createExpresswayIcRetryBatchRunner>;
+  const resolver = createExpresswayIcResolutionRunner(async () => {
+    void retry(12, { ignorePendingBackoff: true });
+    throw new IcResolverError('synthetic refreshed session still rejected', true, 401);
+  });
+  retry = createExpresswayIcRetryBatchRunner(request => {
+    requested.push(request.eventId);
+    return resolver(request);
+  });
+  assert.equal(await within(retry(4)), false);
+  assert.equal(requested.length, 2, 'timer batch gets one recovery pass, then retains backoff');
+  assert.equal((await savedExtras()).icResolveRetryCount, 1);
+}
+
+async function testMountedDetailQueryRefreshesResolvedIcAndRemoteWrites() {
+  await reset();
+  await db.events.put({
+    id: 'synthetic-trip-start', tripId, type: 'trip_start', ts: ts(-60),
+    extras: { odoKm: 100 }, syncStatus: 'pending',
+  } as AppEvent);
+  await db.events.put({
+    id: 'synthetic-expressway-start', tripId, type: 'expressway_start', ts: ts(-30),
+    extras: {}, syncStatus: 'pending',
+  } as AppEvent);
+  const initial = deferred<void>();
+  const resolved = deferred<void>();
+  const remoteUpdate = deferred<void>();
+  const seenNames: string[] = [];
+  const subscription = liveQuery(() => getEventsByTripId(tripId)).subscribe(events => {
+    initial.resolve();
+    const name = events.find(event => event.id === eventId)?.extras?.icName;
+    if (typeof name !== 'string') return;
+    seenNames.push(name);
+    const report = buildTripDetailReportSnapshot({
+      tripId, events, dayRuns: [], fallbackLabel: '合成日報',
+    }, '', timestamp);
+    assert.equal(report.days.flatMap(day => day.events).find(event => event.extras?.icName)?.extras?.icName, name);
+    if (name === '合成解決IC') resolved.resolve();
+    if (name === '合成同期IC') remoteUpdate.resolve();
+  });
+  try {
+    await within(initial.promise);
+    const run = createExpresswayIcResolutionRunner(async () => ({ icName: '合成解決IC', distanceM: 40 }));
+    await run({ eventId, source: 'immediate' });
+    await within(resolved.promise);
+    // Direct writes intentionally send no window notification, as with sync.
+    await db.events.update(eventId, { extras: { ...(await savedExtras()), icName: '合成同期IC' } });
+    await within(remoteUpdate.promise);
+    assert.deepEqual(seenNames, ['合成解決IC', '合成同期IC']);
+  } finally {
+    subscription.unsubscribe();
+  }
 }
 
 async function testValidPrimaryMissRecoversUsingRouteAndRecordsOrigin() {
@@ -362,6 +597,13 @@ const tests = [
   testQueuedGeoHintCannotReplaceCorrectedSavedLocation,
   testDiscardedFailureDoesNotReportBatchUpdate,
   testRemovedBatchItemDoesNotBlockOtherPendingIc,
+  testSlowFirstRequestDoesNotBlockLaterEventsAndConcurrencyIsBounded,
+  testRecoveryDuringTimerBatchIsNotDiscarded,
+  testOneRecoveryDrainsMoreThanOnePageWithoutRepeatingFailures,
+  testTimerBatchSelectionDoesNotStarveUnattemptedRecords,
+  testForcedJoinRetriesDeferredImmediateRequestOnce,
+  testRepeatedAuthorizationFailureCannotLoopThroughRecovery,
+  testMountedDetailQueryRefreshesResolvedIcAndRemoteWrites,
   testValidPrimaryMissRecoversUsingRouteAndRecordsOrigin,
   testMissingPrimaryRetainsNearestHistoricalFallback,
   testInvalidAndUnrelatedRouteFixesAreNotQueried,

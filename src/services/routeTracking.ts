@@ -134,7 +134,7 @@ export type RouteRecordSession = {
   mode: RouteTrackingMode;
   config: ModeConfig;
   queue: RouteRecordQueue<LocationPayload>;
-  lastPoint: { lat: number; lng: number; at: number } | null;
+  lastPoint: { lat: number; lng: number; at: number; accuracy?: number | null; speed?: number | null } | null;
   smoothedSpeedKmh: number | null;
   droppedRecordCount: number;
   lastDropWarningAt: number;
@@ -186,6 +186,21 @@ function distanceMeters(a: { lat: number; lng: number }, b: { lat: number; lng: 
 function speedMsToKmh(speedMs?: number | null): number | null {
   if (typeof speedMs !== 'number' || !Number.isFinite(speedMs) || speedMs < 0) return null;
   return speedMs * 3.6;
+}
+
+/** Match native stationary-only history thinning; live listeners still receive every valid fix. */
+export function shouldPersistStationaryRoutePoint(
+  previous: RouteRecordSession['lastPoint'],
+  candidate: { lat: number; lng: number; at: number; accuracy?: number | null; speed?: number | null },
+): boolean {
+  const stationary = (point: NonNullable<RouteRecordSession['lastPoint']>) => (
+    typeof point.speed === 'number' && Number.isFinite(point.speed) && point.speed >= 0 && point.speed <= 0.5
+    && typeof point.accuracy === 'number' && Number.isFinite(point.accuracy)
+    && point.accuracy >= 0 && point.accuracy <= 35
+  );
+  if (!previous || !stationary(previous) || !stationary(candidate)) return true;
+  const elapsed = candidate.at - previous.at;
+  return elapsed <= 0 || elapsed >= 60_000 || distanceMeters(previous, candidate) > 12;
 }
 
 function speedKmhToMs(speedKmh?: number | null): number | null {
@@ -315,6 +330,9 @@ async function recordLocation(
     }
     if (dt < session.config.minTimeMs && dist < session.config.minDistanceM) return;
   }
+  if (!shouldPersistStationaryRoutePoint(session.lastPoint, {
+    lat: params.lat, lng: params.lng, at: now, accuracy, speed: params.speed,
+  })) return;
 
   const fusedSpeedKmh = nextSmoothedSpeedEstimate(
     session.smoothedSpeedKmh,
@@ -335,7 +353,7 @@ async function recordLocation(
   });
   // Filtering state describes durable history only. A failed Dexie write must
   // not suppress or distort the next point that can actually be saved.
-  session.lastPoint = { lat: params.lat, lng: params.lng, at: now };
+  session.lastPoint = { lat: params.lat, lng: params.lng, at: now, accuracy, speed: params.speed };
   session.smoothedSpeedKmh = fusedSpeedKmh;
 }
 

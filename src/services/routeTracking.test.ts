@@ -5,6 +5,7 @@ import {
   createRouteRecordSession,
   resolveLocationUpdatePayload,
   resolveRoutePointTimestamp,
+  shouldPersistStationaryRoutePoint,
 } from './routeTracking';
 
 function assertEqual<T>(actual: T, expected: T, message: string) {
@@ -22,6 +23,63 @@ function deferred() {
 }
 
 async function runAsyncTests() {
+  {
+    const originalNow = Date.now;
+    let now = 1_800_000_000_000;
+    Date.now = () => now;
+    try {
+      for (const moving of [false, true]) {
+        const saved: string[] = [];
+        const session = createRouteRecordSession(`simulation-${moving}`, 'precision', async point => {
+          saved.push(point.ts);
+        });
+        const started = now;
+        for (let seconds = 0; seconds < 3600; seconds += 10) {
+          now = started + seconds * 1000;
+          await session.queue.enqueue({ lat: 0, lng: moving ? seconds * 0.0001 : 0,
+            accuracy: 5, speed: moving ? 15 : 0, time: now, source: 'foreground' });
+        }
+        await session.queue.closeAndDrain();
+        assertEqual(saved.length, moving ? 360 : 60, 'durable session one-hour simulation');
+      }
+      let attempts = 0;
+      const session = createRouteRecordSession('stationary-retry', 'precision', async () => {
+        attempts++;
+        if (attempts === 2) throw new Error('simulated heartbeat write failure');
+      });
+      const stopped = () => ({ lat: 0, lng: 0, accuracy: 5, speed: 0, time: now, source: 'foreground' as const });
+      await session.queue.enqueue(stopped());
+      now += 60_000;
+      const failed = await Promise.allSettled([session.queue.enqueue(stopped())]);
+      assertEqual(failed[0].status, 'rejected', 'failed heartbeat remains observable');
+      now += 10_000;
+      await session.queue.enqueue(stopped());
+      assertEqual(attempts, 3, 'failed heartbeat does not advance suppression baseline');
+      await session.queue.closeAndDrain();
+    } finally {
+      Date.now = originalNow;
+    }
+  }
+  {
+    const point = { lat: 0, lng: 0, at: 1_000, accuracy: 5, speed: 0 };
+    assertEqual(shouldPersistStationaryRoutePoint(null, point), true, 'first point is durable');
+    assertEqual(shouldPersistStationaryRoutePoint(point, { ...point, at: 11_000 }), false, 'stationary duplicate is suppressed');
+    assertEqual(shouldPersistStationaryRoutePoint(point, { ...point, at: 61_000 }), true, 'stationary heartbeat at sixty seconds');
+    assertEqual(shouldPersistStationaryRoutePoint(point, { ...point, at: 11_000, speed: 1 }), true, 'movement resumes immediately');
+    assertEqual(shouldPersistStationaryRoutePoint({ ...point, speed: 1 }, { ...point, at: 11_000 }), true, 'first stopped point is preserved');
+    assertEqual(shouldPersistStationaryRoutePoint(point, { ...point, at: 11_000, speed: null }), true, 'unknown speed is preserved');
+    assertEqual(shouldPersistStationaryRoutePoint(point, { ...point, at: 11_000, accuracy: 36 }), true, 'uncertain accuracy is preserved');
+    assertEqual(shouldPersistStationaryRoutePoint(point, { ...point, at: 11_000, lng: 0.001 }), true, 'movement outside radius is preserved');
+    for (const moving of [false, true]) {
+      let previous: Parameters<typeof shouldPersistStationaryRoutePoint>[0] = null;
+      let count = 0;
+      for (let seconds = 0; seconds < 3600; seconds += 10) {
+        const next = { ...point, at: seconds * 1000 + 1000, speed: moving ? 15 : 0 };
+        if (shouldPersistStationaryRoutePoint(previous, next)) { previous = next; count++; }
+      }
+      assertEqual(count, moving ? 360 : 60, 'one-hour simulation preserves moving and reduces stopped history');
+    }
+  }
   {
     const nowMs = Date.parse('2026-08-23T09:00:00.000Z');
     assertEqual(

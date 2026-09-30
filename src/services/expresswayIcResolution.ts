@@ -377,15 +377,43 @@ async function performResolution(
 
 /** Keep the production database/write guards when substituting the network adapter. */
 export function createExpresswayIcResolutionRunner(resolveIc = resolveNearestIC) {
-  const inFlightByEventId = new Map<string, Promise<ExpresswayIcResolutionOutcome>>();
+  const inFlightByEventId = new Map<string, {
+    promise: Promise<ExpresswayIcResolutionOutcome>;
+    recoveryRequested: boolean;
+    recoveryStarted: boolean;
+  }>();
   return (request: ExpresswayIcResolutionRequest): Promise<ExpresswayIcResolutionOutcome> => {
     const eventId = request.eventId.trim();
     const current = inFlightByEventId.get(eventId);
-    if (current) return current;
-    const next = performResolution({ ...request, eventId }, resolveIc);
-    inFlightByEventId.set(eventId, next);
+    if (current) {
+      if (request.resetDeferredBackoff && !current.recoveryStarted) current.recoveryRequested = true;
+      return current.promise;
+    }
+    const entry = {
+      promise: null as unknown as Promise<ExpresswayIcResolutionOutcome>,
+      recoveryRequested: false,
+      recoveryStarted: request.resetDeferredBackoff === true,
+    };
+    const next = (async () => {
+      const outcome = await performResolution({ ...request, eventId }, resolveIc);
+      if (
+        entry.recoveryRequested
+        && outcome.status === 'deferred'
+        && outcome.reason !== 'superseded'
+        && isOnline()
+      ) {
+        // A recovery can join an immediate/manual request that began before
+        // connectivity returned. Retry once with fresh DB/auth inputs rather
+        // than inheriting its old backoff; token refresh cannot recurse here.
+        entry.recoveryStarted = true;
+        return performResolution({ ...request, eventId, resetDeferredBackoff: true }, resolveIc);
+      }
+      return outcome;
+    })();
+    entry.promise = next;
+    inFlightByEventId.set(eventId, entry);
     const clear = () => {
-      if (inFlightByEventId.get(eventId) === next) inFlightByEventId.delete(eventId);
+      if (inFlightByEventId.get(eventId) === entry) inFlightByEventId.delete(eventId);
     };
     void next.then(clear, clear);
     return next;
@@ -419,27 +447,59 @@ export function enqueueNotificationExpresswayEndIcResolution(input: {
 
 export function createExpresswayIcRetryBatchRunner(resolve = resolveExpresswayIcResolution) {
   let retryBatchInFlight: Promise<boolean> | null = null;
+  let recoveryRequestedLimit = 0;
+  let recoveryStarted = false;
   return async (limit = 8, options?: { ignorePendingBackoff?: boolean }): Promise<boolean> => {
-    if (retryBatchInFlight) return retryBatchInFlight;
+    const boundedLimit = Math.min(20, Math.max(1, Math.round(limit)));
+    if (retryBatchInFlight) {
+      // The home screen and the global job share this worker. An online/auth
+      // recovery arriving during a timer batch must still bypass saved delays.
+      if (options?.ignorePendingBackoff && !recoveryStarted) {
+        recoveryRequestedLimit = Math.max(recoveryRequestedLimit, boundedLimit);
+      }
+      return retryBatchInFlight;
+    }
     if (!isOnline()) return false;
 
     retryBatchInFlight = (async () => {
-      const boundedLimit = Math.min(20, Math.max(1, Math.round(limit)));
-      const pending = (await getPendingExpresswayEvents(undefined, options)).slice(0, boundedLimit);
       let updatedAny = false;
-      for (const event of pending) {
-        try {
-          const outcome = await resolve({
-            eventId: event.id,
-            source: 'retry',
-            resetDeferredBackoff: options?.ignorePendingBackoff === true,
-          });
-          if (outcome.status !== 'deferred') updatedAny = true;
-        } catch {
-          // A record can be deleted or converted after the batch was read.
-          // Leave unrelated pending events eligible in this same pass.
+      let currentLimit = boundedLimit;
+      let ignorePendingBackoff = options?.ignorePendingBackoff === true;
+      do {
+        recoveryRequestedLimit = 0;
+        recoveryStarted = ignorePendingBackoff;
+        // Freeze one recovery generation. All saved pending rows get one
+        // attempt, including rows beyond the normal per-tick limit. Refresh
+        // events raised by these requests do not restart the same generation.
+        const candidates = await getPendingExpresswayEvents(undefined, { ignorePendingBackoff });
+        const pending = ignorePendingBackoff ? candidates : candidates.slice(0, currentLimit);
+        for (let offset = 0; offset < pending.length; offset += currentLimit) {
+          const page = pending.slice(offset, offset + currentLimit);
+          let nextIndex = 0;
+          const worker = async () => {
+            while (nextIndex < page.length && isOnline()) {
+              const event = page[nextIndex++];
+              try {
+                const outcome = await resolve({
+                  eventId: event.id,
+                  source: 'retry',
+                  resetDeferredBackoff: ignorePendingBackoff,
+                });
+                if (outcome.status !== 'deferred') updatedAny = true;
+              } catch {
+                // A record can be deleted or converted after the batch was read.
+                // Leave unrelated pending events eligible in this same pass.
+              }
+            }
+          };
+          // A slow network request must not hold every later event behind it.
+          // Keep concurrency small to avoid flooding the upstream map service.
+          await Promise.all(Array.from({ length: Math.min(2, page.length) }, worker));
+          if (!isOnline()) break;
         }
-      }
+        currentLimit = recoveryRequestedLimit;
+        ignorePendingBackoff = true;
+      } while (currentLimit > 0 && isOnline());
       return updatedAny;
     })();
 
@@ -447,6 +507,8 @@ export function createExpresswayIcRetryBatchRunner(resolve = resolveExpresswayIc
       return await retryBatchInFlight;
     } finally {
       retryBatchInFlight = null;
+      recoveryRequestedLimit = 0;
+      recoveryStarted = false;
     }
   };
 }

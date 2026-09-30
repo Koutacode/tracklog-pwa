@@ -12,6 +12,13 @@ const MIGRATION_PATH = path.join(
   "migrations",
   "20260710043340_tracklog_sync_v2.sql",
 );
+const DISK_IO_MIGRATION_PATH = path.join(
+  ROOT,
+  "supabase",
+  "migrations",
+  "20260930165335_tracklog_sync_v2_reduce_disk_io.sql",
+);
+const ROLLBACK_PATH = path.join(ROOT, "docs", "sql", "rollback-tracklog-sync-v2-reduce-disk-io.sql");
 
 const OWNER_ID = "11111111-1111-4111-8111-111111111111";
 const ADMIN_ID = "22222222-2222-4222-8222-222222222222";
@@ -393,6 +400,8 @@ function assertEmptyChanges(changes) {
 const db = new PGlite();
 let passed = 0;
 let cursor = 0;
+let originalSyncFunctionSql;
+let optimizedSyncSql;
 
 async function check(name, run) {
   await run();
@@ -498,6 +507,108 @@ try {
     assert.equal(row.admin_delete_exists, true);
     assert.equal(row.current_uid, OWNER_ID);
     assert.equal(row.current_role, "authenticated");
+  });
+
+  await check("applies the reversible function-only disk IO optimization without schema or grant drift", async () => {
+    const original = (await readFile(MIGRATION_PATH, "utf8")).replace(/\r\n/g, "\n");
+    const functionStart = original.indexOf("create or replace function public.tracklog_sync_v2(");
+    const grantsEnd = "grant execute on function public.tracklog_sync_v2(uuid, text, bigint, jsonb) to service_role;";
+    originalSyncFunctionSql = original.slice(functionStart, original.indexOf(grantsEnd, functionStart) + grantsEnd.length);
+    optimizedSyncSql = await readFile(DISK_IO_MIGRATION_PATH, "utf8");
+    const rollbackSql = (await readFile(ROLLBACK_PATH, "utf8")).replace(/\r\n/g, "\n");
+    assert.ok(rollbackSql.includes(originalSyncFunctionSql), "rollback must restore the exact previous function and grants");
+    assert.doesNotMatch(optimizedSyncSql, /\b(?:delete from|drop|create index|alter table)\b/i);
+    const metadataSql = `select jsonb_build_object(
+      'indexes', (select jsonb_agg(indexdef order by indexname) from pg_indexes where schemaname = 'public'),
+      'constraints', (select jsonb_agg(pg_get_constraintdef(oid) order by conname) from pg_constraint where connamespace = 'public'::regnamespace),
+      'rls', (select jsonb_agg(jsonb_build_array(relname, relrowsecurity, relforcerowsecurity) order by relname) from pg_class where relnamespace = 'public'::regnamespace),
+      'policies', (select jsonb_agg(to_jsonb(policy) order by tablename, policyname) from pg_policies policy where schemaname = 'public'),
+      'syncAcl', (select proacl from pg_proc where oid = 'public.tracklog_sync_v2(uuid,text,bigint,jsonb)'::regprocedure)
+    ) as metadata`;
+    const before = (await firstRow(metadataSql)).metadata;
+    await db.exec(optimizedSyncSql);
+    assert.deepEqual((await firstRow(metadataSql)).metadata, before);
+
+    // All existing mutation handling stays byte-for-byte identical.
+    const optimizedStart = optimizedSyncSql.indexOf("create or replace function public.tracklog_sync_v2(");
+    assert.equal(
+      optimizedSyncSql.slice(optimizedStart, optimizedSyncSql.indexOf("  update public.device_profiles", optimizedStart)),
+      originalSyncFunctionSql.slice(0, originalSyncFunctionSql.indexOf("  update public.device_profiles")),
+    );
+  });
+
+  await check("retains service-role-only RPC access, device approval, owner and input validation", async () => {
+    const privileges = await firstRow(`select
+      has_function_privilege('anon', 'public.tracklog_sync_v2(uuid,text,bigint,jsonb)', 'EXECUTE') as anon,
+      has_function_privilege('authenticated', 'public.tracklog_sync_v2(uuid,text,bigint,jsonb)', 'EXECUTE') as authenticated,
+      has_function_privilege('service_role', 'public.tracklog_sync_v2(uuid,text,bigint,jsonb)', 'EXECUTE') as service_role`);
+    assert.deepEqual(privileges, { anon: false, authenticated: false, service_role: true });
+    await db.exec("set role authenticated");
+    try {
+      await expectSqlState(() => sync([]), "42501", /permission denied/);
+    } finally {
+      await db.exec("reset role");
+    }
+    await expectSqlState(() => sync([], { deviceId: "missing-device" }), "42501", /approved device/);
+    const pendingDevice = "pending-disk-io-test";
+    await insertApprovedDevice(pendingDevice, "Pending device");
+    await db.query("update public.device_profiles set approval_status = 'pending' where device_id = $1", [pendingDevice]);
+    await expectSqlState(() => sync([], { deviceId: pendingDevice }), "42501", /approved device/);
+    await expectSqlState(
+      () => db.query("select public.tracklog_sync_v2($1::uuid, $2, 0, '[]'::jsonb)", [ADMIN_ID, DEVICE_ID]),
+      "42501", /approved device/,
+    );
+    await expectSqlState(() => sync([], { cursor: 1 }), "22023", /ahead of the owner/);
+    await expectSqlState(() => sync(Array.from({ length: 421 }, () => ({}))), "22023", /at most 420/);
+  });
+
+  await check("refreshes first sync and protocol upgrades immediately while suppressing repeated profile writes for 60 seconds", async () => {
+    await db.exec(`
+      create temporary table profile_sync_update_log (device_id text);
+      create function pg_temp.capture_profile_sync_update() returns trigger language plpgsql as $$
+      begin
+        insert into profile_sync_update_log values (new.device_id);
+        return new;
+      end;
+      $$;
+      create trigger test_capture_profile_sync_update after update on public.device_profiles
+      for each row execute function pg_temp.capture_profile_sync_update();
+    `);
+    const getProfile = () => firstRow(`select sync_protocol_version, last_sync_v2_at, last_seen_at
+      from public.device_profiles where device_id = $1`, [DEVICE_ID]);
+    const writes = () => countRows("select count(*)::integer as count from profile_sync_update_log");
+    const initial = await getProfile();
+    assert.equal(initial.sync_protocol_version, 1);
+    assert.equal(initial.last_sync_v2_at, null);
+    await sync([]);
+    const first = await getProfile();
+    assert.equal(first.sync_protocol_version, 2);
+    assert.ok(first.last_sync_v2_at);
+    assert.equal(await writes(), 1);
+    for (let n = 0; n < 20; n += 1) await sync([]);
+    assert.equal(await writes(), 1, "20 rapid RPCs must not rewrite the profile");
+    assert.deepEqual(await getProfile(), first);
+
+    await db.query(`update public.device_profiles
+      set last_sync_v2_at = clock_timestamp() - interval '61 seconds',
+          last_seen_at = clock_timestamp() - interval '61 seconds'
+      where device_id = $1`, [DEVICE_ID]);
+    await db.exec("truncate profile_sync_update_log");
+    await sync([]);
+    assert.equal(await writes(), 1, "a sync after 60 seconds must refresh the profile");
+
+    await db.query("update public.device_profiles set sync_protocol_version = 1 where device_id = $1", [DEVICE_ID]);
+    await db.exec("truncate profile_sync_update_log");
+    await sync([]);
+    assert.equal((await getProfile()).sync_protocol_version, 2);
+    assert.equal(await writes(), 1, "protocol upgrades must not wait for the throttle");
+
+    await db.query("update public.device_profiles set last_sync_v2_at = null where device_id = $1", [DEVICE_ID]);
+    await db.exec("truncate profile_sync_update_log");
+    await sync([]);
+    assert.ok((await getProfile()).last_sync_v2_at);
+    assert.equal(await writes(), 1, "a missing timestamp must be initialized immediately");
+    await db.exec("drop trigger test_capture_profile_sync_update on public.device_profiles; drop function pg_temp.capture_profile_sync_update(); drop table profile_sync_update_log;");
   });
 
   await check("rejects a non-UUID mutation without a receipt", async () => {
@@ -1011,6 +1122,139 @@ try {
     data = await sync([], { deviceId: newDevice });
     assert.equal(cursor, stableCursor);
     assertEmptyChanges(data.changes);
+  });
+
+  await check("keeps the active-trip owner constraint across devices", async () => {
+    const secondDevice = "active-trip-second-device";
+    await insertApprovedDevice(secondDevice, "Second active trip device");
+    const firstActive = tripMutation(nextMutationId(), "active-owner-first", 0, {
+      end_ts: null, odo_end: null, total_km: null, last_leg_km: null, status: "active",
+    });
+    let data = await sync([firstActive]);
+    assert.equal(data.acks[0].status, "applied");
+    data = await sync([tripMutation(nextMutationId(), "active-owner-second", 0, {
+      end_ts: null, odo_end: null, total_km: null, last_leg_km: null, status: "active",
+    })], { deviceId: secondDevice });
+    assert.equal(data.acks[0].status, "conflict");
+    assert.equal(data.acks[0].code, "active_trip_conflict");
+    data = await sync([tripMutation(nextMutationId(), "active-owner-first", 1)]);
+    assert.equal(data.acks[0].status, "applied");
+  });
+
+  await check("matches the original feed across all seven buckets and multiple 1500-row pages", async () => {
+    const rowsPerBucket = 1602;
+    const fixtureCursor = cursor;
+    // Synthetic rows stay in the in-memory database. Use normal triggers so
+    // owner serialization, report invalidation and tombstones remain active.
+    await db.query(`insert into public.trip_headers (
+        trip_id, device_id, start_ts, end_ts, odo_start, odo_end, total_km, last_leg_km, status
+      ) select 'feed-trip-' || n, $1, $2::timestamptz, $2::timestamptz + interval '1 hour',
+        100, 110, 10, 10, 'closed' from generate_series(0, $3::integer) n`,
+    [DEVICE_ID, TS, rowsPerBucket]);
+    await db.query(`insert into public.trip_events (id, trip_id, device_id, type, ts, sync_status)
+      select 'feed-event-' || n, 'feed-trip-0', $1, 'point_mark', $2::timestamptz, 'synced'
+      from generate_series(1, $3::integer) n`, [DEVICE_ID, TS, rowsPerBucket]);
+    await db.query(`insert into public.trip_route_points (id, trip_id, device_id, ts, lat, lng, accuracy, source)
+      select 'feed-point-' || n, 'feed-trip-0', $1, $2::timestamptz + n * interval '15 seconds',
+        35.0, 139.0, 5, 'synthetic-test' from generate_series(1, $3::integer) n`,
+    [DEVICE_ID, TS, rowsPerBucket + 201]);
+    await db.query(`insert into public.report_snapshots (trip_id, device_id, created_at, label, payload_json)
+      select 'feed-trip-' || n, $1, $2::timestamptz, 'Synthetic report', jsonb_build_object('fixture', n)
+      from generate_series(1, $3::integer) n`, [DEVICE_ID, TS, rowsPerBucket]);
+    await db.query(`insert into public.deleted_trip_tombstones (trip_id, device_id, owner_user_id, deleted_by, deleted_at)
+      select 'feed-deleted-trip-' || n, $1, $2::uuid, $2::uuid, $3::timestamptz
+      from generate_series(1, $4::integer) n`, [DEVICE_ID, OWNER_ID, TS, rowsPerBucket]);
+    await db.query(`insert into public.deleted_event_tombstones (
+        event_id, trip_id, device_id, owner_user_id, event_type, event_ts, deleted_by, deleted_at
+      ) select 'feed-deleted-event-' || n, 'feed-deleted-event-parent', $1, $2::uuid,
+        'point_mark', $3::timestamptz, $2::uuid, $3::timestamptz
+      from generate_series(1, $4::integer) n`, [DEVICE_ID, OWNER_ID, TS, rowsPerBucket]);
+    await db.query(`insert into public.deleted_report_tombstones (trip_id, device_id, owner_user_id, reason, deleted_at)
+      select 'feed-deleted-report-' || n, $1, $2::uuid, 'user_deleted', $3::timestamptz
+      from generate_series(1, $4::integer) n`, [DEVICE_ID, OWNER_ID, TS, rowsPerBucket]);
+
+    const bucketTables = {
+      trips: "trip_headers", events: "trip_events", routePoints: "trip_route_points", reports: "report_snapshots",
+      deletedTrips: "deleted_trip_tombstones", deletedEvents: "deleted_event_tombstones", deletedReports: "deleted_report_tombstones",
+    };
+    const expected = {};
+    for (const [bucket, table] of Object.entries(bucketTables)) {
+      const result = await db.query(`select change_seq from public.${table}
+        where owner_user_id = $1::uuid and change_seq > $2 order by change_seq`, [OWNER_ID, fixtureCursor]);
+      expected[bucket] = result.rows.map((row) => asNumber(row.change_seq));
+      assert.ok(expected[bucket].length > 1501, `${bucket} must exercise its branch limit`);
+    }
+    const seen = Object.fromEntries(Object.keys(bucketTables).map((bucket) => [bucket, []]));
+    let fromCursor = fixtureCursor;
+    let pages = 0;
+    let hasMore;
+    do {
+      await db.exec(originalSyncFunctionSql);
+      const original = await sync([], { cursor: fromCursor, advance: false });
+      await db.exec(optimizedSyncSql);
+      const optimized = await sync([], { cursor: fromCursor, advance: false });
+      assert.deepEqual(optimized, original, `optimized page ${pages} must match the original function`);
+      const pageRows = Object.values(optimized.changes).flat();
+      assert.ok(pageRows.length <= 1500);
+      if (optimized.hasMore) assert.equal(pageRows.length, 1500);
+      for (const [bucket, rows] of Object.entries(optimized.changes)) {
+        for (const row of rows) {
+          assert.ok(asNumber(row.change_seq) > fromCursor);
+          assert.ok(asNumber(row.change_seq) <= asNumber(optimized.cursor));
+          seen[bucket].push(asNumber(row.change_seq));
+        }
+      }
+      fromCursor = asNumber(optimized.cursor);
+      hasMore = optimized.hasMore;
+      pages += 1;
+      assert.ok(pages < 15, "feed must terminate");
+    } while (hasMore);
+    assert.ok(pages > 7);
+    assert.deepEqual(seen, expected, "all rows must arrive once without gaps, including tombstones");
+    const allSequences = Object.values(seen).flat();
+    assert.equal(new Set(allSequences).size, allSequences.length, "owner sequence numbers must be unique across buckets");
+    const idle = await sync([], { cursor: fromCursor, advance: false });
+    assert.equal(asNumber(idle.cursor), fromCursor);
+    assert.equal(idle.hasMore, false);
+    assertEmptyChanges(idle.changes);
+    cursor = fromCursor;
+    console.log(`[feed-fixture] ${allSequences.length} changes, ${pages} pages, all seven buckets identical`);
+  });
+
+  await check("receives later same-owner writes on a second device and still deduplicates a 420-mutation batch", async () => {
+    const secondDevice = "late-feed-second-device";
+    await insertApprovedDevice(secondDevice, "Late feed second device");
+    const beforeLate = cursor;
+    const mutations = Array.from({ length: 420 }, (_, n) => routeMutation(nextMutationId(), `late-feed-point-${n}`, "feed-trip-0"));
+    // A device may modify this owner's existing trip; attribution remains the
+    // trip's device under the unchanged ownership rules.
+    const written = await sync(mutations, { deviceId: secondDevice });
+    assert.equal(written.acks.length, 420);
+    assert.ok(written.acks.every((ack) => ack.status === "applied"));
+    assert.equal(written.changes.routePoints.length, 420);
+    assert.ok(cursor > beforeLate);
+    const fetched = await sync([], { cursor: beforeLate, advance: false });
+    assert.equal(fetched.changes.routePoints.length, 420);
+    assert.deepEqual(fetched.changes, written.changes);
+    const stableCursor = cursor;
+    const duplicate = await sync(mutations, { deviceId: secondDevice });
+    assert.ok(duplicate.acks.every((ack) => ack.status === "duplicate"));
+    assert.equal(cursor, stableCursor);
+    assertEmptyChanges(duplicate.changes);
+    for (const mutation of [mutations[0], mutations[419]]) assert.equal(await receiptCount(mutation.mutationId), 1);
+  });
+
+  await check("manual rollback restores the original RPC and can be re-applied without data changes", async () => {
+    const stableCursor = cursor;
+    const before = await firstRow("select count(*)::integer as count from public.tracklog_sync_mutations");
+    await db.exec(await readFile(ROLLBACK_PATH, "utf8"));
+    const rolledBack = await sync([]);
+    assert.equal(cursor, stableCursor);
+    assertEmptyChanges(rolledBack.changes);
+    await db.exec(optimizedSyncSql);
+    assert.deepEqual(await firstRow("select count(*)::integer as count from public.tracklog_sync_mutations"), before);
+    const restored = await sync([]);
+    assert.deepEqual(restored, rolledBack);
   });
 
   console.log(`TrackLog sync v2 integration checks passed: ${passed}`);
