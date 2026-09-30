@@ -11,9 +11,11 @@ ChatGPT / Codex の「設定 → Codex Cloud → 環境を作成」で対象リ�
 ```text
 Koutacode/tracklog-pwa を修正できる環境を準備してください。
 リポジトリの AGENTS.md に従い、日本語で報告してください。
-Node.js 22、npm、JDK 21、Android SDK platform 36 とビルドツールを用意してください。
+まず Node.js 22 と npm を用意してください。
 npm ci を実行し、typecheck、test:logic、test:sync、check:csp、build、check:offline を確認してください。
-Android SDK が利用できれば npm run cap:sync:android の後、android ディレクトリで bash ./gradlew assembleDebug を実行してください。
+Android コンパイルも必要な場合は JDK 21（javac を含む）と Android SDK platform 36、ビルドツールを用意してください。
+JDK/SDK が利用できれば npm run cap:sync:android の後、android ディレクトリで bash ./gradlew assembleDebug を実行してください。
+Android ツールの取得に失敗しても、通常の Node.js セットアップは成功する構成にしてください。
 本番の秘密情報・署名鍵・端末データは追加せず、APK公開・本番デプロイ・実機更新は行わないでください。
 実行できなかった検証は、理由を含めて未検証と報告してください。
 ```
@@ -41,6 +43,12 @@ npm run typecheck と npm run test:logic を実行し、結果を日本語で報
 | ローカルPCとAndroid実機 | 公開APK照合、データを保持する `adb install -r`、実機起動、GPS・IC・通知・実走行 |
 
 Cloud の確認用 APK は会社向けに配布しない。正式リリース、公開 latest の SHA・署名・バージョン検証、実機更新の手順は `AGENTS.md` に従う。セットアップで既存のアプリバージョンや公開 APK を変更する必要はない。
+
+### 初回セットアップの実測（2026-09-30）
+
+Cloud 上で Node.js 22 の `npm ci`、上記6項目、開発サーバーのHTML/React入口応答、Capacitor sync が成功。同期テスト12項目、offline検査37資産を確認した。
+
+Android SDK 36 と Build Tools はプロキシ設定後に導入できたが、既存 Java 21 は JRE のみだった。JDK の取得先が403、Maven Centralが429を返したため、`assembleDebug` は未成功。Androidコンパイルは通常環境の必須条件にせず、必要時にJDKと取得先の到達性を再確認する。SDKの存在だけでAPKをビルドできるとは判断しない。
 
 ## 運用記録
 
