@@ -56,3 +56,17 @@ Cloud通常受入は引き続き未完了。サポートの回答または正式
 公開後に環境画面のフォローアップ欄から通常の新規Cloud受入を1回だけ開始したが、`メッセージの送信中にエラーが発生しました` / `Unable to determine project root for task` が再現した。画面は元のセットアップURLのままで、通常タスクIDやコマンド開始を確認できない。試験入力は元の空欄へ戻した。同じ開始試験や公開を繰り返さない。環境のPublish完了と通常タスクの開始問題を区別し、GitHub push権限・通常CloudのDrive能力は未検証として保持する。既存のサポート調査を継続する。
 
 親のDrive接続で既存10月月次ログへ今回の結果を1件追記し、既存全文の保持と読み戻しを確認した。公開済みv0.1.64/code62のAPK・SHAは保存済みのため再アップロードせず、新Release・端末操作・本番DB変更は行わない。
+
+## Google Driveプラグインを明示した追加受入試験
+
+2026-10-01 12:20ごろ、利用者のCloudでのbrowser/Driveツール導入試行の明示依頼により、親のPlugin Managementと公式UIでGoogle Driveのinstalled/ENABLED・アカウント接続済みを確認した。アカウントメールや私的文書IDは記録しない。
+
+セットアップチャット `01a0f4d2-29e2-7420-9e82-b832e6ae208b` の「新しいクラウドチャットでフォローアップ」欄で、`+`のPluginsにGoogle Drive候補があり、`@Google Drive`から実チップを指定できた。既承認の通常Cloud受入として、既存月次文書の名前/mimeTypeのみを読む試験を1回送信したが、`Unable to determine project root for task`が再現した。URLは元のセットアップのままで、新しい通常タスクID・コマンド開始・Drive呼出し結果は確認できない。原入力は空欄へ戻した。
+
+今回確認したのは親の導入/有効化/接続状態とCloud入力欄の候補・明示指定まで。CloudでのDrive実使用・APK保存は未検証であり、別チャットの「候補なし」をアカウント全体の未導入へ一般化しない。公式Cloud制限のComputer/browser use未対応は、このroot開始障害やDrive提供可否とは別に扱う。
+
+アプリ、DB、接続権限、環境設定、Publish/Republish、clone、端末を変更していない。次はサポートによる正式な修復後に、通常タスクでGit rootを確認し、`@Google Drive`を明示した最小読取を再検証する。同じ開始試験や環境再公開を追加で繰り返さない。
+
+今回のDrive指定付き再現結果と、通常Codex CloudでのDrive対応/有効化方法の確認依頼を既存サポート会話へ追加送信し、送信済み本文を確認した。担当者の修復完了回答はまだ確認していない。スクリーンショットではDriveチップ指定を確認できるが、開始エラーのtoastは撮影時点で消えているため、画像だけをエラーの証拠とは扱わない。親の既存10月月次ログへ同内容を追記し、読み戻し済み。
+
+公式参照: [Cloudの制限](https://learn.chatgpt.com/docs/environments/cloud-environments#current-limitations)、[Pluginsの利用](https://learn.chatgpt.com/docs/plugins)。

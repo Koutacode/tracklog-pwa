@@ -60,6 +60,16 @@ Cloudの確認用debug APKは会社へ配布しない。Linuxの`release:verify:
 
 環境準備やCI成功は実走・実機更新、既存の通常タスク開始障害の復旧を証明しない。APK公開はSupabase Edge FunctionsやDB migrationをデプロイしない。サーバー変更は別途対象・適用結果を確認する。
 
+## Cloudのブラウザ操作とGoogle Drive
+
+公式のCloud制限ではComputer/browser useは未対応。ブラウザ操作ツールの導入を、通常Cloudで使える機能として保証しない。[公式の制限](https://learn.chatgpt.com/docs/environments/cloud-environments#current-limitations)
+
+Google Driveは、インストール・有効化・アカウント接続、入力欄での候補表示、実際のCloudツール利用を区別して確認する。インストール済みプラグインは新しいチャットで明示的な`@`指定を試せるが、公式のプラグイン案内だけで対象Cloudタスクへの提供を保証しない。個別チャットで候補がないことを、アカウント全体で未導入と判断しない。[公式Plugins手順](https://learn.chatgpt.com/docs/plugins)
+
+2026-10-01 12:20ごろ、親の公式UIでGoogle Driveのinstalled/ENABLED・アカウント接続済みを確認し、Cloudフォローアップ欄でもPlugins候補と`@Google Drive`の実チップ指定を確認した。しかし、既存月次文書の名前/mimeTypeだけを読む受入試験は、開始前のroot特定エラーで実行開始を確認できなかった。CloudでのDrive実使用・保存能力は未検証。
+
+開始障害の正式な修復後、通常の新規Cloudチャットで`@Google Drive`を明示し、既存月次文書の名前/mimeTypeを読む最小試験を行う。読取成功とAPKアップロード・保存後照合の成功も別々に扱う。browser未対応、root開始障害、Driveの提供可否を同じ原因として扱わない。
+
 ## 過去の障害と確認範囲
 
 - **2026-09-30**: CloudでNode.js 22、`npm ci`、基本6項目、開発サーバーのHTML/React入口、Capacitor syncが成功。同期試験12項目・offline37資産は当時の結果。SDK36とBuild Toolsは導入できたがJava21はJREのみで、JDK取得403・Maven Central429により`assembleDebug`は未成功だった。これは現在のAndroid必須条件を免除する根拠にはしない。
