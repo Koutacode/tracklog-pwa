@@ -158,3 +158,5 @@ Cloud手順PR [#13](https://github.com/Koutacode/tracklog-pwa/pull/13) / `ee0ccf
 - src/ui/screens/tripRecordedTimes.test.tsx
 - src/ui/styles/global.css
 - supabase/migrations/20260930165335_tracklog_sync_v2_reduce_disk_io.sql
+
+後続の測定記録で追加したファイル: `docs/measurements/supabase-disk-io-post-apk-2026-10-01.json`。文書上のCloud受入確認は未完了の状態をそのまま保持する。
