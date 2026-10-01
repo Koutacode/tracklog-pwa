@@ -64,6 +64,7 @@ Cloudの確認用debug APKは会社へ配布しない。Linuxの`release:verify:
 
 - **2026-09-30**: CloudでNode.js 22、`npm ci`、基本6項目、開発サーバーのHTML/React入口、Capacitor syncが成功。同期試験12項目・offline37資産は当時の結果。SDK36とBuild Toolsは導入できたがJava21はJREのみで、JDK取得403・Maven Central429により`assembleDebug`は未成功だった。これは現在のAndroid必須条件を免除する根拠にはしない。
 - **2026-10-01（旧手順の作業場）**: Java21のJREはあったが`javac`がなくAndroidコンパイル未検証。`TrackLog-修復`再公開後も通常タスクが`Unable to determine project root for task`で開始できないとの報告があった。一方、セットアップ側の`/workspace/tracklog-pwa`は正常なGit rootで修正・検証できた。両者を区別し、今後の通常タスク成功を確認するまで復旧済みとは記録しない。
+- **2026-10-01 09:27以降**: 新規非公開「TrackLog-APK」のセットアップではNode22/fullJDK21/SDK36、基本6検証、Android85単体試験と本体/テストAPKコンパイル、Linux公開APK照合/保存が成功。Install script/Start skillを保存してPublishも成功した。一方、通常Cloudチャットの開始は画面再読み込み後も同じroot特定エラー。環境の作成だけでは通常チャット開始障害は解消しておらず、携帯からの通常Cloud開発を再利用可能とはまだ確認できない。詳細と最小再現情報は [CLOUD_START_BLOCKER_2026-10-01.md](CLOUD_START_BLOCKER_2026-10-01.md)。
 
 ## 運用記録
 
