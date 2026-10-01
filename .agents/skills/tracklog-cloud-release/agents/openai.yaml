@@ -1,0 +1,4 @@
+interface:
+  display_name: "TrackLog Cloud公開"
+  short_description: "TrackLogの改善からCI・正式APK公開・照合・Drive記録まで進める"
+  default_prompt: "$tracklog-cloud-release を使い、TrackLogの改善を検証してGitHubへ反映し、正式APKの公開・照合・Google Drive保存まで進めてください。"

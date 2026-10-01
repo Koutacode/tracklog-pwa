@@ -4,6 +4,8 @@
 
 ## Codex Cloud / Linux
 - 説明・作業記録は日本語を基本とする。環境の作成・検証方法は `docs/CODEX_CLOUD.md` を参照する。
+- 携帯からのCloud改善と正式APK公開には、リポジトリ共有スキル `.agents/skills/tracklog-cloud-release/SKILL.md` を使用する。2026-10-01の利用者指示により、今後のTrackLog改善依頼は検証、push／PR、CI、統合、既存Release workflowでの正式公開、公開APK照合、Google DriveへのAPK・SHAと記録の保存まで承認済み。質問・調査のみ、公開留保、後続の範囲変更はその依頼を優先する。実機導入、破壊的DB変更、課金変更、署名鍵変更、他サービスのデプロイへこの承認を拡張しない。
+- Linuxの環境準備は `bash scripts/setup-tracklog-cloud.sh` を使う。保存された `taskdev-env.sh` を各新規シェルでsourceし、`--check`でNode 22・完全なJDK 21・SDK 36／Build Tools 36.0.0を確認する。Android準備失敗を環境完成として扱わない。
 - Node.js 22 を使用し、初回は `npm ci` を実行する。基本検証は `npm run typecheck`、`npm run test:logic`、`npm run test:sync`、`npm run check:csp`、`npm run build`、`npm run check:offline`。
 - Android のコンパイル確認には JDK 21 と Android SDK が必要。`npm run cap:sync:android` の後、`android` で `bash ./gradlew assembleDebug` を実行する。
 - Windows 専用の `powershell` / `.ps1` / `.bat` コマンドは Linux で実行しない。Windows の一時作業ルールは PC 側に適用し、Linux の一時ファイルは `mktemp -d` で作った自分の専用ディレクトリへ置き、終了時にそのディレクトリだけ片付ける。

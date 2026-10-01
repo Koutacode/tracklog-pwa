@@ -1,24 +1,28 @@
-# 携帯からの修正依頼と正式APK更新
+# 携帯からの修正依頼と正式APK公開・更新
 
-対象は `Koutacode/tracklog-pwa`、Androidパッケージは `com.tracklog.assist`。
-Cloudでは非秘密の合成データで修正・検証し、本番認証情報、署名鍵、端末DB、画像、正確な座標を持ち込まない。
+対象は `Koutacode/tracklog-pwa`、Androidパッケージは `com.tracklog.assist`。2026-10-01の利用者指示により、携帯からCloudへ依頼したアプリ改善は修正・push・APK作成・正式公開・Google Drive保存まで自律的に進める。個別に調査のみ・公開しないと指定された依頼はその範囲を守る。既に得た公開承認を工程ごとに重ねて求めない。
 
-## 1. 携帯から依頼し、差分をレビューする
+共通手順は [tracklog-cloud-release skill](../.agents/skills/tracklog-cloud-release/SKILL.md)。Cloudでは合成データを使い、本番の秘密情報・署名鍵・端末DB・画像・正確な座標を持ち込まない。
 
-1. 修正したい画面、操作、期待する表示、実際の症状を日本語で伝える。非公開の運行データは転記しない。
-2. 正常なCloud作業場で最新 `main`、`AGENTS.md`、`docs/CODEX_CLOUD.md`、既存変更を確認する。
-3. 修正ブランチで原因を再現し、回帰テストと修正を作る。Cloudタスクは隔離済みなので通常は追加のworktreeを作らない。
-4. 修正内容、検証結果、未検証事項を確認してからGitHubへの反映・PRのレビュー・統合へ進む。
+## 1. 通常Cloudタスクで準備を確認する
 
-2026-10-01時点では、新規環境 `TrackLog-修復` の再公開後も通常タスク作成が
-`Unable to determine project root for task` で失敗したとの報告がある。
-この会話の `/workspace/tracklog-pwa` は正常なGit rootを持ち、修正・検証できる。
-通常タスク開始の復旧は別途プラットフォーム側の確認が必要であり、今回のアプリ修正で解消したとは扱わない。
-環境の複製や既存環境の削除・権限変更は行わない。
+修正したい操作、期待する表示、実際の症状を日本語で依頼する。最新main、既存変更、Git root、`AGENTS.md`、共有skillを確認して修正ブランチで作業する。Cloudタスクは隔離済みなので通常は追加worktreeを作らない。他タスクとの同時変更があれば内容を照合して統合する。
 
-## 2. 公開前の非本番検証
+```bash
+bash scripts/setup-tracklog-cloud.sh --accept-android-licenses
+source "${TRACKLOG_CLOUD_DEV_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/tracklog-cloud}/taskdev-env.sh"
+git rev-parse --show-toplevel
+node --version
+java -version
+javac -version
+gh --version
+```
 
-Node.js 22でリポジトリのルートから実行する。
+Node22・完全なJDK21・SDK platform36・Build Tools36・ghを使用する。環境のInstall script/Start skillとPublish / Republish、通常タスクでの再確認は [CODEX_CLOUD.md](CODEX_CLOUD.md) に従う。既存のJRE不足やproject root障害は同文書の日付付き履歴に保持し、セットアップ成功だけで通常タスクも修復済みとは判断しない。
+
+## 2. versionを確定して最終検証する
+
+原因を再現し、変更と回帰試験を作る。GitHub最新Release・tag・mainを再確認し、未使用のversionを選ぶ。`package.json` / lockfile、`android/gradle.properties`のversionNameを一致させ、versionCodeを現在の公開版より大きくする。version変更後の最終コードで次を実行する。
 
 ```bash
 npm ci
@@ -28,71 +32,55 @@ npm run test:sync
 npm run check:csp
 npm run build
 npm run check:offline
+npm run cap:sync:android
+(cd android && bash ./gradlew --no-daemon :app:testDebugUnitTest :app:assembleDebugAndroidTest :app:assembleDebug)
 ```
 
-`.github/workflows/ci.yml` はPRとmainでこれらの検証とEdge Functionの型検査を行う。
-追加の `android-validation` jobはJDK 21とSDK 36を使い、非本番のWeb資産を同期して
-Android unit test、本体APK、アプリのandroidTest APKを検証する。
-署名鍵・本番設定を復元せず、APKを公開・会社配布しない。接続端末でのテストも実行しない。
+`java -version`だけでなく`javac`が必要。Androidコンパイルを任意扱いせず、不足・失敗を解決してから公開へ進む。Windows専用PowerShell・bat手順をLinuxで使わない。確認用debug APKは正式配布に使わない。
 
-Cloudで完全なJDK 21とSDK 36が使える場合は、次を追加できる。
+## 3. PR・mainのCIを確認し既存Releaseで公開する
+
+1. 変更ブランチをcommit・pushし、main向けPRを作る。既存PRがある場合は更新する。
+2. **PRの最終HEAD SHA**に対するCI全ジョブ成功を確認する。追加修正をpushしたら新しいSHAの結果を待つ。
+3. 統合後、**実際のmain SHA**に対するCI全ジョブ成功を確認する。PR時点の成功だけで置き換えない。
+4. 確定main SHAにversionと一致する`vX.Y.Z`タグを作りpushする。既存タグを上書きしない。
+5. 同tag/SHAの既存 **Android Release** が最後までsuccessになることを確認する。
+
+`.github/workflows/ci.yml`のvalidateは基本検証・Edge Function型検査、android-validationは非本番設定によるAndroid単体試験・本体APK・androidTest APKコンパイル、temporary-workspacesはWindowsの一時作業安全性を確認する。CIは端末上の試験を実行した証拠ではない。
+
+**`v*`タグpushは正式公開まで自動実行する操作**。単なるビルド試験として使わない。既存workflowがGitHub Secretsから設定と従来署名鍵を復元し、package・version・versionCode・公式署名・draft再取得を検証後、通常Releaseとしてlatestに公開する。公開latestのAPK・SHA sidecarを照合してから旧ReleaseのAPK資産を配布対象から外す。この最終工程まで成功したことを確認する。失敗時のdraft復旧も既存workflowに従う。
+
+APK公開はEdge Functions・DB migrationを自動適用しない。サーバー変更が含まれる場合は別工程の適用対象・承認範囲・確認結果を明記する。
+
+## 4. 公開APKを照合してDriveへ保存する
+
+Linux検証の既定は読取専用で、検証用一時取得のみ。正式成果物を保存する際は明示的に`--save`を付ける。期待tagはpackage/Gradleの一致したversionから自動決定するため、`--tag`引数は使わない。
 
 ```bash
-npm run cap:sync:android
-cd android
-bash ./gradlew --no-daemon :app:testDebugUnitTest :app:assembleDebugAndroidTest :app:assembleDebug
+npm run release:verify:apk:linux -- --save
 ```
 
-`java -version` だけでは不十分で、`javac` が必要。
-2026-10-01の作業場にはJava 21のJREはあるが `javac` がなく、Androidコンパイルは未検証。
-Windows専用のPowerShell・bat手順はLinuxで実行しない。
-生成された通常debug APKは正式配布に使わない。
+latest・tag・package・versionName・versionCode・公式署名・公開SHA sidecar・APK内versionの一致を確認した**同じAPK**とSHAを`output/tracklog-assist-debug.apk`および`.sha256`へ保存する。検証後に別ビルドしたAPKで置き換えない。必要ツールはAndroid Build Toolsの`aapt`/`apksigner`、Java、`curl`、`unzip`。Windowsでは既存の`npm run release:verify:apk`を使う。
 
-## 3. 承認後に既存Android Releaseを使う
+Google Driveの既存TrackLog年月フォルダーを探し、非公開の成果物保存先へAPKとSHAをアップロードする。ファイル名にはversionを付け、同じversion・checksumが既にあれば重複作成しない。アップロード後はファイルサイズと利用可能なchecksumを確認し、必要なら再取得してSHA-256を照合する。公開リンク化や共有範囲拡大はしない。既存月次文書へversion/code・commit・CI/Release URL・APK SHA-256・Drive保存先・未検証事項を追記する。
 
-差分レビューとCI成功後、公開対象コミットを確定する。
-`package.json` / lockfileのversion、`android/gradle.properties` のversionNameを一致させ、
-versionCodeを現在の公開版より大きくする。今回の修正段階ではタグ作成・公開を行わない。
+Driveへ保存できない場合は公開完了とDrive未保存を分けて報告し、非秘密の記録を`docs/`へ残す。保存成功を推測しない。秘密情報・正確な座標・生の運行データは含めない。
 
-**`v*` タグのpushは既存Android Release workflowを起動し、検証後の公開まで自動で進む。**
-タグpushを単なるビルド確認として扱わず、正式公開の承認後に実施する。
-workflowは既存のGitHub Secretsから設定と従来の署名鍵を復元する。
-Cloudに署名鍵を持ち込んだり、新しい鍵へ置き換えたりしない。
+## 5. 携帯で利用者が更新する
 
-既存Releaseは基本検証、Android unit test・コンパイル、package・version・versionCode、
-公式署名SHA256、draftダウンロード一致を確認してから通常Releaseを公開する。
-公開後にlatestと固定URLのAPK・SHA sidecarを照合し、過去ReleaseのAPK資産を配布対象から外す。
-失敗時のdraftへの復旧も既存workflowに含まれる。
-
-公開後は `docs/ANDROID.md` の検証手順でlatest、version、versionCode、署名、SHAを確認する。
-既存のWindows検証は `npm run release:verify:apk`。
-Linuxでは `npm run release:verify:apk:linux` が公開latestを一時取得し、
-tag・package・versionName・versionCode・公式署名・SHA sidecar・APK内versionを照合する。
-Android SDK Build-Toolsの `aapt` / `apksigner`、Java、`curl`、`unzip` が必要。
-公開APKの読取検証だけを行い、端末へのインストールや正式成果物の置換はしない。
-検証済み公開APKだけを正式成果物として扱う。
-
-## 4. 携帯で利用者が更新する
-
-会社配布URLは次の1本だけを案内する。
+会社配布URLは次の1本だけを案内する。Driveは成果物の保管先として扱う。
 
 https://github.com/Koutacode/tracklog-pwa/releases/latest/download/tracklog-assist-debug.apk
 
-1. 運行が終了していることを画面で確認する。運行中に更新しない。
-2. 上のリンクからAPKを携帯へダウンロードする。
-3. ダウンロードしたAPKを開く。Androidが求めた場合は、利用するブラウザ等の「不明なアプリのインストール」を許可する。
-4. Androidの「更新」または「インストール」を利用者が押す。
-5. TrackLogを開き、バージョン、既存ログイン・履歴・日報、必要な位置・通知権限を確認する。
+1. 運行終了を画面で確認する。運行中に更新しない。
+2. 上記リンクから携帯へダウンロードし、APKを開く。
+3. Androidが求めた場合は利用するブラウザ等の「不明なアプリのインストール」を許可し、利用者が「更新」または「インストール」を押す。
+4. TrackLogでversion、既存ログイン・履歴・日報、位置・通知権限を確認する。
 
-APKの作成だけで携帯へ自動インストール確認が表示される機能はない。
-同じパッケージID・同じ署名と、より大きいversionCodeで既存アプリへ上書きする。
-署名不一致などで更新できなければ中止し、アンインストール・データ消去・再登録で解決しない。
+APK公開だけで携帯の更新確認が自動表示される機能はない。同じpackage ID・同じ署名・より大きいversionCodeで上書きする。署名不一致などで更新できない場合にアンインストール・データ消去・再登録をしない。実機インストールの承認はAPK公開の承認とは別に確認する。許可済みのPCで実機確認する場合はデータを保持する`adb install -r`を使う。
 
-## 5. 検証と運用記録
+## 6. 完了報告と復旧
 
-Cloud/CI成功は、携帯の起動・ログイン・GPS・IC・通知・バックグラウンド・実走行・電池最適化・更新成功を証明しない。
-実機確認は既存データを保持し、架空運行を作らず別工程で実施する。
-復旧は旧APKの再配布ではなく、修正版をより大きいversionCodeで公開・照合して上書きする。
+Cloud準備、対象SHAのCI、正式Release、公開APK照合、Drive保存、実機確認を区別して報告する。Cloud/CI成功は携帯の起動・認証・GPS・IC・通知・バックグラウンド・実走・電池最適化・更新成功を証明しない。架空運行を実機へ作らず、実動作は別工程で検証する。
 
-Google Driveに接続できる作業場では `TrackLog/<年>/<年月>/` の既存月次文書へ追記する。
-接続できないCloudでは `docs/` の非秘密記録を次回Driveへ同期し、未反映を明記する。
+復旧は旧APKの再配布ではなく、必要なコードを戻した修正版をより大きいversionCodeで新Releaseとし、同じ公開照合・Drive記録を行う。

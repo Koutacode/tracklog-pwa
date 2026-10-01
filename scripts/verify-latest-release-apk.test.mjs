@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { copyFile, mkdtemp, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { pathToFileURL } from 'node:url';
 import test from 'node:test';
 import {
   OFFICIAL_SIGNER_SHA256,
@@ -212,4 +213,132 @@ test('ambiguous manifest, malformed sidecar, and ambiguous certificate informati
 test('actual subprocess failures are surfaced even when the command prints plausible output', async () => {
   assert.equal(await runCommand(process.execPath, ['-e', 'process.stdout.write("ok")']), 'ok');
   await assert.rejects(runCommand(process.execPath, ['-e', 'console.log("Verified"); process.exitCode = 17;']), /failed \(17\)/);
+});
+
+async function prepareSavedOutputs(inputs) {
+  const directory = join(inputs.projectRoot, 'output');
+  await mkdir(directory);
+  const apk = join(directory, 'tracklog-assist-debug.apk');
+  const sidecar = `${apk}.sha256`;
+  await writeFile(apk, 'previous verified APK');
+  await writeFile(sidecar, 'previous verified sidecar');
+  return { directory, apk, sidecar };
+}
+
+async function assertPreviousOutputs(outputs) {
+  assert.equal(await readFile(outputs.apk, 'utf8'), 'previous verified APK');
+  assert.equal(await readFile(outputs.sidecar, 'utf8'), 'previous verified sidecar');
+  assert.deepEqual((await readdir(outputs.directory)).sort(), ['tracklog-assist-debug.apk', 'tracklog-assist-debug.apk.sha256']);
+}
+
+test('--save publishes the exact verified APK and sidecar at fixed output paths with upload metadata', async t => {
+  const { inputs, state } = await fixture(t);
+  const outputs = await prepareSavedOutputs(inputs);
+  const result = await verifyLatestRelease({ ...inputs, save: true });
+  assert.deepEqual(await readFile(outputs.apk), state.bytes);
+  assert.equal(await readFile(outputs.sidecar, 'utf8'), state.sidecar);
+  assert.equal(result.outputPath, outputs.apk);
+  assert.equal(result.sidecarPath, outputs.sidecar);
+  assert.equal(result.fileUri, pathToFileURL(outputs.apk).href);
+  assert.equal(result.sizeBytes, state.bytes.length);
+  assert.equal(result.sha256, sha256(await readFile(outputs.apk)));
+  assert.deepEqual(state.fetchCalls, ['latest', 'tags/v0.1.63', 'latest', 'latest']);
+  assert.deepEqual((await readdir(outputs.directory)).sort(), ['tracklog-assist-debug.apk', 'tracklog-assist-debug.apk.sha256']);
+  await assertTemporaryFilesRemoved(state);
+});
+
+test('--save creates fixed output files when no previous artifacts exist', async t => {
+  const { inputs, state } = await fixture(t);
+  const result = await verifyLatestRelease({ ...inputs, save: true });
+  assert.deepEqual(await readFile(result.outputPath), state.bytes);
+  assert.equal(await readFile(result.sidecarPath, 'utf8'), state.sidecar);
+  await assertTemporaryFilesRemoved(state);
+});
+
+for (const [label, mutate, message] of [
+  ['invalid signer', state => { state.signer = `Signer #1 certificate SHA-256 digest: ${'a'.repeat(64)}\n`; }, /Official APK signer/],
+  ['tampered APK', state => { state.bytes = Buffer.from(state.bytes); state.bytes[0] ^= 1; }, /GitHub asset digest/],
+  ['changed latest before staging', state => { state.mutateRelease = (release, _selector, call) => { if (call === 3) release.assets[0].id++; }; }, /Latest release changed/],
+  ['changed latest after staging', state => { state.mutateRelease = (release, _selector, call) => { if (call === 4) release.assets[0].id++; }; }, /Latest release changed before saving/],
+]) {
+  test(`--save preserves previous output pair on ${label}`, async t => {
+    const { inputs, state } = await fixture(t);
+    const outputs = await prepareSavedOutputs(inputs);
+    mutate(state);
+    await assert.rejects(verifyLatestRelease({ ...inputs, save: true }), message);
+    await assertPreviousOutputs(outputs);
+    await assertTemporaryFilesRemoved(state);
+  });
+}
+
+for (const [label, tamper, message] of [
+  ['APK', async path => { const bytes = await readFile(path); bytes[0] ^= 1; await writeFile(path, bytes); }, /Saved APK SHA-256/],
+  ['sidecar', async path => { await writeFile(`${path}.sha256`, 'changed after inspection'); }, /Saved SHA-256 sidecar bytes/],
+]) {
+  test(`--save detects ${label} changes after inspector verification before replacing outputs`, async t => {
+    const { inputs, state } = await fixture(t);
+    const outputs = await prepareSavedOutputs(inputs);
+    inputs.tools.embeddedVersion = async path => { await tamper(path); return state.embedded; };
+    await assert.rejects(verifyLatestRelease({ ...inputs, save: true }), message);
+    await assertPreviousOutputs(outputs);
+    await assertTemporaryFilesRemoved(state);
+  });
+}
+
+test('--save preserves both outputs when staging copy fails', async t => {
+  const { inputs, state } = await fixture(t);
+  const outputs = await prepareSavedOutputs(inputs);
+  let copies = 0;
+  const fileOperations = {
+    copyFile: async (...args) => { copies++; if (copies === 3) throw new Error('fixture copy failed'); await copyFile(...args); },
+    rename,
+  };
+  await assert.rejects(verifyLatestRelease({ ...inputs, save: true, fileOperations }), /fixture copy failed/);
+  await assertPreviousOutputs(outputs);
+  await assertTemporaryFilesRemoved(state);
+});
+
+for (const failureAt of [1, 2]) {
+  test(`--save restores the original output pair when rename ${failureAt} fails`, async t => {
+    const { inputs, state } = await fixture(t);
+    const outputs = await prepareSavedOutputs(inputs);
+    let renames = 0;
+    const fileOperations = {
+      copyFile,
+      rename: async (...args) => { renames++; if (renames === failureAt) throw new Error('fixture rename failed'); await rename(...args); },
+    };
+    await assert.rejects(verifyLatestRelease({ ...inputs, save: true, fileOperations }), /fixture rename failed/);
+    await assertPreviousOutputs(outputs);
+    await assertTemporaryFilesRemoved(state);
+  });
+}
+
+test('--save removes a newly published APK when sidecar rename fails and no original pair exists', async t => {
+  const { inputs, state } = await fixture(t);
+  let renames = 0;
+  const fileOperations = {
+    copyFile,
+    rename: async (...args) => { renames++; if (renames === 2) throw new Error('fixture rename failed'); await rename(...args); },
+  };
+  await assert.rejects(verifyLatestRelease({ ...inputs, save: true, fileOperations }), /fixture rename failed/);
+  assert.deepEqual(await readdir(join(inputs.projectRoot, 'output')), []);
+  await assertTemporaryFilesRemoved(state);
+});
+
+test('--save retains the original bytes for manual recovery if rollback itself fails', async t => {
+  const { inputs, state } = await fixture(t);
+  const outputs = await prepareSavedOutputs(inputs);
+  let renames = 0;
+  const fileOperations = {
+    copyFile,
+    rename: async (...args) => { renames++; if (renames >= 2) throw new Error('fixture persistent rename failure'); await rename(...args); },
+  };
+  await assert.rejects(verifyLatestRelease({ ...inputs, save: true, fileOperations }), /rollback was incomplete; recovery files retained/);
+  const recoveryName = (await readdir(outputs.directory)).find(name => name.startsWith('.tracklog-release-apk-'));
+  assert.ok(recoveryName);
+  const recovery = join(outputs.directory, recoveryName);
+  assert.equal(await readFile(join(recovery, 'tracklog-assist-debug.apk.previous'), 'utf8'), 'previous verified APK');
+  assert.equal(await readFile(join(recovery, 'tracklog-assist-debug.apk.sha256.previous'), 'utf8'), 'previous verified sidecar');
+  assert.equal(await readFile(outputs.sidecar, 'utf8'), 'previous verified sidecar');
+  await assertTemporaryFilesRemoved(state);
 });

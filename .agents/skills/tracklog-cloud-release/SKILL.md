@@ -1,0 +1,41 @@
+---
+name: tracklog-cloud-release
+description: TrackLogの改善・修正を検証し、GitHubへのpushとCI、正式Android APK公開、公開物の照合、Google Drive保存まで進める。携帯からのCloud開発と公開環境の整備にも使う。調査だけの依頼や公開を留保した依頼では公開しない。
+---
+
+# TrackLog Cloud公開
+
+対象は `Koutacode/tracklog-pwa`、Android `com.tracklog.assist`。説明と作業記録は日本語。リポジトリ内のこのスキルを正本とし、Windows個人スキルへ同内容を複製しない。
+
+## 依頼と既存成果を確認する
+
+- 現在のGit rootと作業差分を確認し、`AGENTS.md`、[携帯からの修正依頼と正式APK更新](../../../docs/PHONE_CLOUD_RELEASE.md)を読む。手順・コマンドは同文書を正本とし、検証済みスクリプトを使う。
+- 2026-10-01のユーザー指示により、今後のTrackLog改善依頼はpush／PR、CI、統合、正式Release、APK照合・Drive保存まで進める。既存の公開承認を毎工程で問い直さない。質問・調査のみ、公開留保、後続の範囲変更はその指示に従う。
+- 他の作業や未コミット変更を保持する。同時作業がある場合は基準commitと差分を照合し、未完成の他作業を公開対象へ混ぜない。他チャットへ送信する許可は、この公開承認から推定しない。
+- 公開承認を、Supabaseの破壊的変更、課金変更、端末データ消去、署名鍵変更、他サービスのデプロイへ拡張しない。
+
+## 修正から正式公開まで
+
+1. 修正を小さくまとめ、公開版を確認してversion/versionCodeを準備する。その変更を含めた最終コードで、依頼に応じた回帰試験と既定のWeb／同期／Android検証を実行する。運行・位置記録・高速開始終了・オフライン同期・削除同期・認証を維持する。
+2. 既存のGitHub接続で変更をpushし、PR／CI／統合を進める。トークン値を取り出さず、Cloudへ本番Secrets・署名鍵をコピーしない。認証の実在は対象repoへの操作結果で確認する。
+3. 公開版より大きいversionCodeと一致するversionName・package versionを確認する。公開対象のGit SHA、mainのSHA、成功したCIのhead SHAを一致させ、同じSHAへversion tagをpushする。mainや対象SHAが変わった場合は再照合する。
+4. 既存の通常 `Android Release` workflowを使う。Cloudのローカルdebug APKを正式品としてアップロードしない。tag pushは公開を起動する操作として扱う。
+5. 対象tag／SHAのworkflow成功に加え、公開latestのpackage・version・versionCode・既存署名・SHA・checksum sidecarを検証する。旧ReleaseのAPK asset除去と、正式版の通知設定が有効である非秘密の結果も確認する。Windows／Linuxの公開APK検証手順は参照文書に従う。
+6. 検証済みの公開APKだけを正式成果物として保存し、下記のDrive記録を終える。作成・CI・公開・実機動作を別々の証拠として報告する。
+
+失敗した検証、署名不一致、対象SHAの食い違い、解消できない認証・公開エラーを残したまま公開を続けない。失敗原因を絞って修正し、同じ未解決エラーへの無制限な再試行はしない。既存workflowの復旧結果を確認し、公開状態が不明ならその状態と次の復旧手順を記録する。復旧版はversionCodeを増やした新Releaseにする。
+
+Edge FunctionやDB側の修正が必要な場合、APKの公開だけではサーバーへ反映されない。既存の承認範囲と専用の反映・検証手順を確認し、ソース変更、サーバー反映、APK公開を区別して記録する。
+
+## Google Driveと実機
+
+- Drive内のTrackLog既存年／月フォルダー・月次文書を探して追記する。同対象・同月の記録を重複作成しない。文書とAPKの共有範囲は非公開を維持する。
+- 目的、変更、Git SHA、CI／Release、検証値、未検証事項、復旧手順を記録し、検証済み公開APK自身とSHA sidecarもDriveへ保存する。Linuxは公開検証の保存オプションを使い、検証した同一バイトを渡す。秘密鍵・APIキー・トークン・端末バックアップ・正確な座標・生の運行データは保存しない。保存後はファイルの存在・サイズ／取得可能なchecksumと文書内容を確認する。
+- Driveが使えない場合は非秘密のローカル記録を残して未反映を明記し、Drive保存完了とは扱わない。
+- 実機インストールは別の承認範囲。2026-10-01の接続端末への `adb install -r` 許可を、以後すべての端末更新の許可にしない。許可済みでも運行中はインストールせず、アンインストール・データ消去を行わない。携帯へAPKを公開しただけでは実機更新済みと報告しない。
+
+## Cloud環境を整備するとき
+
+[Cloud環境手順](../../../docs/CODEX_CLOUD.md)を読む。Node.js 22、`javac`を含むJDK 21、プロジェクト指定Android SDK／Build Toolsを確認し、非本番検証を行う。正式署名はGitHub Actions内に保持する。
+
+既存Cloud環境のInstall script／Start skillを整備し、保存・Republish後に通常の新規タスクでGit root、ツール、試験、GitHub接続、共有スキルの利用を確認する。既存タスクだけへのJDK追加やセットアップ会話だけの成功を、再利用環境の完成と扱わない。公式の環境UI／提供ツールを使い、内部APIや認証ストレージを探索しない。

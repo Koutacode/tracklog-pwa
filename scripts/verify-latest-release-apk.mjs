@@ -1,11 +1,11 @@
 import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { createReadStream } from 'node:fs';
-import { access, mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
+import { access, copyFile, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, stat } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { delimiter, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 
 // Public certificate fingerprint pinned by the existing Android Release workflow.
@@ -146,6 +146,60 @@ async function downloadPublicAsset(url, path) {
   await runCommand('curl', [...curlArguments, '--output', path, url]);
 }
 
+async function saveVerifiedArtifacts({ projectRoot, apkPath, sidecarPath, sha256, sizeBytes, sidecarBytes, confirmLatest, fileOperations }) {
+  const outputDirectory = join(resolve(projectRoot), 'output');
+  await mkdir(outputDirectory, { recursive: true });
+  if (!(await lstat(outputDirectory)).isDirectory()) throw new Error('APK output must be a real directory');
+  // Staging must share the output filesystem for atomic per-file rename.
+  // A pair of files cannot be replaced in one atomic operation: ordinary errors
+  // roll back both, while an interrupted process can require manual recovery.
+  const stage = await mkdtemp(join(outputDirectory, '.tracklog-release-apk-'));
+  let retainRecovery = false;
+  const files = [
+    { source: apkPath, destination: join(outputDirectory, ASSET_NAME), staged: join(stage, ASSET_NAME), backup: join(stage, `${ASSET_NAME}.previous`) },
+    { source: sidecarPath, destination: join(outputDirectory, `${ASSET_NAME}.sha256`), staged: join(stage, `${ASSET_NAME}.sha256`), backup: join(stage, `${ASSET_NAME}.sha256.previous`) },
+  ];
+  try {
+    for (const file of files) {
+      await fileOperations.copyFile(file.source, file.staged, constants.COPYFILE_EXCL);
+      let current;
+      try { current = await lstat(file.destination); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+      if (current && !current.isFile()) throw new Error('Existing APK output must be a regular file');
+      file.existed = Boolean(current);
+      if (file.existed) await fileOperations.copyFile(file.destination, file.backup, constants.COPYFILE_EXCL);
+    }
+    // Re-hash the actual staged bytes after all inspectors/copies. Never publish
+    // bytes that changed after the first download verification.
+    requireMatch((await stat(files[0].staged)).size, sizeBytes, 'Saved APK size');
+    requireMatch(await fileSha256(files[0].staged), sha256, 'Saved APK SHA-256');
+    requireMatch((await readFile(files[1].staged)).equals(sidecarBytes), true, 'Saved SHA-256 sidecar bytes');
+    await confirmLatest();
+    try {
+      for (const file of files) {
+        await fileOperations.rename(file.staged, file.destination);
+        file.published = true;
+      }
+    } catch (error) {
+      const recoveryErrors = [];
+      for (const file of files.toReversed()) {
+        if (!file.published) continue;
+        try {
+          if (file.existed) await fileOperations.rename(file.backup, file.destination);
+          else await rm(file.destination);
+        } catch (recoveryError) { recoveryErrors.push(recoveryError); }
+      }
+      if (recoveryErrors.length) {
+        retainRecovery = true;
+        throw new Error(`APK save rollback was incomplete; recovery files retained at ${stage}`);
+      }
+      throw error;
+    }
+    return { outputPath: files[0].destination, sidecarPath: files[1].destination, sizeBytes, fileUri: pathToFileURL(files[0].destination).href };
+  } finally {
+    if (!retainRecovery) await rm(stage, { recursive: true, force: true });
+  }
+}
+
 // Transports and inspectors are injectable for offline tests; the CLI always uses
 // HTTPS GitHub downloads and real Android tools, with no "skip verification" mode.
 export async function verifyLatestRelease({
@@ -153,6 +207,8 @@ export async function verifyLatestRelease({
   fetchRelease = fetchPublicRelease,
   download = downloadPublicAsset,
   tools,
+  save = false,
+  fileOperations = { copyFile, rename },
 }) {
   const expected = await readExpectedRelease(projectRoot);
   const inspectors = tools ?? await defaultTools();
@@ -189,26 +245,32 @@ export async function verifyLatestRelease({
     requireMatch(embedded.version, expected.version, 'Embedded APK version');
     const latestAfterDownload = validateRelease(await fetchRelease('latest'), expected);
     requireMatch(JSON.stringify(latestAfterDownload), JSON.stringify(latest), 'Latest release changed during verification');
-    return { tag: expected.tag, releaseId: latest.id, ...manifest, sha256, signerSha256, buildDate: embedded.buildDate ?? null, downloadUrl };
+    const saved = save ? await saveVerifiedArtifacts({
+      projectRoot, apkPath, sidecarPath, sha256, sizeBytes: apkInfo.size, sidecarBytes, fileOperations,
+      confirmLatest: async () => {
+        const current = validateRelease(await fetchRelease('latest'), expected);
+        requireMatch(JSON.stringify(current), JSON.stringify(latest), 'Latest release changed before saving');
+      },
+    }) : {};
+    return { tag: expected.tag, releaseId: latest.id, ...manifest, sha256, signerSha256, buildDate: embedded.buildDate ?? null, downloadUrl, ...saved };
   } finally {
-    // Only this invocation's unique temporary directory is removed. No checkout,
-    // output APK, device data, release metadata, or release assets are modified.
+    // Only this invocation's unique download directory is removed. Saving is
+    // opt-in and never modifies device data or any public release.
     await rm(workPath, { recursive: true, force: true });
   }
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  if (process.argv.length > 2) {
-    if (process.argv.length === 3 && process.argv[2] === '--help') {
-      console.log('公開latestの正式APKを読み取り検証します。Node.js 22、curl、unzip、Android Build-Tools (aapt/apksigner) とJavaが必要です。署名鍵・GitHubトークン不要。一時取得ファイルは終了時に削除し、outputのAPKを置換しません。');
-    } else {
-      console.error('Usage: node scripts/verify-latest-release-apk.mjs [--help]');
-      process.exitCode = 1;
-    }
+  if (process.argv.length === 3 && process.argv[2] === '--help') {
+    console.log('公開latestの正式APKを検証します。Node.js 22、curl、unzip、Android Build-Tools (aapt/apksigner) とJavaが必要です。署名鍵・GitHubトークン不要。既定は読み取り検証のみ。--save は全検証成功後だけ同じAPKとSHA-256 sidecarを固定のoutputへ保存します。通常エラー時は既存2ファイルを復元します。2ファイル同時のatomic置換はできないため、プロセス中断・復元失敗時はoutput配下に残った専用一時フォルダーから手動復旧が必要です。');
+  } else if (process.argv.length > 3 || (process.argv.length === 3 && process.argv[2] !== '--save')) {
+    console.error('Usage: node scripts/verify-latest-release-apk.mjs [--save | --help]');
+    process.exitCode = 1;
   } else {
     try {
-      const result = await verifyLatestRelease({ projectRoot: fileURLToPath(new URL('..', import.meta.url)) });
-      console.log('公開latest APKの読み取り検証に成功（一時取得ファイルは削除済み）');
+      const save = process.argv[2] === '--save';
+      const result = await verifyLatestRelease({ projectRoot: fileURLToPath(new URL('..', import.meta.url)), save });
+      console.log(save ? '公開latest APKの検証とoutputへの保存に成功' : '公開latest APKの読み取り検証に成功（一時取得ファイルは削除済み）');
       console.log(JSON.stringify(result, null, 2));
     } catch (error) {
       console.error(`公開APK検証失敗: ${error.message}`);
