@@ -83,4 +83,94 @@ SCG34は更新直前にnative/WebView/ホームで運行なしを再確認し、
 
 この工程は公開済みアプリの実行コード/バージョンを変更せず、Cloud開発・検証手順を整備する。Cloud環境のPublish/Republishと通常タスクの受入結果、Drive保存結果は後続で追記する。
 
+Cloud手順PR [#13](https://github.com/Koutacode/tracklog-pwa/pull/13) / `ee0ccf6a0d8e997e9f3ebbcabfaa6c4d2493aeaa` とmain `da16fa6bb80cb970b8815ee30c0b632d3fda9524`のCI（36794024378 / 36794278123）は全3 jobs success。Linuxオフラインsetup境界と実JDK/SDK preflight、Android単体/コンパイルも成功。共有skillのquick_validateも成功した。
+
+既存非公開Cloud環境「TrackLog-修復」を公式UIで編集し、Install scriptにrepoセットアップ、Start skillに共有skillと承認範囲・検証/公開/Drive手順を保存。`TRACKLOG_CLOUD_DEV_ROOT=/workspace/tracklog-tools/cloud-dev` とその `taskdev-env.sh` を使う。再公開は画面で `Environment published` / `Published` を確認した。ただしセットアップ会話は再公開前後とも実行開始前に `Unable to determine project root for task` となり、Cloudの実JDK/SDK導入・同環境でのAndroidコンパイル・Linux公開APK実検証は未確認。CIの成功と区別する。設定UIにrepository mount_path編集欄は見つからず、内部API探索や別cloneで迂回していない。
+
+新しい通常Cloudチャットの受入試験について利用者から「Cloudチャットを作成して検証する」と明示回答を受けた。再公開済み「TrackLog-修復」で通常タスク開始を試したが、同じroot特定エラーで実行前に失敗し、通常タスクのIDは作成されなかった。元の入力下書きは復元し、空白を正規化した内容一致を確認した。
+
+既存環境を残し、公式作成UIで同じ `Koutacode/tracklog-pwa` / mainを選んで新規セットアップを開始した。セットアップチャット `01a0f4d2-29e2-7420-9e82-b832e6ae208b` は09:16 JSTにコマンド実行まで進んだ。既存環境固有の問題かを比較する試験であり、まだ通常タスクの受入成功とは扱わない。新環境名は「TrackLog-APK」、非公開を維持し、アプリ変更・新Releaseを作らないよう依頼した。Cloudは基本的に高速モードが使えないという利用者の補足も共有skillとガイドへ反映した。
+
+新規セットアップは09:27 JSTに完了。Node 22.23.3、完全なJDK 21.0.12.1/javac、SDK 36/Build Tools 36.0.0、gh 2.46.0を実確認し、基本6検証・同期19件・offline37資産・Capacitor sync、Android単体85件（失敗/skip0）・本体/androidTest APKコンパイルが成功した。再実行も12秒/200 tasks up-to-dateで成功。公開Linux verifierは初回GitHub API取得失敗後の再実行exit0で、公開v0.1.64/code62、7,422,451 bytes、既存署名と上記SHAが一致して正式outputへ保存された。Git追跡差分はなし、新Release/tag/pushも行っていない。
+
+Node公式配布先403はnpm integrity付き配布、JDKは署名/パッケージ検証付きDebian取得で準備した専用パスを使用。SDK/Gradleも専用パスを使い、実行時プロキシのホスト/ポートのみGradle設定へ渡す。HOMEは置換しない。Androidツールの固定`.android`書込先はCloudの正規権限要求で準備し、同じ制限が後続で生じる場合も迂回しない。Install script/Start skillは再実行済み、署名鍵/本番Secrets/端末データを移していない。Cloud検証専用のdebug keystoreは正式署名とは別物。取得・検証に必要な公式配布先15ドメインだけを追加許可した。
+
+親側が公式UIで環境名「TrackLog-APK」・利用者「自分のみ」を確認し、設定保存後にPublish。09:30前後に `Environment published` / `Published` を確認した。しかし、この公開環境を選択した通常Cloudチャットは `Unable to determine project root for task` で開始前に失敗した。公開前から開いていたホーム画面を再読み込みし、環境名と入力を再確認した最後の比較試験も同じエラーとなった。通常タスクID、push dry-run、通常タスクでのDrive能力確認は作成/実行されていない。元の下書きは両試験後に復元し、空白を正規化した一致を確認した。
+
+通常Cloudの再利用受入は未完了。推論量「軽」とは別の開始前エラーであり、ツール導入/設定公開/セットアップ成功を通常タスクの復旧と扱わない。公式Docs/Helpに、このエラーのrepo mountを修復する専用手順は見つからず、公式UI/提供ツールにmount_path編集手段も見つからなかった。内部API/認証ストレージ/別cloneの回避を行わず、未解決エラーの無制限再試行は停止。非秘密の再現資料は [Cloud開始障害の引き継ぎ](CLOUD_START_BLOCKER_2026-10-01.md) に保存した。OpenAIサポートへは未送信。
+
+実際の推論量の設定は変更済みとは報告しない。単純setup/検証は軽でも実行可能、複雑な同期/SQL/認証設計・公開前レビューは利用可能な高を基本とする方針を共有skillとStart skillに保存した。携帯は更新/QA完了後に利用者が接続解除すると連絡したため、以後実機接続を前提とした追加作業はしない。
+
+正式APKとSHA sidecarを [Drive v0.1.64保管フォルダー](https://drive.google.com/drive/folders/1EBCMfIoQ0E3hR7AS_1BcSuGQuvm1by8X) へ保存した（TrackLog/30_リリース・検証/2026/10/v0.1.64）。両ファイル非公開、ownerのみ。DriveからAPKを再取得し7,422,451 bytes / SHA-256が公開・ローカル・端末と完全一致、sidecarも読み戻し一致。既存[10月月次ログ](https://docs.google.com/document/d/1NdOdWZS8nmvOArd8anaCr7qcPP1v3vS_rtWGXp_d8bk/edit)へ公開・端末保持・Drive保存を追記し、既存全文保持/重複なしを確認した。
+
+### APK導入後のDB集計観測
+
+2026-10-01 09:07:15 JST、read-only transactionで1回だけ集計値を取得。project/健康/統計開始を確認した。同queryid、同stats_sinceの基準からcalls1,479→1,530、累積平均228.048→226.466ms、shared read4,828→4,828、dirtied23,862→23,961、written2,590→2,591、WAL97,792,444→98,005,309 bytes。差分51回の平均は180.589ms。
+
+位置テーブルのサイズは不変、receipt総サイズは8,192 bytes増加。profile updateは112増加し全件HOT。これらは基準から約7時間25分の累積差分で、旧APKの稼働時間も含む。統計resetはしていない。APK導入後の実走やDisk IO Budget削減率を証明しない。行数は基準時のCOUNT値を使用し、今回全件COUNTを繰り返さない。最新の推定値と正確なCOUNTを混同しない。
+
 復旧はアプリ側の対象変更を戻してversionCodeを増やした新Releaseを同じ手順で公開する。DB関数の復旧SQLは `docs/sql/rollback-tracklog-sync-v2-reduce-disk-io.sql`。インデックス/既存receipt/運行データを削除せず、Freeプランを維持した。
+
+## 変更ファイル一覧
+
+統合APK公開とCloud整備（基準92172ac → 公開tag v0.1.64とCloud手順main da16fa6）の対象。以下の主一覧55件と後続測定1件が、基準から記録commit 7b3c9d9までのGit追跡差分56件に一致する。今回対象外の未追跡2件は含めない。追加の開始障害文書は一覧末尾へ分けて記録する。
+
+- .agents/skills/tracklog-cloud-release/SKILL.md
+- .agents/skills/tracklog-cloud-release/agents/openai.yaml
+- .github/workflows/ci.yml
+- AGENTS.md
+- android/app/src/main/java/com/tracklog/assist/ResidentLocationService.java
+- android/app/src/main/java/com/tracklog/assist/ResidentLocationState.java
+- android/app/src/main/java/com/tracklog/assist/ResidentRoutePersistencePolicy.java
+- android/app/src/test/java/com/tracklog/assist/ResidentRoutePersistencePolicyTest.java
+- android/gradle.properties
+- docs/ANDROID.md
+- docs/CODEX_CLOUD.md
+- docs/INTEGRATED_APK_RELEASE_2026-10-01.md
+- docs/PHONE_CLOUD_RELEASE.md
+- docs/REPAIR_2026-10-01.md
+- docs/SUPABASE_DISK_IO_2026-10-01.md
+- docs/measurements/supabase-disk-io-2026-10-01.json
+- docs/sql/measure-tracklog-disk-io.sql
+- docs/sql/rollback-tracklog-sync-v2-reduce-disk-io.sql
+- package-lock.json
+- package.json
+- scripts/setup-tracklog-cloud.sh
+- scripts/test-setup-tracklog-cloud.sh
+- scripts/test-tracklog-sync-v2.mjs
+- scripts/verify-latest-release-apk.mjs
+- scripts/verify-latest-release-apk.test.mjs
+- src/app/IcResolverJob.tsx
+- src/app/RemoteSyncBootstrap.tsx
+- src/db/db.ts
+- src/db/reportRepository.test.ts
+- src/db/reportRepository.ts
+- src/db/repositories.ts
+- src/domain/reportLogic.ts
+- src/domain/reportRecordedBoundaries.ts
+- src/domain/reportResolvedIc.test.ts
+- src/domain/reportResolvedIc.ts
+- src/domain/reportSnapshotCompleteness.ts
+- src/domain/reportSourceEvents.ts
+- src/domain/types.ts
+- src/services/expresswayIcResolution.test.ts
+- src/services/expresswayIcResolution.ts
+- src/services/expresswayIcRetryPolicy.ts
+- src/services/remoteSync.ts
+- src/services/remoteSyncScheduler.test.ts
+- src/services/remoteSyncScheduler.ts
+- src/services/remoteSyncV2.test.ts
+- src/services/remoteSyncV2.ts
+- src/services/routeTracking.test.ts
+- src/services/routeTracking.ts
+- src/ui/screens/HistoryScreen.tsx
+- src/ui/screens/ReportDashboard.tsx
+- src/ui/screens/TripDetail.tsx
+- src/ui/screens/TripRecordedTimes.tsx
+- src/ui/screens/tripRecordedTimes.test.tsx
+- src/ui/styles/global.css
+- supabase/migrations/20260930165335_tracklog_sync_v2_reduce_disk_io.sql
+
+後続の測定記録で追加したファイル: `docs/measurements/supabase-disk-io-post-apk-2026-10-01.json`。文書上のCloud受入確認は未完了の状態をそのまま保持する。
+
+新規Cloudでも再現した開始前エラーの引き継ぎで追加したファイル: `docs/CLOUD_START_BLOCKER_2026-10-01.md`（合計57件）。

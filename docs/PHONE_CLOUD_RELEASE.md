@@ -4,6 +4,8 @@
 
 共通手順は [tracklog-cloud-release skill](../.agents/skills/tracklog-cloud-release/SKILL.md)。Cloudでは合成データを使い、本番の秘密情報・署名鍵・端末DB・画像・正確な座標を持ち込まない。
 
+Cloudは通常の利用可能な速度設定で進める。基本的に高速モードが使えないという利用者の補足（2026-10-01）を運用前提とし、高速モード／Ultrafastを公開の必須条件にしない。
+
 ## 1. 通常Cloudタスクで準備を確認する
 
 修正したい操作、期待する表示、実際の症状を日本語で依頼する。最新main、既存変更、Git root、`AGENTS.md`、共有skillを確認して修正ブランチで作業する。Cloudタスクは隔離済みなので通常は追加worktreeを作らない。他タスクとの同時変更があれば内容を照合して統合する。

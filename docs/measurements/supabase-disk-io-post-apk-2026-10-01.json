@@ -1,0 +1,220 @@
+{
+  "schemaVersion": 1,
+  "purpose": "APK導入後に一度だけ取得した本番の集計統計。比較期間全体がAPK導入後に限定されているわけではない。",
+  "project": {
+    "id": "jwqafxtphulkjhfmvwro",
+    "name": "tracklog-assist",
+    "status": "ACTIVE_HEALTHY",
+    "region": "ap-southeast-1",
+    "databaseVersion": "17.6.1.084"
+  },
+  "measuredAtJst": "2026-10-01T09:07:15.972+09:00",
+  "readOnlyVerification": {
+    "measured_at": "2026-10-01 00:06:55.037598+00",
+    "server_version": "17.6",
+    "transaction_read_only": "on",
+    "can_read_all_stats": true,
+    "postmaster_started_at": "2026-09-28 10:40:07.185375+00",
+    "pg_stat_statements_version": "1.11",
+    "statistics_schema": "extensions",
+    "applicationRowsSelected": false,
+    "rpcInvoked": false,
+    "exactCountScanPerformed": false,
+    "statisticsResetPerformed": false,
+    "ddlOrSettingsChanged": false
+  },
+  "baselineFile": "docs/measurements/supabase-disk-io-2026-10-01.json",
+  "previouslyMeasuredExactCounts": {
+    "measuredAtUtc": "2026-09-30 16:54:03.410192+00",
+    "counts": {
+      "trip_route_points": 268489,
+      "tracklog_sync_mutations": 280602
+    },
+    "remeasured": false
+  },
+  "currentSnapshot": {
+    "tables": [
+      {
+        "relname": "device_profiles",
+        "n_tup_del": 0,
+        "n_tup_ins": 0,
+        "n_tup_upd": 5199,
+        "heap_bytes": 16384,
+        "n_dead_tup": 4,
+        "n_live_tup": 4,
+        "index_bytes": 81920,
+        "last_vacuum": null,
+        "table_bytes": 57344,
+        "total_bytes": 139264,
+        "last_analyze": null,
+        "n_tup_hot_upd": 3167,
+        "last_autovacuum": "2026-09-30T05:40:25.665492+00:00",
+        "last_autoanalyze": "2026-10-01T00:03:17.470068+00:00",
+        "reltuples_estimate": 4
+      },
+      {
+        "relname": "tracklog_sync_mutations",
+        "n_tup_del": 0,
+        "n_tup_ins": 19036,
+        "n_tup_upd": 0,
+        "heap_bytes": 107577344,
+        "n_dead_tup": 0,
+        "n_live_tup": 19036,
+        "index_bytes": 23683072,
+        "last_vacuum": null,
+        "table_bytes": 107642880,
+        "total_bytes": 131325952,
+        "last_analyze": null,
+        "n_tup_hot_upd": 0,
+        "last_autovacuum": null,
+        "last_autoanalyze": null,
+        "reltuples_estimate": 259288
+      },
+      {
+        "relname": "trip_route_points",
+        "n_tup_del": 0,
+        "n_tup_ins": 18708,
+        "n_tup_upd": 0,
+        "heap_bytes": 69730304,
+        "n_dead_tup": 0,
+        "n_live_tup": 18708,
+        "index_bytes": 100999168,
+        "last_vacuum": null,
+        "table_bytes": 69787648,
+        "total_bytes": 170786816,
+        "last_analyze": null,
+        "n_tup_hot_upd": 0,
+        "last_autovacuum": null,
+        "last_autoanalyze": null,
+        "reltuples_estimate": 247295
+      }
+    ],
+    "statements": [
+      {
+        "rows": 1530,
+        "calls": 1530,
+        "queryid": "4020878061196523857",
+        "wal_fpi": 21357,
+        "toplevel": true,
+        "wal_bytes": "98005309",
+        "stats_since": "2026-09-28T13:17:16.555094+00:00",
+        "wal_records": 242572,
+        "max_exec_time": 5648.308437,
+        "min_exec_time": 1.284688,
+        "mean_exec_time": 226.4663753,
+        "temp_blks_read": 0,
+        "shared_blks_hit": 2185968,
+        "total_exec_time": 346493.554209,
+        "shared_blks_read": 4828,
+        "temp_blks_written": 0,
+        "shared_blks_dirtied": 23961,
+        "shared_blks_written": 2591
+      }
+    ],
+    "measured_at_utc": "2026-10-01T00:07:15.972332+00:00",
+    "database_stats_reset": null,
+    "postmaster_started_at": "2026-09-28T10:40:07.185375+00:00",
+    "transaction_read_only": "on",
+    "pg_stat_statements_info": {
+      "dealloc": 0,
+      "stats_reset": "2026-09-28T10:36:39.423368+00:00"
+    }
+  },
+  "comparison": {
+    "statementIdentity": {
+      "queryid": "4020878061196523857",
+      "matchingStatementRows": 1,
+      "sameStatsSince": true,
+      "nonDecreasingCumulativeCounters": true,
+      "globalStatsResetKnownForBaseline": false
+    },
+    "fromUtc": "2026-09-30 16:42:33.142048+00",
+    "toUtc": "2026-10-01T00:07:15.972332+00:00",
+    "elapsedSeconds": 26682.83,
+    "statementDelta": {
+      "calls": 51,
+      "total_exec_time": 9210.015552000026,
+      "rows": 51,
+      "shared_blks_hit": 43337,
+      "shared_blks_read": 0,
+      "shared_blks_dirtied": 99,
+      "shared_blks_written": 1,
+      "temp_blks_read": 0,
+      "temp_blks_written": 0,
+      "wal_records": 486,
+      "wal_bytes": "212865",
+      "mean_exec_time_ms": 180.58854023529463,
+      "wal_bytes_per_call": 4173.823529411765
+    },
+    "tableDeltas": [
+      {
+        "table": "device_profiles",
+        "fromUtc": "2026-09-30 16:42:30.43416+00",
+        "sizeBytesDelta": {
+          "heap_bytes": 0,
+          "table_bytes": 0,
+          "index_bytes": 0,
+          "total_bytes": 0
+        },
+        "cumulativeCounterDeltaIfNoTableStatsReset": {
+          "n_tup_ins": 0,
+          "n_tup_upd": 112,
+          "n_tup_del": 0,
+          "n_tup_hot_upd": 112
+        },
+        "tableStatsResetContinuityVerified": false
+      },
+      {
+        "table": "tracklog_sync_mutations",
+        "fromUtc": "2026-09-30 16:42:30.43416+00",
+        "sizeBytesDelta": {
+          "heap_bytes": 8192,
+          "table_bytes": 8192,
+          "index_bytes": 0,
+          "total_bytes": 8192
+        },
+        "cumulativeCounterDeltaIfNoTableStatsReset": {
+          "n_tup_ins": 15,
+          "n_tup_upd": 0,
+          "n_tup_del": 0,
+          "n_tup_hot_upd": 0
+        },
+        "tableStatsResetContinuityVerified": false
+      },
+      {
+        "table": "trip_route_points",
+        "fromUtc": "2026-09-30 16:42:30.43416+00",
+        "sizeBytesDelta": {
+          "heap_bytes": 0,
+          "table_bytes": 0,
+          "index_bytes": 0,
+          "total_bytes": 0
+        },
+        "cumulativeCounterDeltaIfNoTableStatsReset": {
+          "n_tup_ins": 0,
+          "n_tup_upd": 0,
+          "n_tup_del": 0,
+          "n_tup_hot_upd": 0
+        },
+        "tableStatsResetContinuityVerified": false
+      }
+    ],
+    "cumulativeMeanBeforeMs": 228.048369612576,
+    "cumulativeMeanAfterMs": 226.4663753
+  },
+  "limitations": [
+    "比較期間は最適化前baselineから現在までであり、APK導入前の時間も含む。この測定担当にはAPK導入時刻を指定されていない。",
+    "queryidと各entryのstats_sinceが同じなのでstatement累積差分を計算した。baselineにはpg_stat_statements全体のreset時刻がない。",
+    "個別table統計のreset履歴が得られないためtable書込み差分は個別resetなしが前提。取得した累積書込みcounterはすべて非減少。",
+    "n_live_tupとpg_class.reltuplesは推定値であり、過去の実測COUNTとは異なる。今回はCOUNT全件走査を行っていない。",
+    "実走行、合成mutation、本番RPC試験呼出し、位置点保存間隔の再走査は実施していない。",
+    "累積および差分区間の平均実行時間は負荷内容、cache、端末活動の影響を受けるため、最適化の因果効果を証明しない。",
+    "shared_blks_readはPostgreSQLのshared buffer miss数であり、物理disk読取りとOS cache読取りを区別できない。",
+    "Disk IO Budgetの実使用量とAPK導入後だけのエラー率は測定していない。本番削減率は断定しない。",
+    "device_profilesの更新counterはRPC以外の経路も含む。112更新をsync_v2単独の更新回数として扱わない。"
+  ],
+  "documentation": [
+    "https://supabase.com/docs/guides/observability/inspect",
+    "https://supabase.com/docs/guides/database/extensions/pg_stat_statements"
+  ]
+}
