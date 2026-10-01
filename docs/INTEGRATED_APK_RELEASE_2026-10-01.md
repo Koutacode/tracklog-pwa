@@ -64,3 +64,23 @@ PR #12の初回CI（run 36791477150 / HEAD 575d596）はAndroid・temporary-work
 今回の公開APKは接続携帯へinstall -rで導入する。更新前はSCG34 / v0.1.63 / code61、nativeとWebViewのactive tripなし、初回install日時を確認し、既定output/device-backupへ退避した。退避は稼働中取得で復元試験は未実施。
 
 公開・実機更新後に、Cloudでの編集からpush・正式workflow公開・照合・Drive保存までを再現可能にする環境と共有専用スキルを整備すること、今後のTrackLog改善のpush/公開を任せること、正式APKとSHAをGoogle Driveにも保存することが利用者から明示された。署名鍵や端末退避データはDrive保存対象に含めない。
+
+## 正式公開と接続端末の更新結果
+
+修正後commit `52e36a0c7181f37462da5914fe7f32270ef4b271` のPR [#12](https://github.com/Koutacode/tracklog-pwa/pull/12)で全CI成功（36792593148）。mainへ統合した `468f86c8267a9a44d2611e1114a6f56cb425715b` のCIも全成功（36792798288）。71 logic commands、同期19件、型検査、CSP、build/offline、Android単体・コンパイルと一時領域安全性を確認した。
+
+同じmain SHAのtag `v0.1.64` / versionCode 62で [Android Release 36793176739](https://github.com/Koutacode/tracklog-pwa/actions/runs/36793176739) が全工程成功。2026-10-01 08:53:52 JSTに通常Releaseを公開し、draft再取得・固定署名・公開latest/sidecar照合・旧Release APK資産除去まで成功。API再確認で旧APK/sidecar資産0件。正式ビルドのFCM登録有効を非秘密の実行結果で確認した。
+
+Windows `npm run release:verify:apk -- -Tag v0.1.64`が成功し、同じ公開APKでoutputを更新。公開SHA sidecarも独立取得して一致した。package `com.tracklog.assist`、version 0.1.64、code62、7,422,451 bytes、APK SHA-256 `f3a90bb274e4cfef76909104cf30e50f515cfcf0b13eccd6f662e1f6997787c1`、従来署名 `14121cbf70043af3bd2fe17dd57833ed51b7f5dbf326459dde6b830f07cbb99c`。会社配布URLは既定latest URLのみ。
+
+SCG34は更新直前にnative/WebView/ホームで運行なしを再確認し、08:57:56 JSTに `adb install -r` 成功。端末APK SHA・署名・version/code一致、firstInstallTime不変。既存events1,747、routePoints265,822、reports16、削除tombstone69/11/16を保持し、ログイン・承認・native readiness正常。位置/背景位置/通知/Exact Alarmと電池最適化除外を維持。バックグラウンドでもprocess/foreground serviceを維持し、運行外のGPS listener0、位置点・最終受理/書き込み時刻不変、queue0、保存失敗0。取得ログのFATAL/crash/ANR0。ホームに戻し、ADB forwardと検証用一時領域は片付けた。
+
+端末退避 `output/device-backup/pre-v0.1.64-20261001.tar`（200,221,184 bytes / SHA-256 `3cb08892f43801cd1f76a23383f0b8ee0ede59b21b4523752bb2f65ecb3990e4`）はローカルのみ保持。稼働中退避・復元未試験。実走、実通知受信、複数端末の実E2E、通信断/OS強制終了からの復旧は未検証であり、単体試験やidle確認で代用したとは扱わない。
+
+## Cloud公開手順の整備
+
+共有スキル `.agents/skills/tracklog-cloud-release/`、Linuxセットアップ/オフライン境界試験、公開APK検証の `--save` を追加。既存41件のAPK fixtureとセットアップ7 groupsが成功した。JREのみ、不正JAVA_HOME、Node版違い、SDK/aapt不足、npm ci失敗を成功と報告しない。検証した同一APKとsidecarだけを固定outputへ保存し、途中失敗で既存ファイルを復元する。2ファイル同時atomicや強制終了時の自動復旧は保証せず、必要時は残った専用stagingから復旧する。
+
+この工程は公開済みアプリの実行コード/バージョンを変更せず、Cloud開発・検証手順を整備する。Cloud環境のPublish/Republishと通常タスクの受入結果、Drive保存結果は後続で追記する。
+
+復旧はアプリ側の対象変更を戻してversionCodeを増やした新Releaseを同じ手順で公開する。DB関数の復旧SQLは `docs/sql/rollback-tracklog-sync-v2-reduce-disk-io.sql`。インデックス/既存receipt/運行データを削除せず、Freeプランを維持した。

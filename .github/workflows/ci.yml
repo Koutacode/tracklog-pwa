@@ -27,6 +27,8 @@ jobs:
       - run: npm run test:logic
       - run: npm run test:sync
       - run: npm run test:release-apk
+      - name: Verify Cloud setup safeguards without network or installations
+        run: bash scripts/test-setup-tracklog-cloud.sh
       - run: npm run check:csp
       - run: npm run build
       - run: npm run check:offline
@@ -50,6 +52,8 @@ jobs:
         with:
           packages: 'platform-tools platforms;android-36 build-tools;36.0.0'
       - run: npm ci
+      - name: Verify the Cloud toolchain preflight with the provisioned JDK and SDK
+        run: bash scripts/setup-tracklog-cloud.sh --check
       - run: npm run build
       - run: npm run cap:sync:android
       - name: Compile Android and run local unit tests without production configuration
