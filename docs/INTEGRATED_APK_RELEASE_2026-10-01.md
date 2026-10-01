@@ -107,6 +107,10 @@ Node公式配布先403はnpm integrity付き配布、JDKは署名/パッケー�
 
 2026-10-01 09:51前後の追記: 利用者の「許可」により、公式Help Centerへ非秘密の再現資料を送信した。仮想アシスタントの案内で環境画面からの開始を1回比較したが、ホーム画面と同じroot特定エラーを確認。両環境／両経路の結果を返し、人間の担当者へのエスカレーションを操作して `Escalation requested` / `Escalated to a support specialist` を確認した。受付番号は未表示、数日以内の返信とメール通知が案内され、通常Cloud受入はまだ未完了。[送信と追加試験の詳細](CLOUD_START_BLOCKER_2026-10-01.md#公式サポートへの送信と追加試験)に記録した。アプリの正式v0.1.64公開・実機更新・Drive保存は完了済み。利用者の追加指示「最終的に公開まで」と、今後の改善依頼を正式公開まで進める共有skillの承認範囲を維持する。サポート資料の追記で新APKを作らない。
 
+### Cloud環境の保存構成を再公開
+
+2026-10-01 10:24〜10:26ごろ、利用者の依頼により、親の公式UIで `TrackLog-APK` / repo `Koutacode/tracklog-pwa` / 利用範囲 `自分のみ` と保存済みInstall script/Start skillを確認。今回の保存構成で「公開」を実行し、`Environment published` / `Published` を確認した。通常Cloudの受入開始は公開直後の1回でも `Unable to determine project root for task` となり、入力を片付けた。Publish完了と通常チャット開始障害は別の結果として扱う。[追加確認の詳細](CLOUD_START_BLOCKER_2026-10-01.md#保存構成の再公開と親チャットでの記録反映)を保持し、既存月次Driveログへ1件追記して既存全文の保持と読み戻しを確認した。サポート調査は継続し、既存APKの再公開・再導入・Drive重複保存は行わない。
+
 ### APK導入後のDB集計観測
 
 2026-10-01 09:07:15 JST、read-only transactionで1回だけ集計値を取得。project/健康/統計開始を確認した。同queryid、同stats_sinceの基準からcalls1,479→1,530、累積平均228.048→226.466ms、shared read4,828→4,828、dirtied23,862→23,961、written2,590→2,591、WAL97,792,444→98,005,309 bytes。差分51回の平均は180.589ms。
