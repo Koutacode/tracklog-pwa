@@ -4,6 +4,10 @@
 
 共通手順はリポジトリ内の [tracklog-cloud-release skill](../.agents/skills/tracklog-cloud-release/SKILL.md) と [携帯からの公開手順](PHONE_CLOUD_RELEASE.md) を参照する。ローカルPCの個人skillはCloudへ自動同期されない。未コミット・未pushの変更もCloudには渡らない。
 
+Cloudは基本的に高速モードが使えないという利用者の前提（2026-10-01）に従い、利用可能な通常の速度設定で作業する。高速モード／Ultrafastを環境作成や公開の条件にしない。推論の深さの設定とは区別する。
+
+単純な環境構築・検証実行は「軽」でも進められるが、同期・SQL・認証の設計や公開前レビューは利用可能な「高」を基本にする。Start skill内の希望設定と、実際のチャットで選択されている推論量を区別する。[公式の推論量ガイド](https://developers.openai.com/api/docs/guides/reasoning)
+
 ## 環境の準備と公開
 
 既存のTrackLog環境を編集して再利用し、利用範囲は自分のみを基本とする。セットアップ会話では対象Git rootを確認してから次を実行する。

@@ -87,7 +87,9 @@ Cloud手順PR [#13](https://github.com/Koutacode/tracklog-pwa/pull/13) / `ee0ccf
 
 既存非公開Cloud環境「TrackLog-修復」を公式UIで編集し、Install scriptにrepoセットアップ、Start skillに共有skillと承認範囲・検証/公開/Drive手順を保存。`TRACKLOG_CLOUD_DEV_ROOT=/workspace/tracklog-tools/cloud-dev` とその `taskdev-env.sh` を使う。再公開は画面で `Environment published` / `Published` を確認した。ただしセットアップ会話は再公開前後とも実行開始前に `Unable to determine project root for task` となり、Cloudの実JDK/SDK導入・同環境でのAndroidコンパイル・Linux公開APK実検証は未確認。CIの成功と区別する。設定UIにrepository mount_path編集欄は見つからず、内部API探索や別cloneで迂回していない。
 
-新しい通常Cloudチャットの受入試験について利用者へ質問中。新規チャット作成の明示依頼が必要なツール規則によるもので、push/公開承認を求め直していない。回答前に普通の新規チャットを作らない。
+新しい通常Cloudチャットの受入試験について利用者から「Cloudチャットを作成して検証する」と明示回答を受けた。再公開済み「TrackLog-修復」で通常タスク開始を試したが、同じroot特定エラーで実行前に失敗し、通常タスクのIDは作成されなかった。元の入力下書きは復元し、空白を正規化した内容一致を確認した。
+
+既存環境を残し、公式作成UIで同じ `Koutacode/tracklog-pwa` / mainを選んで新規セットアップを開始した。セットアップチャット `01a0f4d2-29e2-7420-9e82-b832e6ae208b` は09:16 JSTにコマンド実行まで進んだ。既存環境固有の問題かを比較する試験であり、まだ通常タスクの受入成功とは扱わない。新環境名は「TrackLog-APK」、非公開を維持し、アプリ変更・新Releaseを作らないよう依頼した。Cloudは基本的に高速モードが使えないという利用者の補足も共有skillとガイドへ反映した。
 
 正式APKとSHA sidecarを [Drive v0.1.64保管フォルダー](https://drive.google.com/drive/folders/1EBCMfIoQ0E3hR7AS_1BcSuGQuvm1by8X) へ保存した（TrackLog/30_リリース・検証/2026/10/v0.1.64）。両ファイル非公開、ownerのみ。DriveからAPKを再取得し7,422,451 bytes / SHA-256が公開・ローカル・端末と完全一致、sidecarも読み戻し一致。既存[10月月次ログ](https://docs.google.com/document/d/1NdOdWZS8nmvOArd8anaCr7qcPP1v3vS_rtWGXp_d8bk/edit)へ公開・端末保持・Drive保存を追記し、既存全文保持/重複なしを確認した。
 
