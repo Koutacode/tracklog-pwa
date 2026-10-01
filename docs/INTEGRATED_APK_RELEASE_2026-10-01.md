@@ -103,6 +103,10 @@ Node公式配布先403はnpm integrity付き配布、JDKは署名/パッケー�
 
 正式APKとSHA sidecarを [Drive v0.1.64保管フォルダー](https://drive.google.com/drive/folders/1EBCMfIoQ0E3hR7AS_1BcSuGQuvm1by8X) へ保存した（TrackLog/30_リリース・検証/2026/10/v0.1.64）。両ファイル非公開、ownerのみ。DriveからAPKを再取得し7,422,451 bytes / SHA-256が公開・ローカル・端末と完全一致、sidecarも読み戻し一致。既存[10月月次ログ](https://docs.google.com/document/d/1NdOdWZS8nmvOArd8anaCr7qcPP1v3vS_rtWGXp_d8bk/edit)へ公開・端末保持・Drive保存を追記し、既存全文保持/重複なしを確認した。
 
+### サポート送信の後続記録
+
+2026-10-01 09:51前後の追記: 利用者の「許可」により、公式Help Centerへ非秘密の再現資料を送信した。仮想アシスタントの案内で環境画面からの開始を1回比較したが、ホーム画面と同じroot特定エラーを確認。両環境／両経路の結果を返し、人間の担当者へのエスカレーションを操作して `Escalation requested` / `Escalated to a support specialist` を確認した。受付番号は未表示、数日以内の返信とメール通知が案内され、通常Cloud受入はまだ未完了。[送信と追加試験の詳細](CLOUD_START_BLOCKER_2026-10-01.md#公式サポートへの送信と追加試験)に記録した。アプリの正式v0.1.64公開・実機更新・Drive保存は完了済み。利用者の追加指示「最終的に公開まで」と、今後の改善依頼を正式公開まで進める共有skillの承認範囲を維持する。サポート資料の追記で新APKを作らない。
+
 ### APK導入後のDB集計観測
 
 2026-10-01 09:07:15 JST、read-only transactionで1回だけ集計値を取得。project/健康/統計開始を確認した。同queryid、同stats_sinceの基準からcalls1,479→1,530、累積平均228.048→226.466ms、shared read4,828→4,828、dirtied23,862→23,961、written2,590→2,591、WAL97,792,444→98,005,309 bytes。差分51回の平均は180.589ms。
