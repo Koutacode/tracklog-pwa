@@ -182,3 +182,7 @@ Node公式配布先403はnpm integrity付き配布、JDKは署名/パッケー�
 後続の測定記録で追加したファイル: `docs/measurements/supabase-disk-io-post-apk-2026-10-01.json`。文書上のCloud受入確認は未完了の状態をそのまま保持する。
 
 新規Cloudでも再現した開始前エラーの引き継ぎで追加したファイル: `docs/CLOUD_START_BLOCKER_2026-10-01.md`（合計57件）。
+
+## Cloudツール導入の追加確認（2026-10-01 12:20 JST）
+
+利用者の明示依頼を受け、公式プラグイン画面/Plugin ManagementとCloud入力欄でGoogle Driveの既存接続・候補表示・実プラグインチップ指定を確認した。最小の読取受入は開始前のroot特定エラーで停止し、Drive実使用は未検証。Computer/browser useの公式Cloud制限と区別して、[Cloud手順](CODEX_CLOUD.md)と[開始障害の記録](CLOUD_START_BLOCKER_2026-10-01.md)へ反映した。既存サポートへ追加の非秘密再現情報を送信、既存Drive月次ログへ記録・読み戻し済み。APK、アプリ本体、DB、端末、接続権限、環境構成に追加変更はない。
