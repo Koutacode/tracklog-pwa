@@ -13,6 +13,7 @@ const SESSION_KEYS = [
   'unloadSessionId',
   'expresswaySessionId',
   'ferrySessionId',
+  'workSessionId',
 ] as const;
 
 const EDITABLE_BASIC_DEFINITIONS = PERSISTED_BASIC_TOGGLE_DEFINITIONS.filter(

@@ -95,6 +95,8 @@ const KNOWN_EVENT_TYPES: Set<EventType> = new Set([
   'expressway_start',
   'expressway_end',
   'point_mark',
+  'work_start',
+  'work_end',
 ]);
 
 const REMOTE_ROUTE_POINT_SOURCES: Set<RoutePoint['source']> = new Set([
@@ -682,6 +684,7 @@ const STATUS_TOGGLE_DEFINITIONS: ReadonlyArray<{
   { definition: PERSISTED_BASIC_TOGGLE_DEFINITIONS[1], status: '休憩中' },
   { definition: PERSISTED_BASIC_TOGGLE_DEFINITIONS[2], status: '積込中' },
   { definition: PERSISTED_BASIC_TOGGLE_DEFINITIONS[3], status: '荷卸中' },
+  { definition: PERSISTED_BASIC_TOGGLE_DEFINITIONS[5], status: 'その他作業中' },
 ];
 
 function inferLatestStatus(events: AppEvent[]) {

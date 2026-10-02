@@ -1124,6 +1124,17 @@ export async function endTrip(params: {
         lastLegKm: totals.lastLegKm,
       },
     };
+    const openWork = findOpenToggleSessionId(events, BASIC_TOGGLE_GROUPS[5]);
+    if (openWork) {
+      await putEventWithRoutePointTx(baseEvent({
+        tripId: params.tripId,
+        type: 'work_end',
+        geo: params.geo,
+        address: params.address,
+        occurredAt,
+        extras: openWork === LEGACY_TOGGLE_SESSION_ID ? undefined : { workSessionId: openWork },
+      }));
+    }
     await putEventWithRoutePointTx(event);
     await clearActiveTripId();
     await clearPendingExpresswayEndPrompt(params.tripId);
@@ -1395,6 +1406,16 @@ export async function startUnload(params: { tripId: string; geo?: Geo; address?:
 
 export async function endUnload(params: { tripId: string; geo?: Geo; address?: string; occurredAt?: string }) {
   await endBasicToggleOperation(params, BASIC_TOGGLE_GROUPS[3], 'event-unload_end');
+}
+
+// Other work (その他) operations; report timelines count this as business work.
+export async function startWork(params: { tripId: string; geo?: Geo; address?: string; occurredAt?: string }) {
+  const { sessionId } = await startBasicToggleOperation(params, BASIC_TOGGLE_GROUPS[5], 'event-work_start');
+  return { workSessionId: sessionId };
+}
+
+export async function endWork(params: { tripId: string; geo?: Geo; address?: string; occurredAt?: string }) {
+  await endBasicToggleOperation(params, BASIC_TOGGLE_GROUPS[5], 'event-work_end');
 }
 
 // Break (休憩) operations
@@ -1680,6 +1701,10 @@ export async function addBoarding(
     const openBreak = findOpenToggleSessionId(events, BASIC_TOGGLE_GROUPS[1]);
     const openLoad = findOpenToggleSessionId(events, BASIC_TOGGLE_GROUPS[2]);
     const openUnload = findOpenToggleSessionId(events, BASIC_TOGGLE_GROUPS[3]);
+    const openWork = findOpenToggleSessionId(events, BASIC_TOGGLE_GROUPS[5]);
+    if (openWork) {
+      throw new Error('進行中のその他作業を終了してからフェリー乗船を記録してください');
+    }
     if (openBreak || openLoad || openUnload) {
       throw new Error('進行中の休憩・積込・荷卸を終了してからフェリー乗船を記録してください');
     }
@@ -2367,6 +2392,8 @@ const RESTORE_EVENT_TYPES: Set<EventType> = new Set([
   'expressway_start',
   'expressway_end',
   'point_mark',
+  'work_start',
+  'work_end',
 ]);
 
 function isRecord(raw: unknown): raw is Record<string, unknown> {

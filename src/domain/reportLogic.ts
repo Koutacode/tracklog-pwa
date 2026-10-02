@@ -678,6 +678,7 @@ const REPORT_MIN_DURATION_PAIRS: ReportMinDurationPair[] = [
   { startType: 'load_start', endType: 'load_end', sessionKey: 'loadSessionId' },
   { startType: 'unload_start', endType: 'unload_end', sessionKey: 'unloadSessionId' },
   { startType: 'boarding', endType: 'disembark', sessionKey: 'ferrySessionId' },
+  { startType: 'work_start', endType: 'work_end', sessionKey: 'workSessionId' },
 ];
 
 function getReportMinDurationMinutes(event: TripEvent): number {

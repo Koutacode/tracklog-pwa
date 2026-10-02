@@ -9,6 +9,8 @@ export type EventType =
   | 'load_end'
   | 'unload_start'
   | 'unload_end'
+  | 'work_start'
+  | 'work_end'
   | 'refuel'
   | 'boarding'
   | 'disembark'

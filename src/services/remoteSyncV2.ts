@@ -98,7 +98,7 @@ const EVENT_ANCHOR_PREFIX = 'event-anchor-';
 const KNOWN_EVENT_TYPES: Set<EventType> = new Set([
   'trip_start', 'trip_end', 'rest_start', 'rest_end', 'break_start', 'break_end',
   'load_start', 'load_end', 'unload_start', 'unload_end', 'refuel', 'boarding',
-  'disembark', 'expressway', 'expressway_start', 'expressway_end', 'point_mark',
+  'disembark', 'expressway', 'expressway_start', 'expressway_end', 'point_mark', 'work_start', 'work_end',
 ]);
 const SYNC_METADATA_KEYS = new Set([
   'syncStatus', 'localUpdatedAt', 'localRevision', 'syncMutationId', 'previousSyncMutationId', '__remoteSyncApply',

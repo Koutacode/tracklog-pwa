@@ -12,6 +12,8 @@ import {
   endLoad as dbEndLoad,
   startUnload as dbStartUnload,
   endUnload as dbEndUnload,
+  startWork as dbStartWork,
+  endWork as dbEndWork,
   startBreak as dbStartBreak,
   endBreak as dbEndBreak,
   addRefuel as dbAddRefuel,
@@ -51,6 +53,8 @@ export type TripOperation =
   | 'load-end'
   | 'unload-start'
   | 'unload-end'
+  | 'work-start'
+  | 'work-end'
   | 'break-start'
   | 'break-end'
   | 'expressway-start'
@@ -220,7 +224,7 @@ export function useTripManager() {
   }, [captureGeoOnce, refresh, runOperation, tripId]);
 
   const handleToggleEvent = useCallback(async (
-    type: 'load' | 'unload' | 'break',
+    type: 'load' | 'unload' | 'break' | 'work',
     action: 'start' | 'end',
   ) => {
     if (!tripId) return;
@@ -236,6 +240,10 @@ export function useTripManager() {
         action === 'start'
           ? await dbStartUnload({ tripId, geo, address, occurredAt })
           : await dbEndUnload({ tripId, geo, address, occurredAt });
+      } else if (type === 'work') {
+        action === 'start'
+          ? await dbStartWork({ tripId, geo, address, occurredAt })
+          : await dbEndWork({ tripId, geo, address, occurredAt });
       } else if (type === 'break') {
         if (action === 'start') {
           await commitRouteTransitionWithNativeFastApply(

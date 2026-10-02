@@ -57,7 +57,7 @@ function categoryLabel(category: LiveDriveCategory) {
     case 'wait':
       return '待機';
     case 'work':
-      return '業務';
+      return 'その他';
     default:
       return '待機';
   }
@@ -88,6 +88,10 @@ function categoryAfterEvent(
     case 'unload_start':
       return { category: 'unload', tripActive: true };
     case 'unload_end':
+      return { category: tripActive ? 'drive' : 'idle', tripActive };
+    case 'work_start':
+      return { category: 'work', tripActive: true };
+    case 'work_end':
       return { category: tripActive ? 'drive' : 'idle', tripActive };
     case 'boarding':
     case 'disembark':

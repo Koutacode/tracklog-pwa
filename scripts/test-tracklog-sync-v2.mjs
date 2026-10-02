@@ -18,6 +18,12 @@ const DISK_IO_MIGRATION_PATH = path.join(
   "migrations",
   "20260930165335_tracklog_sync_v2_reduce_disk_io.sql",
 );
+const OTHER_WORK_MIGRATION_PATH = path.join(
+  ROOT,
+  "supabase",
+  "migrations",
+  "20261002011750_tracklog_other_work_events.sql",
+);
 const ROLLBACK_PATH = path.join(ROOT, "docs", "sql", "rollback-tracklog-sync-v2-reduce-disk-io.sql");
 
 const OWNER_ID = "11111111-1111-4111-8111-111111111111";
@@ -402,6 +408,7 @@ let passed = 0;
 let cursor = 0;
 let originalSyncFunctionSql;
 let optimizedSyncSql;
+let otherWorkMigrationSql;
 
 async function check(name, run) {
   await run();
@@ -413,6 +420,14 @@ async function firstRow(sql, params = []) {
   const result = await db.query(sql, params);
   assert.ok(result.rows.length > 0, `Expected a row from: ${sql}`);
   return result.rows[0];
+}
+
+async function mutationFunctionMetadata() {
+  return firstRow(`select pg_get_functiondef(oid) as definition,
+    proacl::text as acl, proowner::regrole::text as owner,
+    prosecdef as security_definer, proconfig as config
+    from pg_proc
+    where oid = 'tracklog_private.apply_tracklog_sync_mutation(uuid,text,jsonb)'::regprocedure`);
 }
 
 async function countRows(sql, params = []) {
@@ -537,6 +552,51 @@ try {
     );
   });
 
+  await check("adds other work event allowlists idempotently without changing unrelated mutation handling or RPC grants", async () => {
+    otherWorkMigrationSql = await readFile(OTHER_WORK_MIGRATION_PATH, "utf8");
+    const before = await mutationFunctionMetadata();
+    const syncBefore = await firstRow(`select pg_get_functiondef(oid) as definition, proacl::text as acl
+      from pg_proc where oid = 'public.tracklog_sync_v2(uuid,text,bigint,jsonb)'::regprocedure`);
+    const oldTail = "'expressway_end', 'point_mark'";
+    const newTail = "'expressway_end', 'point_mark', 'work_start', 'work_end'";
+    assert.equal(before.definition.split(oldTail).length - 1, 2);
+    await db.exec(otherWorkMigrationSql);
+    const applied = await mutationFunctionMetadata();
+    assert.deepEqual(applied, {
+      ...before,
+      definition: before.definition.replaceAll(oldTail, newTail),
+    });
+    await db.exec(otherWorkMigrationSql);
+    assert.deepEqual(await mutationFunctionMetadata(), applied, "reapplying must leave function and metadata unchanged");
+    assert.deepEqual(await firstRow(`select pg_get_functiondef(oid) as definition, proacl::text as acl
+      from pg_proc where oid = 'public.tracklog_sync_v2(uuid,text,bigint,jsonb)'::regprocedure`), syncBefore);
+  });
+
+  await check("fails closed for unknown or partially updated event allowlists", async () => {
+    const applied = await mutationFunctionMetadata();
+    const newTail = "'expressway_end', 'point_mark', 'work_start', 'work_end'";
+    const fixtures = [
+      {
+        definition: applied.definition.replaceAll(newTail, "'expressway_end', 'unexpected_test_event'"),
+        message: /Unexpected sync event allowlists/,
+      },
+      {
+        definition: applied.definition.replace(newTail, "'expressway_end', 'point_mark'"),
+        message: /Other work event allowlists are incomplete/,
+      },
+    ];
+    for (const fixture of fixtures) {
+      await db.exec("begin");
+      try {
+        await db.exec(fixture.definition);
+        await expectSqlState(() => db.exec(otherWorkMigrationSql), "P0001", fixture.message);
+      } finally {
+        await db.exec("rollback");
+      }
+      assert.deepEqual(await mutationFunctionMetadata(), applied);
+    }
+  });
+
   await check("retains service-role-only RPC access, device approval, owner and input validation", async () => {
     const privileges = await firstRow(`select
       has_function_privilege('anon', 'public.tracklog_sync_v2(uuid,text,bigint,jsonb)', 'EXECUTE') as anon,
@@ -640,6 +700,98 @@ try {
       ),
       0,
     );
+  });
+
+  const workTripId = "other-work-trip";
+  const workEvents = [
+    { id: "other-work-start", type: "work_start", ts: "2026-07-10T01:20:00.000Z" },
+    { id: "other-work-end", type: "work_end", ts: "2026-07-10T01:45:00.000Z" },
+  ];
+  await check("upserts and reads back other work start and end events with their notes and timestamps", async () => {
+    const beforeCursor = cursor;
+    const mutations = workEvents.map((event) => eventMutation(nextMutationId(), event.id, workTripId, 0, {
+      type: event.type,
+      ts: event.ts,
+      address: "Test depot",
+      extras: { note: "タイヤ交換" },
+    }));
+    const data = await sync([tripMutation(nextMutationId(), workTripId), ...mutations]);
+    assert.deepEqual(data.acks.map((ack) => ack.status), ["applied", "applied", "applied"]);
+    assert.equal(data.changes.events.length, 2);
+    for (const [index, event] of workEvents.entries()) {
+      event.revision = asNumber(data.acks[index + 1].revision);
+      const stored = await firstRow("select * from public.trip_events where id = $1", [event.id]);
+      assert.equal(stored.trip_id, workTripId);
+      assert.equal(stored.type, event.type);
+      assert.equal(new Date(stored.ts).toISOString(), event.ts);
+      assert.equal(stored.address, "Test depot");
+      assert.deepEqual(decodeJson(stored.extras), { note: "タイヤ交換" });
+      assert.equal(stored.sync_status, "synced");
+      assert.equal(await receiptCount(mutations[index].mutationId), 1);
+      const returned = data.changes.events.find((row) => row.id === event.id);
+      assert.ok(returned);
+      assert.equal(returned.type, event.type);
+      assert.equal(new Date(returned.ts).toISOString(), event.ts);
+      assert.deepEqual(returned.extras, { note: "タイヤ交換" });
+    }
+    const fetched = await sync([], { cursor: beforeCursor, advance: false });
+    assert.deepEqual(fetched.changes, data.changes, "work events must be available in later feed reads");
+  });
+
+  await check("deletes synced and unsynced other work events and preserves terminal typed tombstones", async () => {
+    const targets = workEvents.flatMap((event) => [
+      event,
+      { ...event, id: `${event.id}-offline`, revision: 0 },
+    ]);
+    const mutations = targets.map((event) => {
+      const mutation = eventDeleteMutation(nextMutationId(), event.id, workTripId, event.revision);
+      mutation.payload.event_type = event.type;
+      mutation.payload.event_ts = event.ts;
+      return mutation;
+    });
+    const beforeCursor = cursor;
+    const data = await sync(mutations);
+    assert.deepEqual(data.acks.map((ack) => ack.status), ["deleted", "deleted", "deleted", "deleted"]);
+    assert.equal(data.changes.deletedEvents.length, 4);
+    assert.equal(await countRows("select count(*)::integer as count from public.trip_events where trip_id = $1", [workTripId]), 0);
+    for (const [index, event] of targets.entries()) {
+      const stored = await firstRow("select * from public.deleted_event_tombstones where event_id = $1", [event.id]);
+      assert.equal(stored.trip_id, workTripId);
+      assert.equal(stored.event_type, event.type);
+      assert.equal(new Date(stored.event_ts).toISOString(), event.ts);
+      assert.equal(stored.owner_user_id, OWNER_ID);
+      assert.equal(await receiptCount(mutations[index].mutationId), 1);
+      const returned = data.changes.deletedEvents.find((row) => row.event_id === event.id);
+      assert.ok(returned);
+      assert.equal(returned.event_type, event.type);
+      assert.equal(new Date(returned.event_ts).toISOString(), event.ts);
+    }
+    const fetched = await sync([], { cursor: beforeCursor, advance: false });
+    assert.deepEqual(fetched.changes, data.changes);
+    const stableCursor = cursor;
+    const resurrection = await sync(targets.map((event) => eventMutation(nextMutationId(), event.id, workTripId, 0, {
+      type: event.type,
+      ts: event.ts,
+    })));
+    assert.ok(resurrection.acks.every((ack) => ack.status === "deleted" && /permanently deleted/.test(ack.message)));
+    assert.equal(cursor, stableCursor);
+    assertEmptyChanges(resurrection.changes);
+  });
+
+  await check("rejects unknown event types for both upserts and deletion tombstones without receipts or changes", async () => {
+    const upsert = eventMutation(nextMutationId(), "unknown-work-upsert", workTripId, 0, { type: "unknown_work_type" });
+    const deletion = eventDeleteMutation(nextMutationId(), "unknown-work-delete", workTripId, 0);
+    deletion.payload.event_type = "unknown_work_type";
+    deletion.payload.event_ts = TS;
+    const stableCursor = cursor;
+    const data = await sync([upsert, deletion]);
+    assert.deepEqual(data.acks.map((ack) => ack.status), ["rejected", "rejected"]);
+    assert.ok(data.acks.every((ack) => ack.message === "Unsupported event type"));
+    for (const mutation of [upsert, deletion]) assert.equal(await receiptCount(mutation.mutationId), 0);
+    assert.equal(await countRows("select count(*)::integer as count from public.trip_events where id = $1", [upsert.entityId]), 0);
+    assert.equal(await countRows("select count(*)::integer as count from public.deleted_event_tombstones where event_id = $1", [deletion.entityId]), 0);
+    assert.equal(cursor, stableCursor);
+    assertEmptyChanges(data.changes);
   });
 
   let firstReportTombstoneSeq;
@@ -1247,11 +1399,15 @@ try {
   await check("manual rollback restores the original RPC and can be re-applied without data changes", async () => {
     const stableCursor = cursor;
     const before = await firstRow("select count(*)::integer as count from public.tracklog_sync_mutations");
+    const workAllowlistBefore = await mutationFunctionMetadata();
     await db.exec(await readFile(ROLLBACK_PATH, "utf8"));
+    assert.deepEqual(await mutationFunctionMetadata(), workAllowlistBefore, "disk IO rollback must preserve other work allowlists");
     const rolledBack = await sync([]);
     assert.equal(cursor, stableCursor);
     assertEmptyChanges(rolledBack.changes);
     await db.exec(optimizedSyncSql);
+    await db.exec(otherWorkMigrationSql);
+    assert.deepEqual(await mutationFunctionMetadata(), workAllowlistBefore);
     assert.deepEqual(await firstRow("select count(*)::integer as count from public.tracklog_sync_mutations"), before);
     const restored = await sync([]);
     assert.deepEqual(restored, rolledBack);

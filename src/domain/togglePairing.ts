@@ -27,6 +27,7 @@ export const PERSISTED_BASIC_TOGGLE_DEFINITIONS = [
   { channel: 'load', start: 'load_start', end: 'load_end', key: 'loadSessionId', label: '積込', scope: 'persisted' },
   { channel: 'unload', start: 'unload_start', end: 'unload_end', key: 'unloadSessionId', label: '荷卸', scope: 'persisted' },
   { channel: 'ferry', start: 'boarding', end: 'disembark', key: 'ferrySessionId', label: 'フェリー', scope: 'persisted' },
+  { channel: 'work', start: 'work_start', end: 'work_end', key: 'workSessionId', label: 'その他', scope: 'persisted' },
 ] as const satisfies readonly TogglePairDefinition[];
 
 export const EXPRESSWAY_TOGGLE_DEFINITION = {
@@ -43,7 +44,6 @@ export const EXPRESSWAY_TOGGLE_DEFINITIONS = [EXPRESSWAY_TOGGLE_DEFINITION] as c
 export const REPORT_ONLY_TOGGLE_DEFINITIONS = [
   { channel: 'wait', start: 'wait_start', end: 'wait_end', key: 'waitSessionId', label: '待機', scope: 'report' },
   { channel: 'drive', start: 'drive_start', end: 'drive_end', key: 'driveSessionId', label: '運転', scope: 'report' },
-  { channel: 'work', start: 'work_start', end: 'work_end', key: 'workSessionId', label: '業務', scope: 'report' },
 ] as const satisfies readonly TogglePairDefinition[];
 
 export const PERSISTED_TOGGLE_DEFINITIONS: readonly TogglePairDefinition[] = [
