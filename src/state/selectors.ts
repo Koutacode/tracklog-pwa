@@ -172,6 +172,10 @@ export function buildTimeline(events: AppEvent[]): TimelineItem[] {
         return '荷卸開始';
       case 'unload_end':
         return '荷卸終了';
+      case 'work_start':
+        return 'その他開始';
+      case 'work_end':
+        return 'その他終了';
       case 'refuel':
         return '給油';
       case 'expressway':

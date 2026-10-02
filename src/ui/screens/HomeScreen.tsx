@@ -92,6 +92,7 @@ const [
   LOAD_TOGGLE_DEFINITION,
   UNLOAD_TOGGLE_DEFINITION,
   FERRY_TOGGLE_DEFINITION,
+  WORK_TOGGLE_DEFINITION,
 ] = PERSISTED_BASIC_TOGGLE_DEFINITIONS;
 
 function OperationErrorNotice(props: { message: string; onDismiss: () => void }) {
@@ -212,6 +213,7 @@ export default function HomeScreen() {
     load: findOpenToggleStart(events, LOAD_TOGGLE_DEFINITION),
     unload: findOpenToggleStart(events, UNLOAD_TOGGLE_DEFINITION),
     ferry: findOpenToggleStart(events, FERRY_TOGGLE_DEFINITION),
+    work: findOpenToggleStart(events, WORK_TOGGLE_DEFINITION),
     expressway: findOpenToggleStart(events, EXPRESSWAY_TOGGLE_DEFINITION),
   }), [events]);
   const openRestSessionId = useMemo(
@@ -225,6 +227,7 @@ export default function HomeScreen() {
   const restActive = openToggleStarts.rest !== null;
   const expresswayActive = openToggleStarts.expressway !== null;
   const ferryActive = openToggleStarts.ferry !== null;
+  const workActive = openToggleStarts.work !== null;
   const operationsDisabled = loading
     || operationInProgress
     || expresswayEndBusy
@@ -285,12 +288,13 @@ export default function HomeScreen() {
     [activeRestStatus],
   );
 
-  const canStartBasicOperation = !ferryActive && !loadActive && !breakActive && !restActive && !unloadActive;
+  const canStartBasicOperation = !ferryActive && !loadActive && !breakActive && !restActive && !unloadActive && !workActive;
   const canStartRest = canStartBasicOperation;
   const canStartLoad = canStartBasicOperation;
   const canStartUnload = canStartBasicOperation;
   const canStartBreak = canStartBasicOperation;
-  const canStartFerry = !ferryActive && !loadActive && !breakActive && !unloadActive;
+  const canStartWork = canStartBasicOperation;
+  const canStartFerry = !ferryActive && !loadActive && !breakActive && !unloadActive && !workActive;
 
   const runExpresswayStart = async () => {
     if (operationInProgress) return;
@@ -980,7 +984,8 @@ export default function HomeScreen() {
           onRestEnd={() => openRestSessionId && handleEndRest(openRestSessionId)}
           onFerry={handleAddFerry}
           onRefuel={() => setFuelOpen(true)}
-          onPointMark={() => handleAddPointMark('手動')}
+          workActive={workActive}
+          canStartWork={canStartWork}
           onVoiceCommand={runVoiceCommand}
           voiceAvailable={voiceAvailable}
           voiceListening={voiceListening}

@@ -46,7 +46,7 @@ const fixedSession = () => 'generated-session';
   assert.deepEqual(input, original, 'planning must not mutate live Dexie objects');
   assert.deepEqual(
     getEditableEventTypeOptions(input, rest.id),
-    ['rest_start', 'break_start', 'load_start', 'unload_start'],
+    ['rest_start', 'break_start', 'load_start', 'unload_start', 'work_start'],
   );
 }
 
@@ -216,11 +216,11 @@ const fixedSession = () => 'generated-session';
   });
   assert.deepEqual(
     getEditableEventTypeOptions([startWithoutOdo, end], startWithoutOdo.id),
-    ['break_start', 'load_start', 'unload_start'],
+    ['break_start', 'load_start', 'unload_start', 'work_start'],
   );
   assert.deepEqual(
     getEditableEventTypeOptions([startWithoutOdo, end], end.id),
-    ['break_end', 'load_end', 'unload_end'],
+    ['break_end', 'load_end', 'unload_end', 'work_end'],
   );
   assert.throws(
     () => planEventTypeConversion([startWithoutOdo, end], end.id, 'rest_end', fixedSession),

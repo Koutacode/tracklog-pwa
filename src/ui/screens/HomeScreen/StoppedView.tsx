@@ -8,17 +8,18 @@ type StoppedViewProps = {
   breakActive: boolean;
   restActive: boolean;
   ferryActive: boolean;
+  workActive: boolean;
+  canStartWork: boolean;
   canStartLoad: boolean;
   canStartUnload: boolean;
   canStartBreak: boolean;
   canStartRest: boolean;
   canStartFerry: boolean;
   onOdoDialog: (kind: 'trip_end' | 'rest_start') => void;
-  onToggle: (type: 'load' | 'unload' | 'break', action: 'start' | 'end') => void;
+  onToggle: (type: 'load' | 'unload' | 'break' | 'work', action: 'start' | 'end') => void;
   onRestEnd: () => void;
   onFerry: (action: 'boarding' | 'disembark') => void;
   onRefuel: () => void;
-  onPointMark: () => void;
   onVoiceCommand: () => void;
   voiceAvailable: boolean;
   voiceListening: boolean;
@@ -34,6 +35,8 @@ export const StoppedView: React.FC<StoppedViewProps> = ({
   breakActive,
   restActive,
   ferryActive,
+  workActive,
+  canStartWork,
   canStartLoad,
   canStartUnload,
   canStartBreak,
@@ -44,7 +47,6 @@ export const StoppedView: React.FC<StoppedViewProps> = ({
   onRestEnd,
   onFerry,
   onRefuel,
-  onPointMark,
   onVoiceCommand,
   voiceAvailable,
   voiceListening,
@@ -109,8 +111,13 @@ export const StoppedView: React.FC<StoppedViewProps> = ({
             </button>
           )}
 
-          <button type="button" className="home-icon-action" disabled={disabled} onClick={onPointMark}>
-            <span aria-hidden="true">📍</span>地点記録
+          <button
+            type="button"
+            className="home-icon-action"
+            disabled={disabled || (!workActive && !canStartWork)}
+            onClick={() => onToggle('work', workActive ? 'end' : 'start')}
+          >
+            <span aria-hidden="true">🔧</span>{workActive ? 'その他終了' : 'その他'}
           </button>
         </div>
         {(voiceLastText || voiceResult || voiceError) && (
