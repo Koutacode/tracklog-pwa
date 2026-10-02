@@ -13,6 +13,7 @@ import StoppedView from './HomeScreen/StoppedView';
 import ExpresswayEndConfirmDialog from './HomeScreen/ExpresswayEndConfirmDialog';
 import RunStatusCard from './HomeScreen/RunStatusCard';
 import HomeBottomNav from './HomeScreen/HomeBottomNav';
+import HomeAiSummaryCard from './HomeScreen/HomeAiSummaryCard';
 import { subscribeHomeEventsChanged } from './HomeScreen/homeEventsRefresh';
 import {
   findRecordingBlockingDiagnostic,
@@ -801,21 +802,27 @@ export default function HomeScreen() {
             </div>
           </div>
           <div className="start-hero__content">
-            <div className="start-hero__panel start-hero__panel--hero">
-              <div className="start-hero__eyebrow">出発前チェック</div>
-              <div className="start-hero__title">今日の運行を開始</div>
-              <div className="start-hero__subtitle">開始ODOを入力して、記録を開始します。</div>
-              {operationError && (
-                <OperationErrorNotice message={operationError} onDismiss={clearOperationError} />
-              )}
-              <div className="start-hero__actions">
-                <BigButton
-                  label={operationInProgress ? '処理中…' : loading ? '読み込み中…' : '運行開始'}
-                  hint="開始ODOを入力して記録開始"
-                  disabled={operationsDisabled}
-                  onClick={() => setOdoDialog({ kind: 'trip_start' })}
-                />
+            <div className="start-hero__primary">
+              <div className="start-hero__panel start-hero__panel--hero">
+                <div className="start-hero__eyebrow">出発前チェック</div>
+                <div className="start-hero__title">今日の運行を開始</div>
+                <div className="start-hero__subtitle">開始ODOを入力して、記録を開始します。</div>
+                {operationError && (
+                  <OperationErrorNotice message={operationError} onDismiss={clearOperationError} />
+                )}
+                <div className="start-hero__actions">
+                  <BigButton
+                    label={operationInProgress ? '処理中…' : loading ? '読み込み中…' : '運行開始'}
+                    hint="開始ODOを入力して記録開始"
+                    disabled={operationsDisabled}
+                    onClick={() => setOdoDialog({ kind: 'trip_start' })}
+                  />
+                </div>
               </div>
+              <HomeAiSummaryCard
+                disabled={operationsDisabled || odoDialog != null}
+                dialogBlocked={odoDialog != null}
+              />
             </div>
             {statusCard}
           </div>
@@ -882,6 +889,13 @@ export default function HomeScreen() {
           </div>
           <strong>{tripElapsed != null ? formatElapsedHoursMinutes(tripStart.ts, now) : '-'}</strong>
         </section>
+
+        <HomeAiSummaryCard
+          activeTripId={tripId}
+          activeStartTs={events.find(event => event.type === 'trip_start')?.ts}
+          disabled={operationsDisabled || odoDialog != null || fuelOpen || nativeSettingsOpen}
+          dialogBlocked={breakToRestModalOpen || expresswayEndConfirmation != null || odoDialog != null || fuelOpen || nativeSettingsOpen}
+        />
 
         {operationError && (
           <OperationErrorNotice message={operationError} onDismiss={clearOperationError} />

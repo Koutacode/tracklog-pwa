@@ -1427,6 +1427,79 @@ a:hover {
   white-space: nowrap;
 }
 
+.home-ai-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid rgba(56, 189, 248, 0.4);
+  border-radius: 13px;
+  background: linear-gradient(120deg, #102743, #101c30);
+  color: #f8fafc;
+}
+
+.home-ai-summary__copy {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.home-ai-summary__copy span {
+  color: #cbd5e1;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.home-ai-summary__button {
+  flex-shrink: 0;
+  min-height: 48px;
+  padding: 10px 18px;
+  border: 1px solid #7dd3fc;
+  border-radius: 10px;
+  background: #075985;
+  color: #fff;
+  font: inherit;
+  font-weight: 800;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.home-ai-summary__button:focus-visible {
+  outline: 3px solid #f8fafc;
+  outline-offset: 3px;
+}
+
+.home-ai-summary__button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.start-hero__primary {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+}
+
+.trip-ai-summary-action {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+  flex-shrink: 0;
+}
+
+.home-ai-summary:has(.trip-detail__alert) {
+  flex-wrap: wrap;
+}
+
+.home-ai-summary .trip-detail__alert {
+  max-width: 280px;
+  overflow-wrap: anywhere;
+}
+
 .home-current-status,
 .home-secondary-actions,
 .home-detail-drawer {
