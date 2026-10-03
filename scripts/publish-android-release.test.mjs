@@ -4,6 +4,7 @@ import { readFileSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { spawnSync } from 'node:child_process';
 import { publishRelease, productionClient } from './publish-android-release.mjs';
 import { releaseTargets, removableAssets, SOURCE_REPOSITORY as source, DISTRIBUTION_REPOSITORY as dist, APK_NAME } from './release-targets.mjs';
 
@@ -81,6 +82,41 @@ test('JS configuration and exact native URL remain aligned; token only enters pu
   assert.ok(workflow.includes('node scripts/publish-android-release.mjs'));
 });
 
+test('App token is SHA-pinned, repo/permission scoped, revoked after job, and has no PAT fallback', () => {
+  const workflow = readFileSync(new URL('../.github/workflows/android-release.yml', import.meta.url), 'utf8');
+  const mint = workflow.split('      - name: Create distribution installation token\n')[1].split('      - name: Publish and verify')[0];
+  assert.match(mint, /uses: actions\/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3\.2\.0/);
+  assert.match(mint, /client-id: \$\{\{ vars\.TRACKLOG_DISTRIBUTION_APP_CLIENT_ID \}\}/);
+  assert.match(mint, /private-key: \$\{\{ secrets\.TRACKLOG_DISTRIBUTION_APP_PRIVATE_KEY \}\}/);
+  assert.match(mint, /owner: Koutacode\n/);
+  assert.match(mint, /repositories: tracklog-releases\n/);
+  assert.deepEqual([...mint.matchAll(/permission-([^:]+): (\w+)/g)].map(m => [m[1], m[2]]), [['contents', 'write'], ['metadata', 'read']]);
+  assert.match(mint, /skip-token-revoke: false\n/);
+  assert.doesNotMatch(mint, /continue-on-error|if:|enterprise:|app-id:/);
+  assert.ok(workflow.indexOf('Create distribution installation token') > workflow.indexOf('Verify release APK signer'));
+  const publish = workflow.split('      - name: Publish and verify distribution then legacy bridge\n')[1];
+  assert.match(publish, /timeout-minutes: 45/);
+  assert.match(publish, /DISTRIBUTION_RELEASE_TOKEN: \$\{\{ steps\.distribution-app-token\.outputs\.token \}\}/);
+  assert.doesNotMatch(publish, /\|\||continue-on-error|if:/);
+  assert.doesNotMatch(workflow, /secrets\.TRACKLOG_DISTRIBUTION_TOKEN/);
+  const ci = readFileSync(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8');
+  assert.doesNotMatch(ci, /create-github-app-token|APP_PRIVATE_KEY|publish-android-release\.mjs/);
+});
+
+test('App configuration preflight rejects absent inputs without requiring any real secrets', () => {
+  const workflow = readFileSync(new URL('../.github/workflows/android-release.yml', import.meta.url), 'utf8');
+  const check = workflow.split('      - name: Validate distribution App configuration\n')[1].split('      - name: Set up JDK 21')[0];
+  assert.match(check, /DISTRIBUTION_APP_KEY_CONFIGURED: \$\{\{ secrets\.TRACKLOG_DISTRIBUTION_APP_PRIVATE_KEY != '' \}\}/);
+  const script = check.split('        run: |\n')[1].split('\n').map(line => line.replace(/^          /, '')).join('\n');
+  for (const [id, configured, expectedStatus] of [['', 'true', 1], ['   ', 'true', 1], ['synthetic-client-id', 'false', 1], ['synthetic-client-id', '', 1], ['synthetic-client-id', 'true', 0]]) {
+    const result = spawnSync('bash', ['-c', script], { encoding: 'utf8', env: {
+      PATH: process.env.PATH, DISTRIBUTION_APP_CLIENT_ID: id, DISTRIBUTION_APP_KEY_CONFIGURED: configured,
+    } });
+    assert.equal(result.status, expectedStatus);
+    assert.ok(!(result.stdout + result.stderr).includes('synthetic-client-id'), 'input values are never logged');
+  }
+});
+
 test('production adapter routes authenticated writes, clean target, anonymous downloads and cleanup correctly', async t => {
   const directory = mkdtempSync(join(tmpdir(), 'tracklog-publish-adapter-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
@@ -152,4 +188,7 @@ test('production adapter routes authenticated writes, clean target, anonymous do
   assert.equal(state.get(source).latest, 1, 'rollback restores previous latest by ID');
   assert.equal(state.get(source).releases[1].draft, true);
   await assert.rejects(async () => productionClient({ execute: () => assert.fail('must not invoke gh'), artifactDirectory: directory, environment: {} }).preflight(dist, 'v0.1.67'), /Missing release credential/);
+  await assert.rejects(async () => productionClient({ execute: () => assert.fail('must not invoke gh'), artifactDirectory: directory, environment: {
+    SOURCE_RELEASE_TOKEN: 'synthetic-source-token', GH_TOKEN: 'synthetic-default-token', TRACKLOG_DISTRIBUTION_TOKEN: 'synthetic-old-pat',
+  } }).preflight(dist, 'v0.1.67'), /Missing release credential/, 'missing App output cannot fall back to another credential');
 });

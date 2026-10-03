@@ -7,9 +7,12 @@
 - ソース／既存署名のActions実行元: `Koutacode/tracklog-pwa`。
 - 新しい公開配布専用repo案: `Koutacode/tracklog-releases`。既存repoのfork・mirror・push・履歴コピーを使わず、新規の独立したrepoとして作る。READMEのみの初期commitを作り、個人氏名・メールではなく確認済みGitHub noreplyと公開ハンドルを使う。
 - 公開するファイルは `tracklog-assist-debug.apk` と `.sha256` のみ。リリース文は固定文。source commit・changelog・自動生成release notesを新repoへ渡さない。GitHubの自動Source archiveも新repo自身のREADMEだけになる。
-- 新repo作成後、Settings → Developer settings → Personal access tokens → Fine-grained tokensで、有効期限付き・対象repoを新配布repoだけ・Repository permissionsのContentsをRead and writeとする資格情報を作成する。MetadataのReadは必須の付随権限。他repo・Actions・Administration権限は付けない。
-- ソースrepoのSettings → Secrets and variables → Actionsに、repository secret `TRACKLOG_DISTRIBUTION_TOKEN` として設定する。値をチャット・ローカル・APK・Driveへコピーしない。**新規の永続認証と権限なので、作成・設定には別途ユーザー承認が必要。今回作成しない。** 期限切れ時の更新担当を決める。
-- 既存 `GITHUB_TOKEN` は旧repoへの橋渡し公開だけに使う。既存署名Secretと署名フィンガープリントは変更しない。クロスrepo tokenは公開stepだけの環境変数で、Vite/Gradleへ渡さない。
+- 認証は非公開GitHub Appの短命installation tokenを使う。Appのinstall先は配布repoのみ、Repository permissionsはContents Read and write（Metadata Readは付随権限）。Actions・Administrationや他repoへの権限を追加しない。
+- 元repoのSettings → Secrets and variables → Actions → Variablesに `TRACKLOG_DISTRIBUTION_APP_CLIENT_ID`、Secretsに `TRACKLOG_DISTRIBUTION_APP_PRIVATE_KEY` を設定する。App登録・install・鍵の生成/投入は親が承認範囲内で調整する。秘密値はチャット・ローカル・APK・Driveへコピーしない。
+- 公式 `actions/create-github-app-token` のv3.2.0を `bcd2ba49218906704ab6c1aa796996da409d3eb1` に完全SHA固定。ビルド/署名検証後にowner `Koutacode`、repositories `tracklog-releases`、Contents write / Metadata readだけを指定して発行する。通常CIはApp設定も実tokenも必要としない。
+- tokenの有効期限は1時間。公開stepの上限は45分にし、`skip-token-revoke: false` でjob終了時の公式post処理による失効を有効化する。通信障害等でpost処理の失効が失敗した場合はactionの警告を確認する。runner停止時も即時失効を保証するものではなく、token自体の1時間期限が残る。
+- App設定の存在確認が失敗したらビルド前に停止する。発行失敗やtoken出力欠落も公開前に停止する。**PAT fallbackはない**。旧Secret `TRACKLOG_DISTRIBUTION_TOKEN` は参照しない。不要になった旧PAT/Secretの失効・削除は親が別途調整する。
+- 元repoの既存 `GITHUB_TOKEN` は旧repoへの橋渡し公開だけに使う。既存署名Secretと署名フィンガープリントは変更しない。配布repoのApp tokenは公開stepだけへ注入し、Vite/Gradleへ渡さない。
 - 課金プランは変更しない。将来の非公開ソースrepoでのActions利用枠・費用は、その段階で確認する。
 
 ## 段階1: bridge
@@ -78,3 +81,10 @@ Google Driveへの反映は親側で既存月次文書へこの非秘密の記�
 - 必要な次の操作は、別途承認のうえ新配布repoにREADMEだけの初期commit/mainを作ること。本文は製品名とAndroid APK配布用途のみとし、ソース・履歴・個人情報は含めない。確認済み公開ハンドル/noreplyをauthor/committerに使う。この段階では実行しない。
 - 元repoのworkflowは通常CIとv*タグpush専用Android Releaseの2本。作業branchのみのpushとmain向けdraft PRは通常CIだけを対象とし、tag push・merge・手動公開workflowは行わない。
 - 追加差分の個人情報/秘密レビュー、commitのauthor/committerのnoreply照合、最新origin/mainが基準SHAから変わっていないことを確認した。PRと通常CIの結果は親への最終報告で別途記録する。
+
+## GitHub App対応と配布repo初期化（2026-10-03）
+
+- ユーザーの追加承認に従い、既存の通常GitHub認証経路で配布repoにREADMEだけの初期commitを作成。commit `9c4b0b874256ca4c1964633de9707d2d14108952`、main一致・親commit 0・treeはREADME.mdのみ・確認済み公開ハンドル/noreplyのauthor/committerを再取得して照合した。元repoの履歴やソースをコピーしていない。
+- App設定は親が準備中。Cloudで新しい秘密値やPATの取得・参照・投入・試用は行っていない。PR #21は短命token方式へ変更し、PATを恒久採用しない。
+- 公式actionの現行release/tag commit・入力とpost処理を読取確認した。参照: https://github.com/actions/create-github-app-token/releases/tag/v3.2.0 および同tagのREADME/action.yml/lib/post.js。
+- ローカルと通常CIでは合成値だけで未設定拒否・固定repo/最小権限・SHA pin・job後revoke設定・PAT/default/source credentialへのfallback禁止を検証する。実token発行・実失効・正式公開は未検証で、公開承認後に別途確認する。
