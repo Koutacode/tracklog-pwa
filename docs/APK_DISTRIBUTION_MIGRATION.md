@@ -2,17 +2,16 @@
 
 この変更は公開前の実装。基準: `01417a2335736e29b675c0c89659b3d0048e2356`、公開済み `v0.1.66` / versionCode `64`。移行候補は `v0.1.67` / `65`。公開時にmain・最新Release・未使用tagを再確認する。
 
-## 配布先と権限（設定は未実施）
+## 配布先と権限（現在の採用方式）
 
 - ソース／既存署名のActions実行元: `Koutacode/tracklog-pwa`。
 - 新しい公開配布専用repo案: `Koutacode/tracklog-releases`。既存repoのfork・mirror・push・履歴コピーを使わず、新規の独立したrepoとして作る。READMEのみの初期commitを作り、個人氏名・メールではなく確認済みGitHub noreplyと公開ハンドルを使う。
 - 公開するファイルは `tracklog-assist-debug.apk` と `.sha256` のみ。リリース文は固定文。source commit・changelog・自動生成release notesを新repoへ渡さない。GitHubの自動Source archiveも新repo自身のREADMEだけになる。
-- 認証は非公開GitHub Appの短命installation tokenを使う。Appのinstall先は配布repoのみ、Repository permissionsはContents Read and write（Metadata Readは付随権限）。Actions・Administrationや他repoへの権限を追加しない。
-- 元repoのSettings → Secrets and variables → Actions → Variablesに `TRACKLOG_DISTRIBUTION_APP_CLIENT_ID`、Secretsに `TRACKLOG_DISTRIBUTION_APP_PRIVATE_KEY` を設定する。App登録・install・鍵の生成/投入は親が承認範囲内で調整する。秘密値はチャット・ローカル・APK・Driveへコピーしない。
-- 公式 `actions/create-github-app-token` のv3.2.0を `bcd2ba49218906704ab6c1aa796996da409d3eb1` に完全SHA固定。ビルド/署名検証後にowner `Koutacode`、repositories `tracklog-releases`、Contents write / Metadata readだけを指定して発行する。通常CIはApp設定も実tokenも必要としない。
-- tokenの有効期限は1時間。公開stepの上限は45分にし、`skip-token-revoke: false` でjob終了時の公式post処理による失効を有効化する。通信障害等でpost処理の失効が失敗した場合はactionの警告を確認する。runner停止時も即時失効を保証するものではなく、token自体の1時間期限が残る。
-- App設定の存在確認が失敗したらビルド前に停止する。発行失敗やtoken出力欠落も公開前に停止する。**PAT fallbackはない**。旧Secret `TRACKLOG_DISTRIBUTION_TOKEN` は参照しない。不要になった旧PAT/Secretの失効・削除は親が別途調整する。
-- 元repoの既存 `GITHUB_TOKEN` は旧repoへの橋渡し公開だけに使う。既存署名Secretと署名フィンガープリントは変更しない。配布repoのApp tokenは公開stepだけへ注入し、Vite/Gradleへ渡さない。
+- 最新の利用者指示「とりあえず90日でいこ」により、現在は保存済みFine-grained PATを使う。対象は配布repoのみ、Contents Read and write / Metadata Read。元repoのActions repository secret `TRACKLOG_DISTRIBUTION_TOKEN` から公開stepにだけ注入する。
+- PAT値をチャット・ローカル・APK・Driveへコピーせず、表示・抽出・試用しない。ビルド前の存在確認には値ではなくbooleanだけを使う。未設定なら停止し、期限切れ・権限不足も公開処理のpreflightで停止する。元repo token、App、ローカル認証等へのfallbackはない。
+- 既存PATの期限は親の確認記録では2026-12-31。90日運用の方針変更はtokenの実期限を延長しない。期限前に利用者がGitHubで更新し同名Secretへ保存する運用とし、この作業でtoken発行・更新・期限変更は行わない。
+- GitHub App登録・配布repo限定install・`TRACKLOG_DISTRIBUTION_APP_CLIENT_ID` 変数はそのまま保持する。`TRACKLOG_DISTRIBUTION_APP_PRIVATE_KEY` は未設定・利用保留。現在のworkflowはAppもこれらの変数/Secretも参照しない。将来の方式変更は別の承認済み変更で行う。
+- 元repoの既存 `GITHUB_TOKEN` は旧repoへの橋渡し公開だけに使う。既存署名Secretと署名フィンガープリントは変更しない。配布repoのPATは公開stepだけへ注入し、Vite/Gradleへ渡さない。
 - 課金プランは変更しない。将来の非公開ソースrepoでのActions利用枠・費用は、その段階で確認する。
 
 ## 段階1: bridge
@@ -88,3 +87,9 @@ Google Driveへの反映は親側で既存月次文書へこの非秘密の記�
 - App設定は親が準備中。Cloudで新しい秘密値やPATの取得・参照・投入・試用は行っていない。PR #21は短命token方式へ変更し、PATを恒久採用しない。
 - 公式actionの現行release/tag commit・入力とpost処理を読取確認した。参照: https://github.com/actions/create-github-app-token/releases/tag/v3.2.0 および同tagのREADME/action.yml/lib/post.js。
 - ローカルと通常CIでは合成値だけで未設定拒否・固定repo/最小権限・SHA pin・job後revoke設定・PAT/default/source credentialへのfallback禁止を検証する。実token発行・実失効・正式公開は未検証で、公開承認後に別途確認する。
+
+## PAT方式への復帰（2026-10-03、最新判断）
+
+ユーザーの「とりあえず90日でいこ」を受け、PR #21のworkflowを保存済み`TRACKLOG_DISTRIBUTION_TOKEN`方式へ戻した。Appの過去記録は履歴として保持するが、現行方式は本節と冒頭の記述を正本とする。秘密値は読み出していない。PATの実認証・公開書込みは今回の通常CIでは検証しない。
+
+配布repoの独立README初期commitは作成済み。merge・Release/deploy・元repo非公開化は引き続き未承認。通常CI成功後も、公開前にmergeと正式Releaseの実行承認、公開対象SHA/版/署名/新旧APK照合の確認が必要。端末移行確認と非公開化は別段階のまま保持する。

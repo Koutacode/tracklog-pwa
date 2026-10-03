@@ -31,16 +31,15 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      # Presence checks only: never print or expose the private key to build tools.
-      - name: Validate distribution App configuration
+      # Check presence without exposing the credential to build tools.
+      - name: Validate distribution PAT configuration
         shell: bash
         env:
-          DISTRIBUTION_APP_CLIENT_ID: ${{ vars.TRACKLOG_DISTRIBUTION_APP_CLIENT_ID }}
-          DISTRIBUTION_APP_KEY_CONFIGURED: ${{ secrets.TRACKLOG_DISTRIBUTION_APP_PRIVATE_KEY != '' }}
+          DISTRIBUTION_PAT_CONFIGURED: ${{ secrets.TRACKLOG_DISTRIBUTION_TOKEN != '' }}
         run: |
           set -euo pipefail
-          if [[ -z "${DISTRIBUTION_APP_CLIENT_ID//[[:space:]]/}" ]] || [ "$DISTRIBUTION_APP_KEY_CONFIGURED" != true ]; then
-            echo "::error::Configure TRACKLOG_DISTRIBUTION_APP_CLIENT_ID and TRACKLOG_DISTRIBUTION_APP_PRIVATE_KEY. No PAT fallback is allowed."
+          if [ "$DISTRIBUTION_PAT_CONFIGURED" != true ]; then
+            echo "::error::TRACKLOG_DISTRIBUTION_TOKEN is required. No alternate credential fallback is allowed."
             exit 1
           fi
 
@@ -245,25 +244,11 @@ jobs:
           fi
           echo "Release APK signer verified: $actual_signer_sha256"
 
-      # Mint only after building: installation tokens expire after one hour.
-      # Pin reviewed v3.2.0 to a full commit; request only the distribution repo.
-      - name: Create distribution installation token
-        id: distribution-app-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          client-id: ${{ vars.TRACKLOG_DISTRIBUTION_APP_CLIENT_ID }}
-          private-key: ${{ secrets.TRACKLOG_DISTRIBUTION_APP_PRIVATE_KEY }}
-          owner: Koutacode
-          repositories: tracklog-releases
-          permission-contents: write
-          permission-metadata: read
-          skip-token-revoke: false
-
       # Tokens exist only in this publish step; they are never exposed to Vite/Gradle.
       # The new repository contains only its own clean initial commit and APKs.
       - name: Publish and verify distribution then legacy bridge
         timeout-minutes: 45
         env:
           SOURCE_RELEASE_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          DISTRIBUTION_RELEASE_TOKEN: ${{ steps.distribution-app-token.outputs.token }}
+          DISTRIBUTION_RELEASE_TOKEN: ${{ secrets.TRACKLOG_DISTRIBUTION_TOKEN }}
         run: node scripts/publish-android-release.mjs
