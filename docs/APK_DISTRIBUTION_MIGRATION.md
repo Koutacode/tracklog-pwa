@@ -1,4 +1,13 @@
-# ソースと公開APKの段階分離
+# 中止したAPK配布分離の検討・作業履歴
+
+**最新判断：移行を中止し、元の `Koutacode/tracklog-pwa` 自身で配布・更新する方式へ戻す。** 以下の移行手順・認証案は履歴であり、実行しない。現行手順は `PHONE_CLOUD_RELEASE.md` と復帰PRを正本とする。
+
+復帰対象はJS/Androidの更新先、公開APK検証先、既存GITHUB_TOKENで動く元のAndroid Release workflow。移行用公開スクリプトとPAT診断workflowはソースから除去する。更新モーダルの「後で更新する」と回帰試験は保持する。
+
+公開済みv0.1.66は保護する。使用済みのv0.1.67タグと履歴は書き換えず、次回候補をv0.1.68 / versionCode 66とする。この復帰PRは通常CIまでで、merge・正式Release/deployは実行しない。新配布repo、保存済みSecrets/PAT、App登録・install・変数には触れない。元repoは公開のまま維持する。
+
+---
+
 
 この変更は公開前の実装。基準: `01417a2335736e29b675c0c89659b3d0048e2356`、公開済み `v0.1.66` / versionCode `64`。移行候補は `v0.1.67` / `65`。公開時にmain・最新Release・未使用tagを再確認する。
 

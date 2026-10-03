@@ -6,8 +6,6 @@
 
 Cloudは通常の利用可能な速度設定で進める。基本的に高速モードが使えないという利用者の補足（2026-10-01）を運用前提とし、高速モード／Ultrafastを公開の必須条件にしない。
 
-ソースと配布の段階分離は [APK_DISTRIBUTION_MIGRATION.md](APK_DISTRIBUTION_MIGRATION.md) を優先する。移行中は旧repoのlatest・APKを削除しない。新規配布repo／追加資格情報と公開は個別承認を確認する。
-
 ## 1. 通常Cloudタスクで準備を確認する
 
 修正したい操作、期待する表示、実際の症状を日本語で依頼する。最新main、既存変更、Git root、`AGENTS.md`、共有skillを確認して修正ブランチで作業する。Cloudタスクは隔離済みなので通常は追加worktreeを作らない。他タスクとの同時変更があれば内容を照合して統合する。
@@ -52,7 +50,7 @@ npm run cap:sync:android
 
 `.github/workflows/ci.yml`のvalidateは基本検証・Edge Function型検査、android-validationは非本番設定によるAndroid単体試験・本体APK・androidTest APKコンパイル、temporary-workspacesはWindowsの一時作業安全性を確認する。CIは端末上の試験を実行した証拠ではない。
 
-**`v*`タグpushは正式公開まで自動実行する操作**。単なるビルド試験として使わない。既存workflowがGitHub Secretsから設定と従来署名鍵を復元し、package・version・versionCode・公式署名・draft再取得を検証後、通常Releaseとしてlatestに公開する。新配布repoの公開latestを照合してから同じAPKを旧repoへ橋渡し公開する。両方の検証成功後、新配布repoの旧APK資産だけを配布対象から外す。旧repoのAPKは保持する。この最終工程まで成功したことを確認する。失敗時のdraft復旧も既存workflowに従う。
+**`v*`タグpushは正式公開まで自動実行する操作**。単なるビルド試験として使わない。既存workflowがGitHub Secretsから設定と従来署名鍵を復元し、package・version・versionCode・公式署名・draft再取得を検証後、通常Releaseとしてlatestに公開する。公開latestのAPK・SHA sidecarを照合してから旧ReleaseのAPK資産を配布対象から外す。この最終工程まで成功したことを確認する。失敗時のdraft復旧も既存workflowに従う。
 
 APK公開はEdge Functions・DB migrationを自動適用しない。サーバー変更が含まれる場合は別工程の適用対象・承認範囲・確認結果を明記する。
 
@@ -74,7 +72,7 @@ Driveへ保存できない場合は公開完了とDrive未保存を分けて報�
 
 会社配布URLは次の1本だけを案内する。Driveは成果物の保管先として扱う。
 
-https://github.com/Koutacode/tracklog-releases/releases/latest/download/tracklog-assist-debug.apk
+https://github.com/Koutacode/tracklog-pwa/releases/latest/download/tracklog-assist-debug.apk
 
 1. 運行終了を画面で確認する。運行中に更新しない。
 2. 上記リンクから携帯へダウンロードし、APKを開く。

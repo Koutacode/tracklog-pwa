@@ -48,7 +48,7 @@ async function fixture(t) {
     assets: [
       { id: 456, name: assetName, size: bytes.length, digest: `sha256:${sha256(bytes)}` },
       { id: 457, name: `${assetName}.sha256`, size: Buffer.byteLength(sidecar), digest: `sha256:${sha256(sidecar)}` },
-    ].map(asset => ({ ...asset, state: 'uploaded', browser_download_url: `https://github.com/Koutacode/tracklog-releases/releases/download/v0.1.63/${asset.name}` })),
+    ].map(asset => ({ ...asset, state: 'uploaded', browser_download_url: `https://github.com/Koutacode/tracklog-pwa/releases/download/v0.1.63/${asset.name}` })),
   };
   const inputs = {
     projectRoot,
@@ -77,21 +77,6 @@ async function assertTemporaryFilesRemoved(state) {
   await assert.rejects(stat(dirname(state.downloadPaths[0])), { code: 'ENOENT' });
 }
 
-test('legacy migration verification reads only old public URLs with identical APK validation', async t => {
-  const { inputs, state, release } = await fixture(t);
-  for (const asset of release.assets) asset.browser_download_url = asset.browser_download_url.replace('tracklog-releases', 'tracklog-pwa');
-  await verifyLatestRelease({ ...inputs, repository: 'tracklog-pwa' });
-  assert.ok(state.downloadUrls.every(url => url.includes('/Koutacode/tracklog-pwa/')));
-  assert.equal(state.inspectorCalls, 3);
-  await assertTemporaryFilesRemoved(state);
-});
-
-test('arbitrary repository override is rejected before fetching', async t => {
-  const { inputs, state } = await fixture(t);
-  await assert.rejects(verifyLatestRelease({ ...inputs, repository: 'other-repo' }), /Unreviewed/);
-  assert.equal(state.fetchCalls.length, 0);
-});
-
 test('offline success verifies latest twice, records official conditions, and preserves checkout/output', async t => {
   const { inputs, state } = await fixture(t);
   const packageBefore = await readFile(join(inputs.projectRoot, 'package.json'), 'utf8');
@@ -103,7 +88,7 @@ test('offline success verifies latest twice, records official conditions, and pr
   assert.deepEqual(result, {
     tag: 'v0.1.63', releaseId: 123, packageName: 'com.tracklog.assist', versionName: '0.1.63', versionCode: '61',
     sha256: sha256(state.bytes), signerSha256: OFFICIAL_SIGNER_SHA256, buildDate: '2026-09-30T15:00:00.000Z',
-    downloadUrl: 'https://github.com/Koutacode/tracklog-releases/releases/latest/download/tracklog-assist-debug.apk',
+    downloadUrl: 'https://github.com/Koutacode/tracklog-pwa/releases/latest/download/tracklog-assist-debug.apk',
   });
   assert.deepEqual(state.fetchCalls, ['latest', 'tags/v0.1.63', 'latest']);
   assert.deepEqual(state.downloadUrls, [result.downloadUrl, `${result.downloadUrl}.sha256`]);

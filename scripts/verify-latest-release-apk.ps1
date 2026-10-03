@@ -1,7 +1,6 @@
 param(
   [string]$Tag = "",
-  [string]$OutputPath = "",
-  [switch]$Legacy
+  [string]$OutputPath = ""
 )
 
 Set-StrictMode -Version Latest
@@ -414,8 +413,7 @@ $packageJson = Get-Content -LiteralPath $packageJsonPath -Raw | ConvertFrom-Json
 $version = [string]$packageJson.version
 $releaseConfig = $packageJson.tracklogRelease
 $owner = if ($releaseConfig -and $releaseConfig.githubOwner) { [string]$releaseConfig.githubOwner } else { "Koutacode" }
-$repo = if ($releaseConfig -and $releaseConfig.githubRepo) { [string]$releaseConfig.githubRepo } else { "tracklog-releases" }
-if ($Legacy) { $repo = "tracklog-pwa" }
+$repo = if ($releaseConfig -and $releaseConfig.githubRepo) { [string]$releaseConfig.githubRepo } else { "tracklog-pwa" }
 $assetName = if ($releaseConfig -and $releaseConfig.apkAssetName) { [string]$releaseConfig.apkAssetName } else { "tracklog-assist-debug.apk" }
 $configuredLocalApkPath = if ($releaseConfig -and $releaseConfig.localApkPath) { [string]$releaseConfig.localApkPath } else { "output/tracklog-assist-debug.apk" }
 $localApkPath = if ($OutputPath) { $OutputPath } else { $configuredLocalApkPath }

@@ -27,7 +27,7 @@ async function run() {
     __APP_VERSION__: '0.1.53',
     __BUILD_DATE__: 'test',
     __TRACKLOG_GITHUB_OWNER__: 'Koutacode',
-    __TRACKLOG_GITHUB_REPO__: 'tracklog-releases',
+    __TRACKLOG_GITHUB_REPO__: 'tracklog-pwa',
     __TRACKLOG_RELEASE_APK_NAME__: 'tracklog-assist-debug.apk',
   });
 
@@ -35,7 +35,7 @@ async function run() {
   const versionCheck = await import('./appVersionCheck');
   const distribution = await import('./appDistribution');
 
-  const pinnedAssetUrl = 'https://github.com/Koutacode/tracklog-releases/releases/download/v0.1.53/tracklog-assist-debug.apk';
+  const pinnedAssetUrl = 'https://github.com/Koutacode/tracklog-pwa/releases/download/v0.1.53/tracklog-assist-debug.apk';
   const preferred = releaseInfo.pickPreferredApkAsset([
     { name: 'old-build.apk', browser_download_url: 'https://example.invalid/old.apk' },
     { name: releaseInfo.RELEASE_APK_NAME, browser_download_url: pinnedAssetUrl },
@@ -48,7 +48,7 @@ async function run() {
   );
   assertEqual(
     releaseInfo.resolveApkDownloadUrl(),
-    'https://github.com/Koutacode/tracklog-releases/releases/latest/download/tracklog-assist-debug.apk',
+    'https://github.com/Koutacode/tracklog-pwa/releases/latest/download/tracklog-assist-debug.apk',
     'the download URL always uses the latest-release alias',
   );
 
@@ -77,7 +77,7 @@ async function run() {
     globalThis.fetch = async () => new Response(JSON.stringify({
       tag_name: 'v0.1.53',
       published_at: '2026-08-23T00:00:00.000Z',
-      html_url: 'https://github.com/Koutacode/tracklog-releases/releases/tag/v0.1.53',
+      html_url: 'https://github.com/Koutacode/tracklog-pwa/releases/tag/v0.1.53',
       assets: [{
         name: releaseInfo.RELEASE_APK_NAME,
         browser_download_url: pinnedAssetUrl,
@@ -114,7 +114,7 @@ async function run() {
     tag: `v${latestVersion}`,
     publishedAt: '2026-08-23T00:00:00.000Z',
     assetUpdatedAt: '2026-08-23T00:01:00.000Z',
-    htmlUrl: `https://github.com/Koutacode/tracklog-releases/releases/tag/v${latestVersion}`,
+    htmlUrl: `https://github.com/Koutacode/tracklog-pwa/releases/tag/v${latestVersion}`,
     downloadUrl: releaseInfo.LATEST_APK_DOWNLOAD_URL,
     updateAvailable: versionCheck.compareVersions(latestVersion, '0.1.53') > 0,
     checkedAt: '2026-08-23T00:02:00.000Z',

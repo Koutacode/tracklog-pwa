@@ -7,7 +7,7 @@ async function run() {
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 Object.assign(globalThis, {
   __APP_VERSION__: '0.1.67', __BUILD_DATE__: 'test',
-  __TRACKLOG_GITHUB_OWNER__: 'Koutacode', __TRACKLOG_GITHUB_REPO__: 'tracklog-releases',
+  __TRACKLOG_GITHUB_OWNER__: 'Koutacode', __TRACKLOG_GITHUB_REPO__: 'tracklog-pwa',
 });
 const windowEvents = new EventTarget();
 const documentEvents = new EventTarget();

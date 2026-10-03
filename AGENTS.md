@@ -31,9 +31,9 @@
 - AI関連の固定文言として `要約してください` を自動挿入しない。
 
 ## Build / Artifact
-- 会社配布URLは `package.json.tracklogRelease` の新配布repo latestを使う。段階移行は `docs/APK_DISTRIBUTION_MIGRATION.md` に従い、旧repoのlatestとAPKを全必要端末の移行中は保持する。過去タグURLやPWAをアプリ共有文へ入れない。
+- 会社配布URLは `https://github.com/Koutacode/tracklog-pwa/releases/latest/download/tracklog-assist-debug.apk` のみを案内する。過去タグURLやPWAをアプリ共有文へ入れない。
 - ローカルbuildと公開latestに差がある状態で配布しない。version tagの通常Release公開後、`npm run release:verify:apk` でlatest・version・versionCode・署名・SHAを検証し、公開APKで `output/tracklog-assist-debug.apk` を置換してから実機へ `adb install -r` する。
-- 新旧の公開検証成功後、新配布repoの過去Release APK assetだけを配布対象から外す。旧repoの橋渡しAPKは削除しない。ロールバックは旧APKの再配布ではなく、より大きいversionCodeの新Releaseで行う。
+- 新しいReleaseのlatest URLとSHAが確認できた後、過去ReleaseのAPK assetは配布対象から外す。ロールバックは旧APKの再配布ではなく、より大きいversionCodeの新Releaseで行う。
 - 基本確認手順:
   1. `npm run typecheck`
   2. `npm run check:csp`
