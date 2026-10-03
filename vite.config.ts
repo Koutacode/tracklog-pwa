@@ -11,7 +11,7 @@ const releaseConfig = (pkg.tracklogRelease ?? {}) as {
   apkAssetName?: string;
 };
 const githubOwner = releaseConfig.githubOwner ?? 'Koutacode';
-const githubRepo = releaseConfig.githubRepo ?? 'tracklog-pwa';
+const githubRepo = releaseConfig.githubRepo ?? 'tracklog-releases';
 const apkAssetName = releaseConfig.apkAssetName ?? 'tracklog-assist-debug.apk';
 const projectRoot = fs.realpathSync(__dirname);
 const buildDate = new Date().toISOString();

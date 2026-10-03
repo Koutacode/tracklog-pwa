@@ -12,7 +12,7 @@ import { promisify } from 'node:util';
 // A local debug keystore or APK must never establish the company distribution signer.
 export const OFFICIAL_SIGNER_SHA256 = '14121cbf70043af3bd2fe17dd57833ed51b7f5dbf326459dde6b830f07cbb99c';
 const OWNER = 'Koutacode';
-const REPOSITORY = 'tracklog-pwa';
+const REPOSITORY = 'tracklog-releases';
 const ASSET_NAME = 'tracklog-assist-debug.apk';
 const PACKAGE_NAME = 'com.tracklog.assist';
 const execute = promisify(execFile);
@@ -53,7 +53,7 @@ export function validateRelease(release, expected) {
       throw new Error(`Invalid release asset ID or size: ${name}`);
     }
     requireMatch(asset.state, 'uploaded', `Release asset state (${name})`);
-    requireMatch(asset.browser_download_url, `https://github.com/${OWNER}/${REPOSITORY}/releases/download/${encodeURIComponent(expected.tag)}/${name}`, `Release asset URL (${name})`);
+    requireMatch(asset.browser_download_url, `https://github.com/${OWNER}/${expected.repository ?? REPOSITORY}/releases/download/${encodeURIComponent(expected.tag)}/${name}`, `Release asset URL (${name})`);
     if (asset.digest != null && !/^sha256:[0-9a-f]{64}$/i.test(asset.digest)) {
       throw new Error(`Invalid release asset SHA-256 digest: ${name}`);
     }
@@ -137,8 +137,8 @@ async function defaultTools() {
 
 const curlArguments = ['--fail', '--silent', '--show-error', '--location', '--proto', '=https', '--proto-redir', '=https', '--connect-timeout', '15', '--max-time', '120'];
 
-async function fetchPublicRelease(selector) {
-  const json = await runCommand('curl', [...curlArguments, '--header', 'Accept: application/vnd.github+json', '--header', 'X-GitHub-Api-Version: 2022-11-28', '--user-agent', 'TrackLog-release-verifier', `https://api.github.com/repos/${OWNER}/${REPOSITORY}/releases/${selector}`]);
+async function fetchPublicRelease(selector, repository = REPOSITORY) {
+  const json = await runCommand('curl', [...curlArguments, '--header', 'Accept: application/vnd.github+json', '--header', 'X-GitHub-Api-Version: 2022-11-28', '--user-agent', 'TrackLog-release-verifier', `https://api.github.com/repos/${OWNER}/${repository}/releases/${selector}`]);
   return JSON.parse(json);
 }
 
@@ -204,13 +204,16 @@ async function saveVerifiedArtifacts({ projectRoot, apkPath, sidecarPath, sha256
 // HTTPS GitHub downloads and real Android tools, with no "skip verification" mode.
 export async function verifyLatestRelease({
   projectRoot,
-  fetchRelease = fetchPublicRelease,
+  fetchRelease,
+  repository = REPOSITORY,
   download = downloadPublicAsset,
   tools,
   save = false,
   fileOperations = { copyFile, rename },
 }) {
-  const expected = await readExpectedRelease(projectRoot);
+  if (![REPOSITORY, 'tracklog-pwa'].includes(repository)) throw new Error('Unreviewed release repository');
+  const expected = { ...await readExpectedRelease(projectRoot), repository };
+  fetchRelease ??= selector => fetchPublicRelease(selector, repository);
   const inspectors = tools ?? await defaultTools();
   const latest = validateRelease(await fetchRelease('latest'), expected);
   const tagged = validateRelease(await fetchRelease(`tags/${encodeURIComponent(expected.tag)}`), expected);
@@ -219,7 +222,7 @@ export async function verifyLatestRelease({
   try {
     const apkPath = join(workPath, expected.assetName);
     const sidecarPath = `${apkPath}.sha256`;
-    const downloadUrl = `https://github.com/${OWNER}/${REPOSITORY}/releases/latest/download/${expected.assetName}`;
+    const downloadUrl = `https://github.com/${OWNER}/${repository}/releases/latest/download/${expected.assetName}`;
     await download(downloadUrl, apkPath);
     await download(`${downloadUrl}.sha256`, sidecarPath);
     const [apkInfo, sidecarInfo, sha256, sidecarBytes] = await Promise.all([
@@ -262,14 +265,15 @@ export async function verifyLatestRelease({
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   if (process.argv.length === 3 && process.argv[2] === '--help') {
-    console.log('公開latestの正式APKを検証します。Node.js 22、curl、unzip、Android Build-Tools (aapt/apksigner) とJavaが必要です。署名鍵・GitHubトークン不要。既定は読み取り検証のみ。--save は全検証成功後だけ同じAPKとSHA-256 sidecarを固定のoutputへ保存します。通常エラー時は既存2ファイルを復元します。2ファイル同時のatomic置換はできないため、プロセス中断・復元失敗時はoutput配下に残った専用一時フォルダーから手動復旧が必要です。');
-  } else if (process.argv.length > 3 || (process.argv.length === 3 && process.argv[2] !== '--save')) {
-    console.error('Usage: node scripts/verify-latest-release-apk.mjs [--save | --help]');
+    console.log('公開latestの正式APKを検証します。Node.js 22、curl、unzip、Android Build-Tools (aapt/apksigner) とJavaが必要です。署名鍵・GitHubトークン不要。--legacy は移行中の旧repoを検証します。既定は読み取り検証のみ。--save は全検証成功後だけ同じAPKとSHA-256 sidecarを固定のoutputへ保存します。通常エラー時は既存2ファイルを復元します。2ファイル同時のatomic置換はできないため、プロセス中断・復元失敗時はoutput配下に残った専用一時フォルダーから手動復旧が必要です。');
+  } else if (process.argv.slice(2).some(arg => !['--save', '--legacy'].includes(arg))) {
+    console.error('Usage: node scripts/verify-latest-release-apk.mjs [--save] [--legacy] | --help');
     process.exitCode = 1;
   } else {
     try {
-      const save = process.argv[2] === '--save';
-      const result = await verifyLatestRelease({ projectRoot: fileURLToPath(new URL('..', import.meta.url)), save });
+      const save = process.argv.includes('--save');
+      const repository = process.argv.includes('--legacy') ? 'tracklog-pwa' : REPOSITORY;
+      const result = await verifyLatestRelease({ projectRoot: fileURLToPath(new URL('..', import.meta.url)), save, repository });
       console.log(save ? '公開latest APKの検証とoutputへの保存に成功' : '公開latest APKの読み取り検証に成功（一時取得ファイルは削除済み）');
       console.log(JSON.stringify(result, null, 2));
     } catch (error) {
