@@ -1,7 +1,7 @@
 {
-  "name": "TrackLog運行アシスト",
+  "name": "TrackLog",
   "short_name": "TrackLog",
-  "description": "運行記録、日報、ルート、クラウド同期に対応した TrackLog 運行アシスト",
+  "description": "運行記録、日報、ルート、クラウド同期に対応した TrackLog",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
@@ -40,4 +40,3 @@
     }
   ]
 }
-

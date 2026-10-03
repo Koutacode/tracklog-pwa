@@ -206,7 +206,7 @@ export async function showNativeExpresswayEndPrompt(prompt: PendingExpresswayEnd
     notifications: [
       {
         id,
-        title: 'TrackLog運行アシスト: 高速道路終了確認',
+        title: 'TrackLog: 高速道路終了確認',
         body: `低速状態を検知しました（${prompt.speedKmh} km/h）。終了か継続かを選択してください。`,
         actionTypeId: ACTION_TYPE_ID,
         channelId: CHANNEL_ID,
