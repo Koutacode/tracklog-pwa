@@ -29,10 +29,14 @@ import java.util.Set;
 @CapacitorPlugin(name = "AppUpdate")
 public class AppUpdatePlugin extends Plugin {
     static final String LATEST_APK_DOWNLOAD_URL =
+        "https://github.com/Koutacode/tracklog-releases/releases/latest/download/tracklog-assist-debug.apk";
+
+    // Bridge builds may still be obtained through the legacy public repository.
+    static final String LEGACY_APK_DOWNLOAD_URL =
         "https://github.com/Koutacode/tracklog-pwa/releases/latest/download/tracklog-assist-debug.apk";
 
     static boolean isAllowedUpdateUrl(String downloadUrl) {
-        return LATEST_APK_DOWNLOAD_URL.equals(downloadUrl);
+        return LATEST_APK_DOWNLOAD_URL.equals(downloadUrl) || LEGACY_APK_DOWNLOAD_URL.equals(downloadUrl);
     }
 
     private static class ApkValidationResult {

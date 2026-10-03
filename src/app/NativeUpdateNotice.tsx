@@ -11,6 +11,7 @@ export default function NativeUpdateNotice() {
   const [release, setRelease] = useState<AndroidReleaseCheck | null>(null);
   const [updating, setUpdating] = useState(false);
   const [updateMessage, setUpdateMessage] = useState<string | null>(null);
+  const dismissedTagRef = useRef<string | null>(null);
   const updateButtonRef = useRef<HTMLButtonElement | null>(null);
 
   useEffect(() => {
@@ -19,7 +20,7 @@ export default function NativeUpdateNotice() {
     const runCheck = async () => {
       try {
         const info = await checkLatestAndroidRelease();
-        if (!info.updateAvailable) return;
+        if (!info.updateAvailable || info.tag === dismissedTagRef.current) return;
         if (cancelled) return;
         setRelease(info);
       } catch {
@@ -108,6 +109,17 @@ export default function NativeUpdateNotice() {
           type="button"
         >
           {updating ? '準備中...' : '最新版をインストール'}
+        </button>
+        <button
+          className="native-update-card__button"
+          onClick={() => {
+            dismissedTagRef.current = release.tag;
+            setRelease(null);
+            setUpdateMessage(null);
+          }}
+          type="button"
+        >
+          後で更新する（通常利用を続ける）
         </button>
       </div>
     </div>
