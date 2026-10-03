@@ -32,6 +32,21 @@ android {
             ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
     }
+    testOptions {
+        unitTests.all {
+            // Keep Robolectric SDK downloads/locks inside the isolated build workspace.
+            def testHome = layout.buildDirectory.dir("robolectric-home").get().asFile
+            systemProperty "user.home", testHome.absolutePath
+            systemProperty "robolectric.dependency.repo.url", "https://repo.maven.apache.org/maven2"
+            def testProxy = System.getenv("HTTPS_PROXY") ?: System.getenv("https_proxy")
+            if (testProxy) {
+                def proxyUri = new URI(testProxy)
+                systemProperty "robolectric.dependency.proxy.host", proxyUri.host
+                systemProperty "robolectric.dependency.proxy.port", proxyUri.port > 0 ? proxyUri.port : 80
+            }
+            doFirst { testHome.mkdirs() }
+        }
+    }
     buildTypes {
         debug {
             if (tracklogDebugKeystorePath) {
@@ -58,6 +73,7 @@ dependencies {
     implementation "androidx.core:core-splashscreen:$coreSplashScreenVersion"
     implementation project(':capacitor-android')
     testImplementation "junit:junit:$junitVersion"
+    testImplementation "org.robolectric:robolectric:4.14.1"
     androidTestImplementation "androidx.test.ext:junit:$androidxJunitVersion"
     androidTestImplementation "androidx.test.espresso:espresso-core:$androidxEspressoCoreVersion"
     implementation project(':capacitor-cordova-android-plugins')
