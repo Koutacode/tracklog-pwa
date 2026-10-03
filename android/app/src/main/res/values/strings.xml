@@ -1,7 +1,7 @@
 <?xml version='1.0' encoding='utf-8'?>
 <resources>
-    <string name="app_name">TrackLog運行アシスト</string>
-    <string name="title_activity_main">TrackLog運行アシスト</string>
+    <string name="app_name">TrackLog</string>
+    <string name="title_activity_main">TrackLog</string>
     <string name="package_name">com.tracklog.assist</string>
     <string name="custom_url_scheme">com.tracklog.assist</string>
     <string name="default_notification_channel_id">tracklog_admin_messages</string>

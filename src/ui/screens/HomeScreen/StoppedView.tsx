@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import BigButton from '../../components/BigButton';
 
 type StoppedViewProps = {
@@ -54,6 +54,18 @@ export const StoppedView: React.FC<StoppedViewProps> = ({
   voiceResult,
   voiceError,
 }) => {
+  const [secondaryOpen, setSecondaryOpen] = useState(workActive || ferryActive);
+  const previousActive = useRef({ workActive, ferryActive });
+  useEffect(() => {
+    if ((workActive && !previousActive.current.workActive)
+      || (ferryActive && !previousActive.current.ferryActive)) {
+      setSecondaryOpen(true);
+    }
+    previousActive.current = { workActive, ferryActive };
+  }, [workActive, ferryActive]);
+  const secondaryStatus = [workActive && 'その他作業中', ferryActive && 'フェリー乗船中']
+    .filter(Boolean).join('・');
+
   return (
     <div className="stopped-view home-unified-actions">
       <section className="home-action-panel" aria-labelledby="primary-actions-title">
@@ -62,31 +74,35 @@ export const StoppedView: React.FC<StoppedViewProps> = ({
           {loadActive ? (
             <BigButton label="積込終了" variant="neutral" disabled={disabled} onClick={() => onToggle('load', 'end')} />
           ) : (
-            <BigButton label="積込" disabled={disabled || !canStartLoad} onClick={() => onToggle('load', 'start')} />
+            <BigButton label="積込開始" disabled={disabled || !canStartLoad} onClick={() => onToggle('load', 'start')} />
           )}
 
           {unloadActive ? (
             <BigButton label="荷卸終了" variant="neutral" disabled={disabled} onClick={() => onToggle('unload', 'end')} />
           ) : (
-            <BigButton label="荷卸" disabled={disabled || !canStartUnload} onClick={() => onToggle('unload', 'start')} />
+            <BigButton label="荷卸開始" disabled={disabled || !canStartUnload} onClick={() => onToggle('unload', 'start')} />
           )}
 
           {breakActive ? (
             <BigButton label="休憩終了" variant="neutral" disabled={disabled} onClick={() => onToggle('break', 'end')} />
           ) : (
-            <BigButton label="休憩" disabled={disabled || !canStartBreak} onClick={() => onToggle('break', 'start')} />
+            <BigButton label="休憩開始" disabled={disabled || !canStartBreak} onClick={() => onToggle('break', 'start')} />
           )}
 
           {restActive ? (
             <BigButton label="休息終了" variant="neutral" disabled={disabled} onClick={onRestEnd} />
           ) : (
-            <BigButton label="休息" disabled={disabled || !canStartRest} onClick={() => onOdoDialog('rest_start')} />
+            <BigButton label="休息開始" disabled={disabled || !canStartRest} onClick={() => onOdoDialog('rest_start')} />
           )}
         </div>
       </section>
 
-      <details className="home-secondary-actions">
-        <summary>その他の操作</summary>
+      <details
+        className="home-secondary-actions"
+        open={secondaryOpen}
+        onToggle={event => setSecondaryOpen(event.currentTarget.open)}
+      >
+        <summary>その他の操作{secondaryStatus && <span className="home-secondary-actions__status"> · {secondaryStatus}</span>}</summary>
         <div className="home-secondary-action-grid">
           <button
             type="button"

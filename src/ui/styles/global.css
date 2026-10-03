@@ -1616,6 +1616,12 @@ a:hover {
 }
 .home-icon-action span { color: #4da3ff; font-size: 23px; }
 .home-icon-action:disabled { opacity: 0.42; }
+@media (max-width: 480px) {
+  .home-secondary-action-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .home-icon-action { font-size: 14px; border-bottom: 1px solid rgba(148, 163, 184, 0.14); }
+}
+.home-secondary-actions__status { display: block; color: #93c5fd; font-size: 14px; }
+
 .home-voice-feedback { display: grid; gap: 4px; padding: 10px 14px; color: #cbd5e1; font-size: 13px; }
 .home-voice-feedback__error { color: #fca5a5; }
 
@@ -1677,7 +1683,7 @@ a:hover {
   .home-active-status__copy strong { font-size: 17px; }
   .home-active-status__time strong { font-size: 16px; }
   .home-rest-guide__times strong { font-size: 14px; }
-  .home-icon-action { font-size: 11px; }
+  .home-icon-action { font-size: 14px; }
 }
 
 /* Home runtime status and expressway confirmation */

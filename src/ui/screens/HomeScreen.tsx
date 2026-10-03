@@ -796,7 +796,7 @@ export default function HomeScreen() {
             <div className="start-hero__brand">
               <div className="start-hero__brand-mark">TL</div>
               <div>
-                <div className="start-hero__brand-name">TrackLog運行アシスト</div>
+                <div className="start-hero__brand-name">TrackLog</div>
                 <div className="start-hero__brand-sub">運行記録</div>
               </div>
             </div>

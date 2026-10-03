@@ -125,7 +125,9 @@ export default function OdoDialog(props: OdoDialogProps) {
           borderRadius: 16,
           padding: 16,
           marginTop: 24,
-          maxHeight: '90vh',
+          maxHeight: 'calc(100dvh - 40px)',
+          overflowY: 'auto',
+          overscrollBehavior: 'contain',
           boxSizing: 'border-box',
         }}
       >
@@ -153,6 +155,7 @@ export default function OdoDialog(props: OdoDialogProps) {
               value={value}
               style={{
                 flex: 1,
+                minWidth: 0,
                 height: 52,
                 borderRadius: 12,
                 border: '1px solid #374151',
@@ -263,7 +266,7 @@ export default function OdoDialog(props: OdoDialogProps) {
                 type="button"
                 disabled={busy}
                 onClick={onCancel}
-                style={{ padding: '10px 14px', borderRadius: 12 }}
+                style={{ minHeight: 48, padding: '10px 14px', borderRadius: 12 }}
               >
                 戻る
               </button>
@@ -271,7 +274,7 @@ export default function OdoDialog(props: OdoDialogProps) {
             <button
               type="submit"
               disabled={!canConfirm}
-              style={{ padding: '10px 14px', borderRadius: 12, fontWeight: 800 }}
+              style={{ minHeight: 48, padding: '10px 14px', borderRadius: 12, fontWeight: 800 }}
             >
               {busy ? '処理中…' : confirmText}
             </button>
