@@ -70,3 +70,11 @@ Google Driveへの反映は親側で既存月次文書へこの非秘密の記�
 - React test rendererの非推奨通知とテスト用Capacitor plugin二重登録通知あり。合成テストの警告であり、本番ブラウザのconsole検証結果ではない。
 - 新配布repoは現在のGitHub接続で404。作成・権限追加は行っていない。正式署名の新APK・公開照合・GitHub CI・Windows PowerShell・視覚UI・実機は未検証。
 - push/PR/merge/tag/Release、可視性変更、履歴書換え、DB変更、端末操作、追加認証、課金変更は実施していない。GitHub Secretsや既存署名鍵を抽出していない。
+
+## 準備状況の更新（2026-10-03、PR前）
+
+- 親から、新配布repoの作成と、利用者本人による期限2026-12-31の配布repo限定Contents RW / Metadata R資格情報の発行、元repoの`TRACKLOG_DISTRIBUTION_TOKEN`設定完了の連絡を受領。値は参照・抽出・ローカル設定・試用していない。
+- 既存GitHub接続でrepoのPUBLIC状態とbranch一覧が空であることを読取確認した。default_branch表示はmainでも実際のbranch/commitはない。公開処理のpreflightは実在commitを要求するため、この状態では公開できない。
+- 必要な次の操作は、別途承認のうえ新配布repoにREADMEだけの初期commit/mainを作ること。本文は製品名とAndroid APK配布用途のみとし、ソース・履歴・個人情報は含めない。確認済み公開ハンドル/noreplyをauthor/committerに使う。この段階では実行しない。
+- 元repoのworkflowは通常CIとv*タグpush専用Android Releaseの2本。作業branchのみのpushとmain向けdraft PRは通常CIだけを対象とし、tag push・merge・手動公開workflowは行わない。
+- 追加差分の個人情報/秘密レビュー、commitのauthor/committerのnoreply照合、最新origin/mainが基準SHAから変わっていないことを確認した。PRと通常CIの結果は親への最終報告で別途記録する。
