@@ -1,14 +1,13 @@
 {
   "name": "tracklog-assist",
-  "version": "0.1.67",
+  "version": "0.1.68",
   "private": true,
   "description": "Truck operation log native app with offline support and day-based segment calculations.",
   "tracklogRelease": {
     "githubOwner": "Koutacode",
-    "githubRepo": "tracklog-releases",
+    "githubRepo": "tracklog-pwa",
     "apkAssetName": "tracklog-assist-debug.apk",
-    "localApkPath": "output/tracklog-assist-debug.apk",
-    "migrationPhase": "bridge"
+    "localApkPath": "output/tracklog-assist-debug.apk"
   },
   "scripts": {
     "dev": "vite",
@@ -28,7 +27,7 @@
     "deploy:pages": "wrangler pages deploy dist --project-name tracklog-assist",
     "release:prepare": "powershell -ExecutionPolicy Bypass -File skills/tracklog-release-notion/scripts/prepare-tracklog-release.ps1 -Build -SyncAndroid -AssembleDebug",
     "release:verify:apk:linux": "node scripts/verify-latest-release-apk.mjs",
-    "test:release-apk": "node --test scripts/verify-latest-release-apk.test.mjs && node --test scripts/publish-android-release.test.mjs",
+    "test:release-apk": "node --test scripts/verify-latest-release-apk.test.mjs && node --test scripts/original-distribution.test.mjs",
     "release:verify:apk": "powershell -ExecutionPolicy Bypass -File scripts/verify-latest-release-apk.ps1",
     "temp:create": "powershell -NoProfile -File scripts/use-tracklog-temporary-workspace.ps1 -Create",
     "temp:list": "powershell -NoProfile -File scripts/use-tracklog-temporary-workspace.ps1 -List",

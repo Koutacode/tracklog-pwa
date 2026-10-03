@@ -1,5 +1,5 @@
 const DEFAULT_GITHUB_OWNER = 'Koutacode';
-const DEFAULT_GITHUB_REPO = 'tracklog-releases';
+const DEFAULT_GITHUB_REPO = 'tracklog-pwa';
 
 export const GITHUB_OWNER =
   typeof __TRACKLOG_GITHUB_OWNER__ === 'string' && __TRACKLOG_GITHUB_OWNER__.trim()
