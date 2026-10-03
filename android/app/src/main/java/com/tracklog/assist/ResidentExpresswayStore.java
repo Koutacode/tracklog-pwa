@@ -678,7 +678,12 @@ final class ResidentExpresswayStore {
             ResidentExpresswayExitWatch.Selection selection =
                     new ResidentExpresswayExitWatch.Selection(probe.endMode, fix);
             if (ResidentExpresswayExitWatch.shouldPrompt(current.exitWatch, selection, signal.policySignal)) {
-                return commitEndPrompt(context, probeId, signal);
+                String promptId = commitEndPrompt(context, probeId, signal);
+                if (promptId.isEmpty() && matchesCurrentProbe(read(context), probeId)) {
+                    // A full handoff queue must back off, not immediately requery the server.
+                    markProbeFailure(context, probeId, "response", nowMs);
+                }
+                return promptId;
             }
             Snapshot next = current.copy(current.tripId, current.revision, current.open,
                     current.paused, current.keepSuppressed, current.promptId, current.events,

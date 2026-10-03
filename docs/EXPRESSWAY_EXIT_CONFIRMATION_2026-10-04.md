@@ -36,12 +36,12 @@
 - `npm run check:csp`
 - `npm run build` / `npm run check:offline`（38 precached files）
 - `npm run cap:sync:android`
-- `:app:testDebugUnitTest`：111件、失敗0（既存85＋追加26）
+- `:app:testDebugUnitTest`：112件、失敗0（既存85＋追加27）
 - `:app:assembleDebugAndroidTest` / `:app:assembleDebug`
 - `npm run test:release-apk` / `bash scripts/test-setup-tracklog-cloud.sh`
 - `git diff --check`
 
-追加26件は純粋判定15件、Robolectric保存・再読込11件。短時間ETC通過→加速、低速測定欠落、SA/渋滞、照会間隔、通信失敗/復帰、状態再読込、継続回答後の退出、重複応答/終了操作、古い区間への応答、旧JSON互換、時計逆行を含む。RobolectricはAPI28の隔離JVMであり、実機再起動やOSの常駐維持を検証したものではない。
+追加27件は純粋判定15件、Robolectric保存・再読込12件。短時間ETC通過→加速、低速測定欠落、SA/渋滞、照会間隔、通信失敗/復帰、状態再読込、継続回答後の退出、重複応答/終了操作、古い区間への応答、旧JSON互換、時計逆行、イベントキュー満杯時の保持と照会バックオフを含む。RobolectricはAPI28の隔離JVMであり、実機再起動やOSの常駐維持を検証したものではない。
 
 独立レビューで、追加pending照会による旧SA経路の遅延を指摘→旧経路優先へ修正し、実速度列を使う保存付き回帰試験を追加。再レビューでブロッカーなし。lint専用scriptは元々ない。
 

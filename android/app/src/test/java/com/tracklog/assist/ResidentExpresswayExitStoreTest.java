@@ -208,6 +208,31 @@ public class ResidentExpresswayExitStoreTest {
         assertFalse(resolve(candidate, gate(), 22_000).isEmpty());
     }
 
+    @Test public void fullEventQueueRetainsCandidateAndBacksOffInsteadOfRepeatedQueries() throws Exception {
+        observe(1_000, 0, 70, false);
+        ResidentExpresswayStore.Probe probe = observe(11_000, .001, 18, true);
+        android.content.SharedPreferences prefs = context.getSharedPreferences(
+                ResidentExpresswayStore.PREFERENCES_NAME, 0);
+        JSONObject root = new JSONObject(prefs.getString(ResidentExpresswayStore.KEY_STATE_JSON, ""));
+        org.json.JSONArray events = new org.json.JSONArray();
+        for (int i = 0; i < ResidentExpresswayStore.MAX_EVENT_COUNT; i++) {
+            events.put(new JSONObject().put("id", "synthetic-event-" + i)
+                    .put("tripId", "synthetic-trip").put("kind", "end_prompt")
+                    .put("detectedAt", "2026-01-01T00:00:00Z")
+                    .put("geo", new JSONObject().put("lat", 0).put("lon", 0)));
+        }
+        root.put("events", events);
+        assertTrue(prefs.edit().putString(ResidentExpresswayStore.KEY_STATE_JSON, root.toString()).commit());
+        assertEquals("", resolve(probe, gate(), 12_000));
+        ResidentExpresswayStore.Snapshot full = ResidentExpresswayStore.snapshot(context);
+        assertEquals(ResidentExpresswayStore.MAX_EVENT_COUNT, full.events.size());
+        assertTrue(full.open);
+        assertEquals(probe.id, full.pendingProbe.id);
+        assertEquals(1, full.pendingProbe.attemptCount);
+        assertNull(ResidentExpresswayStore.dueProbe(context, 12_001));
+        assertNotNull(ResidentExpresswayStore.dueProbe(context, 42_000));
+    }
+
     private ResidentExpresswayStore.Probe observe(long at, double lon, double speed, boolean brief) {
         return ResidentExpresswayStore.observeExitWatch(context, "synthetic-trip",
                 new ResidentExpresswayExitWatch.Fix(at, 0, lon, 10, speed), brief);
