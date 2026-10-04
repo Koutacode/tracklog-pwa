@@ -22,9 +22,10 @@ test('release workflow uses existing repo token and all publication phases targe
   assert.ok(!/TRACKLOG_DISTRIBUTION|create-github-app-token|tracklog-releases|workflow_dispatch/.test(workflow));
   assert.ok(workflow.includes("tags:\n      - 'v*'"));
   assert.ok(workflow.includes('GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}'));
-  for (const name of ['Create draft GitHub Release', 'Verify draft release APK', 'Publish verified GitHub Release', 'Remove APK assets from older releases']) {
+  for (const name of ['Create draft GitHub Release', 'Verify draft release APK', 'Publish verified GitHub Release', 'Preserve previously published APK assets']) {
     assert.ok(workflow.includes(name), name);
   }
+  assert.ok(!/gh api --method DELETE/.test(workflow), 'release must retain previous APK assets');
   assert.ok(workflow.includes('https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/tracklog-assist-debug.apk'));
   assert.ok(workflow.includes('repos/${GITHUB_REPOSITORY}/releases/${TRACKLOG_RELEASE_ID}'));
   assert.ok(!existsSync(new URL('../.github/workflows/distribution-access-check.yml', import.meta.url)));

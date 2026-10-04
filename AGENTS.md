@@ -33,7 +33,7 @@
 ## Build / Artifact
 - 会社配布URLは `https://github.com/Koutacode/tracklog-pwa/releases/latest/download/tracklog-assist-debug.apk` のみを案内する。過去タグURLやPWAをアプリ共有文へ入れない。
 - ローカルbuildと公開latestに差がある状態で配布しない。version tagの通常Release公開後、`npm run release:verify:apk` でlatest・version・versionCode・署名・SHAを検証し、公開APKで `output/tracklog-assist-debug.apk` を置換してから実機へ `adb install -r` する。
-- 新しいReleaseのlatest URLとSHAが確認できた後、過去ReleaseのAPK assetは配布対象から外す。ロールバックは旧APKの再配布ではなく、より大きいversionCodeの新Releaseで行う。
+- 2026-10-04の利用者指示により、過去ReleaseのAPKとSHA assetは自動削除せず保持する。利用者への更新案内はlatest URLのみとし、ロールバックはより大きいversionCodeの新Releaseで行う。
 - 基本確認手順:
   1. `npm run typecheck`
   2. `npm run check:csp`

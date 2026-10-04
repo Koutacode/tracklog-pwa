@@ -50,7 +50,7 @@ npm run cap:sync:android
 
 `.github/workflows/ci.yml`のvalidateは基本検証・Edge Function型検査、android-validationは非本番設定によるAndroid単体試験・本体APK・androidTest APKコンパイル、temporary-workspacesはWindowsの一時作業安全性を確認する。CIは端末上の試験を実行した証拠ではない。
 
-**`v*`タグpushは正式公開まで自動実行する操作**。単なるビルド試験として使わない。既存workflowがGitHub Secretsから設定と従来署名鍵を復元し、package・version・versionCode・公式署名・draft再取得を検証後、通常Releaseとしてlatestに公開する。公開latestのAPK・SHA sidecarを照合してから旧ReleaseのAPK資産を配布対象から外す。この最終工程まで成功したことを確認する。失敗時のdraft復旧も既存workflowに従う。
+**`v*`タグpushは正式公開まで自動実行する操作**。単なるビルド試験として使わない。既存workflowがGitHub Secretsから設定と従来署名鍵を復元し、package・version・versionCode・公式署名・draft再取得を検証後、通常Releaseとしてlatestに公開する。公開latestのAPK・SHA sidecarを照合し、旧ReleaseのAPK/SHA資産は自動削除せず保持する（2026-10-04利用者指示）。この最終工程まで成功したことを確認する。失敗時のdraft復旧も既存workflowに従う。
 
 APK公開はEdge Functions・DB migrationを自動適用しない。サーバー変更が含まれる場合は別工程の適用対象・承認範囲・確認結果を明記する。
 

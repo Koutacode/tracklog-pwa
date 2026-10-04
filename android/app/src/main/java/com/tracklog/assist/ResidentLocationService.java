@@ -452,6 +452,7 @@ public final class ResidentLocationService extends Service {
                         location.hasSpeed(),
                         location.hasSpeed() ? location.getSpeed() : 0d
                 );
+        Double previousSpeedMs = expresswayDetectionState.lastSpeedMs;
         ResidentExpresswayDetectionPolicy.Result result =
                 ResidentExpresswayDetectionPolicy.advance(
                         expresswayDetectionState,
@@ -472,28 +473,34 @@ public final class ResidentLocationService extends Service {
             }
             return;
         }
-        if (result.effect.kind != ResidentExpresswayDetectionPolicy.EffectKind.PROBE_START
-                && result.effect.kind != ResidentExpresswayDetectionPolicy.EffectKind.PROBE_END) {
-            return;
+        if (result.effect.kind == ResidentExpresswayDetectionPolicy.EffectKind.PROBE_START
+                || result.effect.kind == ResidentExpresswayDetectionPolicy.EffectKind.PROBE_END) {
+            ResidentExpresswayStore.Probe probe = ResidentExpresswayStore.createProbe(
+                    this,
+                    result.effect.kind == ResidentExpresswayDetectionPolicy.EffectKind.PROBE_START
+                            ? ResidentExpresswayStore.ProbeKind.START
+                            : ResidentExpresswayStore.ProbeKind.END,
+                    tripId,
+                    ResidentLocationQueue.toIsoTimestamp(location.getTime()),
+                    location.getTime(), location.getLatitude(), location.getLongitude(),
+                    location.hasAccuracy() ? (double) location.getAccuracy() : null,
+                    result.effect.speedKmh, result.effect.accelerationMs2,
+                    result.effect.lowSpeedElapsedMs,
+                    elapsedRealtimeMs >= 0L ? monotonicLocationSessionId : "", elapsedRealtimeMs
+            );
+            if (probe != null) scheduleDueExpresswayProbe();
         }
-        ResidentExpresswayStore.Probe probe = ResidentExpresswayStore.createProbe(
-                this,
-                result.effect.kind == ResidentExpresswayDetectionPolicy.EffectKind.PROBE_START
-                        ? ResidentExpresswayStore.ProbeKind.START
-                        : ResidentExpresswayStore.ProbeKind.END,
-                tripId,
-                ResidentLocationQueue.toIsoTimestamp(location.getTime()),
-                location.getTime(),
-                location.getLatitude(),
-                location.getLongitude(),
-                location.hasAccuracy() ? (double) location.getAccuracy() : null,
-                result.effect.speedKmh,
-                result.effect.accelerationMs2,
-                result.effect.lowSpeedElapsedMs,
-                elapsedRealtimeMs >= 0L ? monotonicLocationSessionId : "",
-                elapsedRealtimeMs
-        );
-        if (probe != null) scheduleDueExpresswayProbe();
+        if (nativeState.open && result.ignoredReason == ResidentExpresswayDetectionPolicy.IgnoredReason.NONE) {
+            double speedKmh = location.getSpeed() * 3.6d;
+            boolean briefDeceleration = ResidentExpresswayExitWatch.isBriefDeceleration(
+                    previousSpeedMs, speedKmh, nativeState.config, result);
+            ResidentExpresswayStore.Probe supplemental = ResidentExpresswayStore.observeExitWatch(
+                    this, tripId, new ResidentExpresswayExitWatch.Fix(location.getTime(),
+                            location.getLatitude(), location.getLongitude(),
+                            location.hasAccuracy() ? location.getAccuracy() : Double.NaN, speedKmh),
+                    briefDeceleration);
+            if (supplemental != null) scheduleDueExpresswayProbe();
+        }
     }
 
     private void scheduleDueExpresswayProbe() {
@@ -604,18 +611,20 @@ public final class ResidentLocationService extends Service {
                 }
                 return;
             }
-            if (!ResidentExpresswayDetectionPolicy.shouldPromptForEnd(
-                    result.signal.policySignal,
-                    probe.lowSpeedElapsedMs
-            )) {
-                ResidentExpresswayStore.clearProbe(this, probe.id);
-                return;
+            String promptId;
+            if (!ResidentExpresswayExitWatch.LEGACY.equals(probe.endMode)) {
+                promptId = ResidentExpresswayStore.resolveSupplementalEnd(
+                        this, probe.id, result.signal, System.currentTimeMillis());
+                // Non-prompt responses clear their probe and retain only bounded road evidence.
+                if (promptId.isEmpty()) return;
+            } else {
+                if (!ResidentExpresswayDetectionPolicy.shouldPromptForEnd(
+                        result.signal.policySignal, probe.lowSpeedElapsedMs)) {
+                    ResidentExpresswayStore.clearProbe(this, probe.id);
+                    return;
+                }
+                promptId = ResidentExpresswayStore.commitEndPrompt(this, probe.id, result.signal);
             }
-            String promptId = ResidentExpresswayStore.commitEndPrompt(
-                    this,
-                    probe.id,
-                    result.signal
-            );
             if (!promptId.isEmpty()) {
                 expresswayDetectionState = ResidentExpresswayDetectionPolicy.afterRestoredEndPrompt(
                         expresswayDetectionState,

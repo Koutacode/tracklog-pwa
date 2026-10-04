@@ -86,6 +86,7 @@ final class ResidentExpresswayStore {
         final int attemptCount;
         final long retryAfterAtMs;
         final String lastFailureCategory;
+        final String endMode;
         final long failureUpdatedAtMs;
 
         Probe(
@@ -109,7 +110,36 @@ final class ResidentExpresswayStore {
                 String lastFailureCategory,
                 long failureUpdatedAtMs
         ) {
+            this(id, kind, tripId, expectedRevision, detectedAt, detectedAtMs, latitude,
+                    longitude, accuracyM, speedKmh, accelerationMs2, lowSpeedElapsedMs,
+                    monotonicSessionId, elapsedRealtimeMs, config, attemptCount, retryAfterAtMs,
+                    lastFailureCategory, failureUpdatedAtMs, ResidentExpresswayExitWatch.LEGACY);
+        }
+
+        Probe(
+                String id,
+                ProbeKind kind,
+                String tripId,
+                long expectedRevision,
+                String detectedAt,
+                long detectedAtMs,
+                double latitude,
+                double longitude,
+                Double accuracyM,
+                double speedKmh,
+                Double accelerationMs2,
+                long lowSpeedElapsedMs,
+                String monotonicSessionId,
+                long elapsedRealtimeMs,
+                ResidentExpresswayDetectionPolicy.Config config,
+                int attemptCount,
+                long retryAfterAtMs,
+                String lastFailureCategory,
+                long failureUpdatedAtMs,
+                String endMode
+        ) {
             this.id = id;
+            this.endMode = endMode;
             this.kind = kind;
             this.tripId = tripId;
             this.expectedRevision = expectedRevision;
@@ -153,7 +183,8 @@ final class ResidentExpresswayStore {
                     nextCount,
                     retryAfter,
                     category,
-                    nowMs
+                    nowMs,
+                    endMode
             );
         }
     }
@@ -302,6 +333,7 @@ final class ResidentExpresswayStore {
         final Probe pendingProbe;
         final ResidentExpresswayDetectionPolicy.Config config;
         final boolean storageHealthy;
+        final ResidentExpresswayExitWatch.State exitWatch;
 
         Snapshot(
                 String tripId,
@@ -316,6 +348,25 @@ final class ResidentExpresswayStore {
                 ResidentExpresswayDetectionPolicy.Config config,
                 boolean storageHealthy
         ) {
+            this(tripId, revision, open, paused, keepSuppressed, promptId, events,
+                    pendingPrompt, pendingProbe, config, storageHealthy,
+                    ResidentExpresswayExitWatch.State.empty());
+        }
+
+        Snapshot(
+                String tripId,
+                long revision,
+                boolean open,
+                boolean paused,
+                boolean keepSuppressed,
+                String promptId,
+                List<Event> events,
+                Event pendingPrompt,
+                Probe pendingProbe,
+                ResidentExpresswayDetectionPolicy.Config config,
+                boolean storageHealthy,
+                ResidentExpresswayExitWatch.State exitWatch
+        ) {
             this.tripId = tripId;
             this.revision = Math.max(0L, revision);
             this.open = open;
@@ -327,6 +378,12 @@ final class ResidentExpresswayStore {
             this.pendingProbe = pendingProbe;
             this.config = config;
             this.storageHealthy = storageHealthy;
+            this.exitWatch = exitWatch;
+        }
+
+        Snapshot withExitWatch(ResidentExpresswayExitWatch.State watch) {
+            return new Snapshot(tripId, revision, open, paused, keepSuppressed, promptId,
+                    events, pendingPrompt, pendingProbe, config, storageHealthy, watch);
         }
 
         Snapshot copy(
@@ -362,7 +419,9 @@ final class ResidentExpresswayStore {
                     nextPendingPrompt,
                     nextProbe,
                     nextConfig,
-                    storageHealthy
+                    storageHealthy,
+                    nextTripId.equals(tripId) && nextOpen && open && nextRevision == revision
+                            ? exitWatch : ResidentExpresswayExitWatch.State.empty()
             );
         }
     }
@@ -508,11 +567,13 @@ final class ResidentExpresswayStore {
         synchronized (LOCK) {
             Snapshot current = read(context);
             String normalizedTripId = normalizeText(tripId, 200);
+            boolean replacesSupplemental = kind == ProbeKind.END && current.pendingProbe != null
+                    && !ResidentExpresswayExitWatch.LEGACY.equals(current.pendingProbe.endMode);
             if (!current.storageHealthy
                     || normalizedTripId.isEmpty()
                     || !normalizedTripId.equals(current.tripId)
                     || current.paused
-                    || current.pendingProbe != null
+                    || (current.pendingProbe != null && !replacesSupplemental)
                     || (kind == ProbeKind.START && current.open)
                     || (kind == ProbeKind.END && (!current.open || !current.promptId.isEmpty()))) {
                 return null;
@@ -549,7 +610,87 @@ final class ResidentExpresswayStore {
                     probe,
                     current.config
             );
+            if (replacesSupplemental && ResidentExpresswayExitWatch.BRIEF.equals(current.pendingProbe.endMode)) {
+                Probe displaced = current.pendingProbe;
+                ResidentExpresswayExitWatch.State watch = current.exitWatch;
+                // Keep the ETC point available if the higher-priority sustained-low-speed
+                // check does not produce a prompt. The displaced response is ID-guarded.
+                next = next.withExitWatch(new ResidentExpresswayExitWatch.State(watch.origin,
+                        watch.lastProbe, watch.outside, watch.keep,
+                        new ResidentExpresswayExitWatch.Fix(displaced.detectedAtMs,
+                                displaced.latitude, displaced.longitude,
+                                displaced.accuracyM == null ? Double.NaN : displaced.accuracyM,
+                                displaced.speedKmh)));
+            }
             return write(context, next) ? probe : null;
+        }
+    }
+
+    static Probe observeExitWatch(Context context, String tripId,
+            ResidentExpresswayExitWatch.Fix fix, boolean briefDeceleration) {
+        synchronized (LOCK) {
+            Snapshot current = read(context);
+            if (!current.storageHealthy || !current.tripId.equals(tripId) || !current.open
+                    || current.paused || !current.promptId.isEmpty() || !fix.valid()) return null;
+            if (current.pendingProbe != null
+                    && !ResidentExpresswayExitWatch.LEGACY.equals(current.pendingProbe.endMode)
+                    && (fix.atMs < current.pendingProbe.detectedAtMs
+                        || fix.atMs - current.pendingProbe.detectedAtMs > ResidentExpresswayExitWatch.EVIDENCE_MAX_AGE_MS)) {
+                if (!clearProbe(context, current.pendingProbe.id)) return null;
+                current = read(context);
+            }
+            ResidentExpresswayExitWatch.State watch = ResidentExpresswayExitWatch.observe(
+                    current.exitWatch, fix, briefDeceleration, current.keepSuppressed);
+            ResidentExpresswayExitWatch.Selection selection = current.pendingProbe == null
+                    ? ResidentExpresswayExitWatch.select(watch, fix) : null;
+            if (selection == null) {
+                if (watch != current.exitWatch) write(context, current.withExitWatch(watch));
+                return null;
+            }
+            ResidentExpresswayExitWatch.Fix selected = selection.fix;
+            Probe probe = new Probe(UUID.randomUUID().toString(), ProbeKind.END, tripId,
+                    current.revision, ResidentLocationQueue.toIsoTimestamp(selected.atMs), selected.atMs,
+                    selected.lat, selected.lon, selected.accuracy, selected.speedKmh, null, 0L,
+                    "", -1L, current.config, 0, 0L, "", 0L, selection.mode);
+            Snapshot next = current.copy(current.tripId, current.revision, current.open,
+                    current.paused, current.keepSuppressed, current.promptId, current.events,
+                    probe, current.config).withExitWatch(watch.queried(fix, selection.mode));
+            if (!write(context, next)) return null;
+            return probe;
+        }
+    }
+
+    /** Returns a prompt ID only after its durable commit; safe for delayed/duplicate responses. */
+    static String resolveSupplementalEnd(Context context, String probeId, SignalDetails signal, long nowMs) {
+        synchronized (LOCK) {
+            Snapshot current = read(context);
+            if (!matchesCurrentProbe(current, probeId) || !current.open || current.paused
+                    || !current.promptId.isEmpty()) return "";
+            Probe probe = current.pendingProbe;
+            if (ResidentExpresswayExitWatch.LEGACY.equals(probe.endMode)) return "";
+            ResidentExpresswayExitWatch.Fix fix = new ResidentExpresswayExitWatch.Fix(
+                    probe.detectedAtMs, probe.latitude, probe.longitude,
+                    probe.accuracyM == null ? Double.NaN : probe.accuracyM, probe.speedKmh);
+            if (!ResidentExpresswayExitWatch.fresh(fix, nowMs)) {
+                clearProbe(context, probeId);
+                return "";
+            }
+            ResidentExpresswayExitWatch.Selection selection =
+                    new ResidentExpresswayExitWatch.Selection(probe.endMode, fix);
+            if (ResidentExpresswayExitWatch.shouldPrompt(current.exitWatch, selection, signal.policySignal)) {
+                String promptId = commitEndPrompt(context, probeId, signal);
+                if (promptId.isEmpty() && matchesCurrentProbe(read(context), probeId)) {
+                    // A full handoff queue must back off, not immediately requery the server.
+                    markProbeFailure(context, probeId, "response", nowMs);
+                }
+                return promptId;
+            }
+            Snapshot next = current.copy(current.tripId, current.revision, current.open,
+                    current.paused, current.keepSuppressed, current.promptId, current.events,
+                    null, current.config).withExitWatch(
+                            ResidentExpresswayExitWatch.resolved(current.exitWatch, fix, signal.policySignal));
+            write(context, next);
+            return "";
         }
     }
 
@@ -812,6 +953,12 @@ final class ResidentExpresswayStore {
                     null,
                     current.config
             );
+            if (!end) {
+                next = next.withExitWatch(ResidentExpresswayExitWatch.State.empty().kept(
+                        new ResidentExpresswayExitWatch.Fix(Math.max(1L, decidedAtMs),
+                                prompt.latitude, prompt.longitude,
+                                prompt.accuracyM == null ? 50d : prompt.accuracyM, prompt.speedKmh)));
+            }
             return write(context, next)
                     ? new DecisionResult(true, decisionId, generation)
                     : new DecisionResult(false, "", current.revision);
@@ -943,7 +1090,8 @@ final class ResidentExpresswayStore {
                     pendingPrompt,
                     probe,
                     config,
-                    processStorageHealthy
+                    processStorageHealthy,
+                    watchFromJson(root.optJSONObject("exitWatch"))
             );
         } catch (Exception exception) {
             processStorageHealthy = false;
@@ -976,7 +1124,8 @@ final class ResidentExpresswayStore {
                     .put("keepSuppressed", state.keepSuppressed)
                     .put("promptId", state.promptId)
                     .put("events", events)
-                    .put("config", configToJson(state.config));
+                    .put("config", configToJson(state.config))
+                    .put("exitWatch", watchToJson(state.exitWatch));
             if (state.pendingProbe != null) {
                 root.put("pendingProbe", probeToJson(state.pendingProbe));
             }
@@ -1014,6 +1163,7 @@ final class ResidentExpresswayStore {
         JSONObject json = new JSONObject()
                 .put("id", probe.id)
                 .put("kind", probe.kind.wireName)
+                .put("endMode", probe.endMode)
                 .put("tripId", probe.tripId)
                 .put("expectedRevision", probe.expectedRevision)
                 .put("detectedAt", probe.detectedAt)
@@ -1060,8 +1210,37 @@ final class ResidentExpresswayStore {
                 Math.max(0, json.optInt("attemptCount", 0)),
                 Math.max(0L, json.optLong("retryAfterAtMs", 0L)),
                 normalizeFailureCategory(json.optString("lastFailureCategory", "")),
-                Math.max(0L, json.optLong("failureUpdatedAtMs", 0L))
+                Math.max(0L, json.optLong("failureUpdatedAtMs", 0L)),
+                json.optString("endMode", ResidentExpresswayExitWatch.LEGACY)
         );
+    }
+
+    private static JSONObject watchToJson(ResidentExpresswayExitWatch.State state) throws JSONException {
+        return new JSONObject().put("origin", fixToJson(state.origin))
+                .put("lastProbe", fixToJson(state.lastProbe)).put("outside", fixToJson(state.outside))
+                .put("keep", fixToJson(state.keep)).put("brief", fixToJson(state.brief));
+    }
+
+    private static JSONObject fixToJson(ResidentExpresswayExitWatch.Fix fix) throws JSONException {
+        if (fix == null) return null;
+        return new JSONObject().put("atMs", fix.atMs).put("lat", fix.lat).put("lon", fix.lon)
+                .put("accuracy", fix.accuracy).put("speedKmh", fix.speedKmh);
+    }
+
+    private static ResidentExpresswayExitWatch.State watchFromJson(JSONObject json) {
+        if (json == null) return ResidentExpresswayExitWatch.State.empty();
+        return new ResidentExpresswayExitWatch.State(fixFromJson(json.optJSONObject("origin")),
+                fixFromJson(json.optJSONObject("lastProbe")), fixFromJson(json.optJSONObject("outside")),
+                fixFromJson(json.optJSONObject("keep")), fixFromJson(json.optJSONObject("brief")));
+    }
+
+    private static ResidentExpresswayExitWatch.Fix fixFromJson(JSONObject json) {
+        if (json == null) return null;
+        ResidentExpresswayExitWatch.Fix fix = new ResidentExpresswayExitWatch.Fix(
+                json.optLong("atMs", 0L), json.optDouble("lat", Double.NaN),
+                json.optDouble("lon", Double.NaN), json.optDouble("accuracy", Double.NaN),
+                json.optDouble("speedKmh", Double.NaN));
+        return fix.valid() ? fix : null;
     }
 
     private static JSONObject configToJson(ResidentExpresswayDetectionPolicy.Config config)
@@ -1123,6 +1302,7 @@ final class ResidentExpresswayStore {
             JSONObject result = new JSONObject()
                     .put("source", "native-auto")
                     .put("action", action)
+                    .put("endMode", probe.endMode)
                     .put("nativeDetectionId", nativeDetectionId)
                     .put("nativeGeneration", generation)
                     .put("evaluatedAt", probe.detectedAt)

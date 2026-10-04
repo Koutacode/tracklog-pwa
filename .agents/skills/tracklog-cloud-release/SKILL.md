@@ -24,7 +24,7 @@ Cloudでは基本的に高速モードが使えないという利用者の運用
 2. 既存のGitHub接続で変更をpushし、PR／CI／統合を進める。トークン値を取り出さず、Cloudへ本番Secrets・署名鍵をコピーしない。認証の実在は対象repoへの操作結果で確認する。
 3. 公開版より大きいversionCodeと一致するversionName・package versionを確認する。公開対象のGit SHA、mainのSHA、成功したCIのhead SHAを一致させ、同じSHAへversion tagをpushする。mainや対象SHAが変わった場合は再照合する。
 4. 既存の通常 `Android Release` workflowを使う。Cloudのローカルdebug APKを正式品としてアップロードしない。tag pushは公開を起動する操作として扱う。
-5. 対象tag／SHAのworkflow成功に加え、公開latestのpackage・version・versionCode・既存署名・SHA・checksum sidecarを検証する。旧ReleaseのAPK asset除去と、正式版の通知設定が有効である非秘密の結果も確認する。Windows／Linuxの公開APK検証手順は参照文書に従う。
+5. 対象tag／SHAのworkflow成功に加え、公開latestのpackage・version・versionCode・既存署名・SHA・checksum sidecarを検証する。過去ReleaseのAPK/SHA資産が保持されていることと、正式版の通知設定が有効である非秘密の結果も確認する。Windows／Linuxの公開APK検証手順は参照文書に従う。
 6. 検証済みの公開APKだけを正式成果物として保存し、下記のDrive記録を終える。作成・CI・公開・実機動作を別々の証拠として報告する。
 
 失敗した検証、署名不一致、対象SHAの食い違い、解消できない認証・公開エラーを残したまま公開を続けない。失敗原因を絞って修正し、同じ未解決エラーへの無制限な再試行はしない。既存workflowの復旧結果を確認し、公開状態が不明ならその状態と次の復旧手順を記録する。復旧版はversionCodeを増やした新Releaseにする。
