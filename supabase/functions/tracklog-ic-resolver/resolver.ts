@@ -55,12 +55,12 @@ type OverpassFetchOptions = {
   fetchImpl?: FetchLike;
   retryRounds?: number;
   timeoutMs?: number;
+  totalTimeoutMs?: number;
+  now?: () => number;
   sleep?: (delayMs: number) => Promise<void>;
 };
 
-type ResolveOptions = OverpassFetchOptions & {
-  now?: () => number;
-};
+type ResolveOptions = OverpassFetchOptions;
 
 type CacheEntry = {
   elements: OverpassElement[];
@@ -73,9 +73,17 @@ export const OVERPASS_ENDPOINTS = [
   'https://maps.mail.ru/osm/tools/overpass/api/interpreter',
 ] as const;
 
-export const OVERPASS_REQUEST_TIMEOUT_MS = 4500;
-export const OVERPASS_RETRY_ROUNDS = 2;
+export const OVERPASS_REQUEST_TIMEOUT_MS = 10000;
+// Leave seven seconds within the client's 35-second deadline for Edge auth,
+// device lookup and the final response. The last provider gets only the
+// remaining allowance, including its response body.
+export const OVERPASS_TOTAL_TIMEOUT_MS = 28000;
+export const OVERPASS_RETRY_ROUNDS = 1;
 const OVERPASS_QUERY_TIMEOUT_SEC = 8;
+const ENDPOINT_FAILURE_COOLDOWN_MS = 15000;
+const ENDPOINT_RATE_LIMIT_COOLDOWN_MS = 30000;
+const ENDPOINT_REJECTION_COOLDOWN_MS = 3 * 60 * 1000;
+const MAX_ENDPOINT_RETRY_AFTER_MS = 24 * 60 * 60 * 1000;
 const MIN_RADIUS_M = 250;
 const MAX_RADIUS_M = 12000;
 const CACHE_TTL_MS = 5 * 60 * 1000;
@@ -90,6 +98,18 @@ const NEAR_LINK_DISTANCE_M = 650;
 
 const cache = new Map<string, CacheEntry>();
 const inFlight = new Map<string, Promise<OverpassElement[]>>();
+// This is a per-isolate circuit breaker, with no extra database writes. A
+// rejected endpoint must not receive another immediate request from a new cell.
+const endpointCooldowns = new Map<string, { until: number; reason: string }>();
+
+class OverpassRequestError extends Error {
+  readonly cooldownMs: number;
+
+  constructor(message: string, cooldownMs = ENDPOINT_FAILURE_COOLDOWN_MS) {
+    super(message);
+    this.cooldownMs = cooldownMs;
+  }
+}
 
 export class OverpassUnavailableError extends Error {
   constructor(message = 'All Overpass endpoints are unavailable') {
@@ -129,18 +149,44 @@ function delay(delayMs: number) {
   return new Promise<void>((resolve) => setTimeout(resolve, delayMs));
 }
 
+function retryAfterMs(value: string | null, now: number) {
+  if (!value) return 0;
+  const trimmed = value.trim();
+  if (/^\d+$/.test(trimmed)) {
+    const seconds = Number(trimmed);
+    // Preserve normal provider hints, but an overflowing digit string or a
+    // wildly excessive delay must not permanently disable an endpoint.
+    return Math.min(MAX_ENDPOINT_RETRY_AFTER_MS, seconds * 1000);
+  }
+  const date = Date.parse(trimmed);
+  return Number.isFinite(date)
+    ? Math.min(MAX_ENDPOINT_RETRY_AFTER_MS, Math.max(0, date - now))
+    : 0;
+}
+
+function endpointLabel(endpoint: string) {
+  try {
+    // Never put URL paths, query strings, response bodies or GPS queries in
+    // errors that can be persisted into an event or shown in the app.
+    return new URL(endpoint).hostname.replace(/[^a-zA-Z0-9.-]/g, '').slice(0, 96) || 'endpoint';
+  } catch {
+    return 'endpoint';
+  }
+}
+
 async function fetchElementsWithTimeout(
   endpoint: string,
   query: string,
   fetchImpl: FetchLike,
   timeoutMs: number,
+  now: () => number,
 ): Promise<OverpassElement[]> {
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<OverpassElement[]>((_, reject) => {
     timer = setTimeout(() => {
+      reject(new OverpassRequestError(`Overpass request timed out after ${timeoutMs}ms`));
       controller.abort();
-      reject(new Error(`Overpass request timed out after ${timeoutMs}ms`));
     }, timeoutMs);
   });
 
@@ -158,22 +204,41 @@ async function fetchElementsWithTimeout(
           cache: 'no-store',
           signal: controller.signal,
         });
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        if (!response.ok) {
+          const minimumCooldown = response.status === 429
+            ? ENDPOINT_RATE_LIMIT_COOLDOWN_MS
+            : response.status === 406
+              ? ENDPOINT_REJECTION_COOLDOWN_MS
+              : ENDPOINT_FAILURE_COOLDOWN_MS;
+          const cooldownMs = Math.max(minimumCooldown, retryAfterMs(response.headers.get('Retry-After'), now()));
+          void response.body?.cancel().catch(() => undefined);
+          throw new OverpassRequestError(`HTTP ${response.status}`, cooldownMs);
+        }
         // Reading the body can stall after headers arrive. Keep it inside the
         // timeout race so another provider is still tried in that case.
-        const body = await response.json() as { elements?: unknown; remark?: unknown } | null;
+        let body: { elements?: unknown; remark?: unknown } | null;
+        try {
+          body = await response.json();
+        } catch {
+          throw new OverpassRequestError('invalid JSON response');
+        }
         if (typeof body?.remark === 'string' && body.remark.trim()) {
           // Overpass can send runtime errors with HTTP 200 and empty or partial
           // elements. Never cache those responses as successful lookups.
-          throw new Error('Overpass returned an incomplete result (remark)');
+          throw new OverpassRequestError('Overpass returned an incomplete result (remark)');
         }
         if (!Array.isArray(body?.elements)) {
-          throw new Error('response did not include an elements array');
+          throw new OverpassRequestError('response did not include an elements array');
         }
         return (body.elements as OverpassElement[]).slice(0, MAX_OVERPASS_ELEMENTS);
       })(),
       timeout,
     ]);
+  } catch (error) {
+    if (error instanceof OverpassRequestError) throw error;
+    // Fetch and JSON implementations can include the private query in their
+    // error text. Retain only our known, bounded failure descriptions.
+    throw new OverpassRequestError('network request failed');
   } finally {
     if (timer) clearTimeout(timer);
   }
@@ -187,27 +252,48 @@ export async function fetchOverpassElements(
   if (endpoints.length === 0) throw new OverpassUnavailableError('No Overpass endpoints configured');
   const fetchImpl = options.fetchImpl ?? fetch;
   const retryRounds = Math.max(1, Math.round(options.retryRounds ?? OVERPASS_RETRY_ROUNDS));
-  const timeoutMs = Math.max(50, Math.round(options.timeoutMs ?? OVERPASS_REQUEST_TIMEOUT_MS));
+  const timeoutMs = Math.min(OVERPASS_REQUEST_TIMEOUT_MS, Math.max(50, Math.round(options.timeoutMs ?? OVERPASS_REQUEST_TIMEOUT_MS)));
+  const totalTimeoutMs = Math.min(OVERPASS_TOTAL_TIMEOUT_MS, Math.max(50, Math.round(options.totalTimeoutMs ?? OVERPASS_TOTAL_TIMEOUT_MS)));
+  const now = options.now ?? Date.now;
+  const deadline = now() + totalTimeoutMs;
   const sleep = options.sleep ?? delay;
   let attempts = 0;
-  let lastError = 'unknown error';
+  const errors = new Map<string, string>();
+  for (const [endpoint, cooldown] of endpointCooldowns) {
+    if (cooldown.until <= now()) endpointCooldowns.delete(endpoint);
+  }
 
   for (let round = 0; round < retryRounds; round += 1) {
     for (const endpoint of endpoints) {
+      const remainingMs = deadline - now();
+      if (remainingMs <= 0) break;
+      const cooldown = endpointCooldowns.get(endpoint);
+      if (cooldown && cooldown.until > now()) {
+        errors.set(endpoint, `${endpointLabel(endpoint)} ${cooldown.reason} (cooldown)`);
+        continue;
+      }
       attempts += 1;
       try {
-        return await fetchElementsWithTimeout(endpoint, query, fetchImpl, timeoutMs);
+        const elements = await fetchElementsWithTimeout(endpoint, query, fetchImpl, Math.min(timeoutMs, remainingMs), now);
+        endpointCooldowns.delete(endpoint);
+        return elements;
       } catch (error) {
-        lastError = error instanceof Error ? error.message : 'request failed';
+        const failure = error instanceof OverpassRequestError ? error : new OverpassRequestError('request failed');
+        errors.set(endpoint, `${endpointLabel(endpoint)} ${failure.message}`);
+        endpointCooldowns.set(endpoint, { until: now() + failure.cooldownMs, reason: failure.message });
       }
     }
-    if (round + 1 < retryRounds) {
-      await sleep(150 * 2 ** round);
-    }
+    if (deadline <= now() || round + 1 >= retryRounds) break;
+    // Explicit retryRounds remains supported, but never bypass an endpoint's
+    // cooldown or wait here for a banned/rate-limited provider to recover.
+    if (!endpoints.some(endpoint => (endpointCooldowns.get(endpoint)?.until ?? 0) <= now())) break;
+    await sleep(Math.min(150 * 2 ** round, deadline - now()));
   }
 
+  const reasons = [...errors.values()].slice(0, 6);
+  if (deadline <= now()) reasons.push('Overpass total request timeout');
   throw new OverpassUnavailableError(
-    `Overpass request failed after ${attempts} attempts: ${lastError}`,
+    `Overpass request failed after ${attempts} attempts: ${reasons.join('; ') || 'endpoints unavailable'}`,
   );
 }
 
@@ -520,6 +606,8 @@ async function getOverpassElements(
     fetchImpl: options.fetchImpl,
     retryRounds: options.retryRounds,
     timeoutMs: options.timeoutMs,
+    totalTimeoutMs: options.totalTimeoutMs,
+    now: options.now,
     sleep: options.sleep,
   });
   inFlight.set(key, request);
@@ -552,4 +640,5 @@ export async function resolveExpresswayFromOverpass(
 export function clearResolverCacheForTests() {
   cache.clear();
   inFlight.clear();
+  endpointCooldowns.clear();
 }

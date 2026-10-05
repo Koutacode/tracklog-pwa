@@ -4,11 +4,13 @@ import { db } from '../db/db';
 import { withRemoteSyncSignalsSuppressed } from '../app/remoteSyncSignal';
 import { synchronizeRemoteOutbox } from './remoteSyncV2';
 import { SUPABASE_CONFIGURED } from './supabase';
-import { updateEventTimestamp, updateExpresswayIcNameManual } from '../db/repositories';
+import { updateEventTimestamp, updateExpresswayIcNameManual, updateExpresswayResolved } from '../db/repositories';
 import { getReportTrip, listReportTrips, saveReportTripSnapshot } from '../db/reportRepository';
 import { buildTripDetailReportSnapshot } from '../ui/screens/tripDetailReportSnapshot';
 import type { AppEvent } from '../domain/types';
 import type { Trip } from '../domain/reportTypes';
+import { canRetryIcResolve, captureIcResolutionEventVersion } from './expresswayIcRetryPolicy';
+import { projectReportResolvedIc } from '../domain/reportResolvedIc';
 
 type Request = Parameters<Parameters<typeof synchronizeRemoteOutbox>[1]>[0];
 const USER = '11111111-1111-4111-8111-111111111111';
@@ -180,7 +182,42 @@ async function testPagedDownloadProtectsReportThenSendsIcCorrection() {
   console.log('PASS integrated paged report/event download, partial-save guard, and IC correction upload');
 }
 
+async function testPendingEstimateSyncAndAutomaticReplacement() {
+  await reset();
+  const base = integrationEvents()[1];
+  const extras = { ...base.extras, icName: '合成IC（推定）', icResolveStatus: 'pending',
+    icResolveAlgorithmVersion: 14, icNameEstimate: { displayName: '合成IC（推定）' },
+    icResolveNextRetryAt: TS, preservedDistance: 123 };
+  await captureRun(async request => success(request, { changes: { events: [{
+    id: base.id, trip_id: TRIP, device_id: 'synthetic-other-device', owner_user_id: USER,
+    type: base.type, ts: base.ts, extras, geo: null, address: '合成保存住所',
+    sync_status: 'synced', updated_at: END_TS, revision: 2, change_seq: 2,
+  }] } }));
+  const downloaded = (await db.events.get(base.id))!;
+  assert.equal(downloaded.extras?.icName, extras.icName);
+  assert.equal(downloaded.syncStatus, 'synced');
+  assert.equal(canRetryIcResolve(downloaded.extras, Date.parse(END_TS)), true);
+  const saved = integrationReport(integrationEvents());
+  assert.equal(projectReportResolvedIc(saved, [downloaded]), saved,
+    'pending estimates do not replace a previously saved resolved report name');
+  const applied = await updateExpresswayResolved({ eventId: base.id, status: 'resolved',
+    icName: '合成正式IC', icDistanceM: 20,
+    guard: { expectedVersion: captureIcResolutionEventVersion(downloaded) } });
+  assert.equal(applied, true);
+  const resolved = (await db.events.get(base.id))!;
+  assert.equal(resolved.extras?.icName, '合成正式IC');
+  assert.equal(resolved.extras?.icResolveStatus, 'resolved');
+  assert.equal(resolved.address, downloaded.address);
+  assert.equal(resolved.ts, downloaded.ts);
+  assert.equal(resolved.extras?.preservedDistance, 123);
+  assert.equal(canRetryIcResolve(resolved.extras, Date.parse(END_TS)), false);
+  assert.equal((resolved.extras?.icNameEstimate as { displayName: string }).displayName, extras.icName,
+    'estimate provenance remains historical and must not classify a changed name as estimated');
+  console.log('PASS pending estimate download, report boundary and guarded automatic replacement');
+}
+
 async function main() {
+  await testPendingEstimateSyncAndAutomaticReplacement();
   await testTripEndEditDuringHeaderAckPreservesEventAndReport();
   await testPagedDownloadProtectsReportThenSendsIcCorrection();
   await reset();
