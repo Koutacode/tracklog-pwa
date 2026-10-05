@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import test from 'node:test';
+import test, { beforeEach } from 'node:test';
 import {
   analyzeOverpassElements,
   buildOverpassUnionQuery,
@@ -10,6 +10,8 @@ import {
   rankIcCandidates,
   resolveExpresswayFromOverpass,
 } from './resolver.ts';
+
+beforeEach(() => clearResolverCacheForTests());
 
 // Synthetic points with exact distances, unrelated to any recorded trip.
 function elementAtDistance(distanceM, tags) {
@@ -136,30 +138,14 @@ test('nearIc reflects a nearby candidate even when a corroborated farther name w
   assert.equal(result.onExpresswayRoad, true);
 });
 
-test('retries all endpoints after a failed round', async () => {
+test('failed endpoints are not retried while cooling down', async () => {
   const calls = [];
-  const fetchImpl = async endpoint => {
-    calls.push(endpoint);
-    if (calls.length < 3) return new Response('', { status: 503 });
-    return new Response(JSON.stringify({ elements: [] }), {
-      status: 200,
-      headers: { 'Content-Type': 'application/json' },
-    });
-  };
-
-  const elements = await fetchOverpassElements('query', {
+  await assert.rejects(fetchOverpassElements('query', {
     endpoints: ['https://one.invalid', 'https://two.invalid'],
-    fetchImpl,
+    fetchImpl: async endpoint => { calls.push(endpoint); return new Response('', { status: 503 }); },
     retryRounds: 2,
-    timeoutMs: 100,
-    sleep: async () => undefined,
-  });
-  assert.deepEqual(elements, []);
-  assert.deepEqual(calls, [
-    'https://one.invalid',
-    'https://two.invalid',
-    'https://one.invalid',
-  ]);
+  }), /after 2 attempts/);
+  assert.deepEqual(calls, ['https://one.invalid', 'https://two.invalid']);
 });
 
 test('applies timeout per endpoint before falling back', async () => {
@@ -236,11 +222,12 @@ test('exhausted runtime errors stay retryable and are not cached as no IC found'
   clearResolverCacheForTests();
   let fetchCount = 0;
   let available = false;
+  let clock = 1000;
   const options = {
     endpoints: ['https://one.invalid', 'https://two.invalid'],
     retryRounds: 2,
     sleep: async () => undefined,
-    now: () => 1000,
+    now: () => clock,
     fetchImpl: async () => {
       fetchCount += 1;
       return new Response(JSON.stringify(available
@@ -251,13 +238,14 @@ test('exhausted runtime errors stay retryable and are not cached as no IC found'
 
   await assert.rejects(resolveExpresswayFromOverpass(35, 139, 8000, options), error => {
     assert.ok(error instanceof OverpassUnavailableError);
-    assert.match(error.message, /after 4 attempts/);
+    assert.match(error.message, /after 2 attempts/);
     return true;
   });
-  assert.equal(fetchCount, 4);
+  assert.equal(fetchCount, 2);
   available = true;
+  clock += 15001;
   const result = await resolveExpresswayFromOverpass(35, 139, 8000, options);
-  assert.equal(fetchCount, 5);
+  assert.equal(fetchCount, 3);
   assert.equal(result.cached, false);
   assert.deepEqual(result.nearestIc, { icName: '復旧IC', distanceM: 100 });
 });
@@ -293,4 +281,60 @@ test('reuses the in-memory cache for the same location cell', async () => {
   assert.equal(first.cached, false);
   assert.equal(second.cached, true);
   assert.equal(second.nearestIc?.icName, '厚木IC');
+});
+
+for (const [status, retryAfter, cooldown] of [[406, null, 180000], [429, '60', 60000], [429, null, 30000]]) {
+  test(`HTTP ${status} honors cooldown and Retry-After ${retryAfter}`, async () => {
+    let clock = 1000;
+    let calls = 0;
+    const options = {
+      endpoints: ['https://cooldown.invalid'], now: () => clock,
+      fetchImpl: async () => {
+        calls++;
+        return calls === 1 ? new Response('', { status, headers: retryAfter ? { 'Retry-After': retryAfter } : {} })
+          : new Response('{"elements":[]}');
+      },
+    };
+    await assert.rejects(fetchOverpassElements('query', options), /after 1 attempts/);
+    clock += cooldown - 1;
+    await assert.rejects(fetchOverpassElements('query', options), /after 0 attempts/);
+    assert.equal(calls, 1);
+    clock++;
+    assert.deepEqual(await fetchOverpassElements('query', options), []);
+    assert.equal(calls, 2);
+  });
+}
+
+test('total deadline aborts a stalled body and prevents another provider call', async () => {
+  const calls = [];
+  let signal;
+  const started = Date.now();
+  await assert.rejects(fetchOverpassElements('query', {
+    endpoints: ['https://stall.invalid', 'https://unused.invalid'], totalTimeoutMs: 60,
+    fetchImpl: async (endpoint, init) => {
+      calls.push(endpoint); signal = init.signal;
+      return new Response(new ReadableStream({ start() {} }));
+    },
+  }), /total request timeout/);
+  assert.deepEqual(calls, ['https://stall.invalid']);
+  assert.equal(signal.aborted, true);
+  assert.ok(Date.now() - started < 1500);
+});
+
+test('diagnostics omit private query, URL path, body and raw network errors', async () => {
+  await assert.rejects(fetchOverpassElements('PRIVATE_QUERY', {
+    endpoints: ['https://safe.invalid/PRIVATE_PATH?secret=PRIVATE_VALUE'],
+    fetchImpl: async () => { throw new Error('PRIVATE_QUERY PRIVATE_BODY'); },
+  }), error => {
+    assert.match(error.message, /safe.invalid network request failed/);
+    assert.doesNotMatch(error.message, /PRIVATE/);
+    return true;
+  });
+});
+
+test('default timeout permits a response after the old 4.5 second cutoff', { timeout: 7000 }, async () => {
+  assert.deepEqual(await fetchOverpassElements('query', {
+    endpoints: ['https://delayed.invalid'],
+    fetchImpl: async () => { await new Promise(resolve => setTimeout(resolve, 4600)); return new Response('{"elements":[]}'); },
+  }), []);
 });
