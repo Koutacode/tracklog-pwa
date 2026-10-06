@@ -49,7 +49,7 @@ jobs:
 
       - name: Check Supabase Edge Functions
         run: >-
-          npx --yes deno check --node-modules-dir=auto --no-lock
+          npx --yes deno check --node-modules-dir=none --no-lock
           supabase/functions/tracklog-privileged/index.ts
           supabase/functions/tracklog-sync/index.ts
           supabase/functions/tracklog-ic-resolver/index.ts

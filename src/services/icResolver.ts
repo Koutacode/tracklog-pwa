@@ -1,4 +1,5 @@
 import { Capacitor } from '@capacitor/core';
+import { lookupJapanIcCatalog } from '../../shared/ic-catalog/index';
 import type { Session } from '@supabase/supabase-js';
 import { getStableDeviceKey } from './deviceIdentity';
 import { restoreNativeResidentLocationSession } from './nativeResidentLocation';
@@ -10,7 +11,8 @@ export type IcResult = {
   distanceM: number;
   confidence?: 'estimated';
   candidates?: string[];
-  estimateSource?: 'overpass_nearby';
+  estimateSource?: 'overpass_nearby' | 'mlit_n06_2025';
+  sourceDatasetDate?: string;
   sourceUrls?: string[];
   note?: string;
 };
@@ -135,14 +137,18 @@ export function parseIcResult(value: unknown): IcResult | null {
   const candidates = [...new Set([
     icName, ...(Array.isArray(row.candidates) ? row.candidates as string[] : []),
   ].map(name => name.replace(/[（(]推定(?:候補)?[）)]$/u, '').trim()).filter(Boolean))];
+  const estimateSource = row.estimateSource === 'mlit_n06_2025' ? 'mlit_n06_2025' : 'overpass_nearby';
+  const sourceDatasetDate = typeof row.sourceDatasetDate === 'string'
+    && /^\d{4}-\d{2}-\d{2}$/.test(row.sourceDatasetDate) ? row.sourceDatasetDate : undefined;
   return {
-    icName,
+    icName: /[（(]推定(?:候補)?[）)]$/u.test(icName) ? icName : `${icName.slice(0, 76)}（推定）`,
     distanceM: Math.round(distanceM),
     // Proximity alone cannot prove which entrance, exit or direction was used.
     // Old servers lacking confidence are conservative estimates as well.
     confidence: 'estimated',
     candidates,
-    estimateSource: 'overpass_nearby',
+    estimateSource,
+    ...(sourceDatasetDate ? { sourceDatasetDate } : {}),
     sourceUrls: Array.isArray(row.sourceUrls)
       ? row.sourceUrls.filter((url): url is string => typeof url === 'string' && /^https:\/\//.test(url)).slice(0, 4)
       : [],
@@ -380,16 +386,38 @@ export async function invokeIcResolverAction<T>(requestBody: Record<string, unkn
   return data.data as T;
 }
 
-/** Resolves the nearest IC through the authenticated TrackLog Edge Function. */
-export async function resolveNearestIC(
-  lat: number,
-  lon: number,
-  radiusM = DEFAULT_RADIUS_M,
-  context?: IcLookupContext,
-): Promise<IcResult | null> {
-  const signal = await detectExpresswaySignal(lat, lon, radiusM, context);
-  return signal.nearestIc;
+/** Bundled public IC data needs neither a login nor network access. */
+export function resolveLocalNearestIC(lat: number, lon: number, context?: IcLookupContext): IcResult | null {
+  assertCoordinates(lat, lon);
+  return parseIcResult(lookupJapanIcCatalog(lat, lon, context));
 }
+
+export function createNearestIcResolver(
+  lookupLocal = resolveLocalNearestIC,
+  invoke: (request: Record<string, unknown>) => Promise<unknown> = invokeIcResolverAction,
+) {
+  return async (
+    lat: number,
+    lon: number,
+    radiusM = DEFAULT_RADIUS_M,
+    context?: IcLookupContext,
+  ): Promise<IcResult | null> => {
+    assertCoordinates(lat, lon);
+    const local = lookupLocal(lat, lon, context);
+    if (local) return local;
+    if (typeof navigator !== 'undefined' && !navigator.onLine) return null;
+    // The IC-name path is independent from the native road detection probe.
+    // Only a catalog miss needs authenticated, bounded upstream map requests.
+    const result = parseIcResult(await invoke({
+      action: 'resolve-name', lat, lon, radiusM: normalizeRadius(radiusM),
+      ...(context?.eventType ? { eventType: context.eventType } : {}),
+      ...(Number.isFinite(context?.travelBearing) ? { travelBearing: context!.travelBearing } : {}),
+    }));
+    return result && result.distanceM <= MAX_CORROBORATED_IC_DISTANCE_M ? result : null;
+  };
+}
+
+export const resolveNearestIC = createNearestIcResolver();
 
 export async function detectExpresswaySignal(
   lat: number,

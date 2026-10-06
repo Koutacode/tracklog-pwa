@@ -4,6 +4,7 @@ import { getExpresswayIcDisplay } from '../domain/expresswayIcDisplay';
 import {
   classifyIcResolverHttpStatus,
   parseIcResult,
+  createNearestIcResolver,
   getFunctionErrorDetails,
   getRetryableIcResolverErrorCategory,
   runIcResolverNativeSessionRestore,
@@ -37,6 +38,38 @@ async function main() {
   assert.equal(currentCandidate.icName, wireCandidate.icName, 'the backwards-compatible display suffix is preserved');
   assert.deepEqual(currentCandidate.candidates, ['合成入口', '別合成入口'], 'the display suffix does not add a duplicate candidate');
   assert.equal(currentCandidate.confidence, 'estimated');
+
+  const catalogCandidate = parseIcResult({ icName: '合成公的IC', distanceM: 80, confidence: 'estimated',
+    candidates: ['合成公的IC'], estimateSource: 'mlit_n06_2025', sourceDatasetDate: '2025-12-31',
+    sourceUrls: ['https://example.invalid/public-dataset'], note: '2025-12-31現況の近傍候補。入口・出口・進行方向未確認。' })!;
+  assert.equal(catalogCandidate.icName, '合成公的IC（推定）', 'catalog candidates remain visibly estimated for older clients');
+  assert.equal(catalogCandidate.estimateSource, 'mlit_n06_2025');
+  assert.equal(catalogCandidate.sourceDatasetDate, '2025-12-31');
+  const navigatorDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { onLine: true } });
+  let upstreamCalls = 0;
+  const localResolver = createNearestIcResolver((_lat, _lon, context) => {
+    assert.equal(context?.eventType, 'expressway_start');
+    return catalogCandidate;
+  }, async () => { upstreamCalls += 1; throw new Error('catalog hit must not use a server'); });
+  assert.deepEqual(await localResolver(35, 139, undefined, { eventType: 'expressway_start' }), catalogCandidate);
+  assert.equal(upstreamCalls, 0, 'a catalog hit skips login, Edge, and external map requests');
+  const remoteResolver = createNearestIcResolver(() => null, async request => {
+    upstreamCalls += 1;
+    assert.deepEqual(request, { action: 'resolve-name', lat: 35, lon: 139, radiusM: 8000, eventType: 'expressway_end' });
+    return { icName: '合成補助出口（推定）', distanceM: 90, confidence: 'estimated', estimateSource: 'overpass_nearby' };
+  });
+  assert.equal((await remoteResolver(35, 139, undefined, { eventType: 'expressway_end' }))?.icName, '合成補助出口（推定）');
+  assert.equal(upstreamCalls, 1, 'a catalog miss uses the IC-name action only once');
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { onLine: false } });
+  try {
+    assert.deepEqual(await localResolver(35, 139, undefined, { eventType: 'expressway_start' }), catalogCandidate);
+    assert.equal(await remoteResolver(35, 139, undefined, { eventType: 'expressway_end' }), null);
+    assert.equal(upstreamCalls, 1, 'offline lookup uses the catalog and never the network');
+  } finally {
+    if (navigatorDescriptor) Object.defineProperty(globalThis, 'navigator', navigatorDescriptor);
+    else Reflect.deleteProperty(globalThis, 'navigator');
+  }
 
   const stalledError = Object.assign(new Error('server unavailable'), {
     context: new Response(new ReadableStream({ start() {} }), { status: 503 }),

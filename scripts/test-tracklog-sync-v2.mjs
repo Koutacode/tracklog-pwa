@@ -27,6 +27,9 @@ const OTHER_WORK_MIGRATION_PATH = path.join(
 const IC_METADATA_MIGRATION_PATH = path.join(
   ROOT, "supabase", "migrations", "20261006121510_tracklog_preserve_ic_metadata.sql",
 );
+const IC_ALGORITHM_PRECEDENCE_MIGRATION_PATH = path.join(
+  ROOT, "supabase", "migrations", "20261006125438_tracklog_ic_metadata_algorithm_precedence.sql",
+);
 const ROLLBACK_PATH = path.join(ROOT, "docs", "sql", "rollback-tracklog-sync-v2-reduce-disk-io.sql");
 
 const OWNER_ID = "11111111-1111-4111-8111-111111111111";
@@ -621,6 +624,22 @@ try {
     assert.deepEqual(trigger, { prosecdef: false, proconfig: ["search_path=pg_catalog"], anon: false, authenticated: false });
   });
 
+  await check("upgrades IC algorithm precedence without rewriting data or changing existing trigger privileges", async () => {
+    const metadataSql = `select jsonb_build_object(
+      'functionMetadata', (select jsonb_build_array(proacl::text, proowner::regrole::text, prosecdef, proconfig)
+        from pg_proc where oid = 'tracklog_private.preserve_tracklog_ic_metadata()'::regprocedure),
+      'triggers', (select jsonb_agg(pg_get_triggerdef(oid) order by tgname) from pg_trigger where tgrelid = 'public.trip_events'::regclass),
+      'events', (select jsonb_agg(to_jsonb(event)) from public.trip_events event),
+      'sync', pg_get_functiondef('public.tracklog_sync_v2(uuid,text,bigint,jsonb)'::regprocedure)
+    ) as metadata`;
+    const before = (await firstRow(metadataSql)).metadata;
+    const migration = await readFile(IC_ALGORITHM_PRECEDENCE_MIGRATION_PATH, "utf8");
+    assert.doesNotMatch(migration, /\b(?:delete from|update public|alter table|create trigger|grant|revoke)\b/i);
+    await db.exec(migration);
+    await db.exec(migration);
+    assert.deepEqual((await firstRow(metadataSql)).metadata, before);
+  });
+
   await check("retains service-role-only RPC access, device approval, owner and input validation", async () => {
     const privileges = await firstRow(`select
       has_function_privilege('anon', 'public.tracklog_sync_v2(uuid,text,bigint,jsonb)', 'EXECUTE') as anon,
@@ -842,7 +861,7 @@ try {
     event = await writeIcFixture(event, { ...event.extras, icNameEstimate: newestEstimate,
       icNameEstimateHistory: Array.from({ length: 12 }, (_, index) => ({ ...icEstimate, note: `synthetic-${index}` })) });
     assert.equal(event.extras.icNameEstimateHistory.length, 8);
-    assert.equal(event.extras.icNameEstimateHistory[0].note, "synthetic-0", "the original estimate evidence survives bounded history trimming");
+    assert.deepEqual(event.extras.icNameEstimateHistory[0], icEstimate, "the original estimate evidence survives bounded history trimming");
     assert.deepEqual(event.extras.icNameEstimateHistory.at(-1), newerEstimate);
   });
   await check("recognizes legacy estimate suffixes without an evidence object and never upgrades them to confirmed", async () => {
@@ -886,6 +905,72 @@ try {
     await db.query("update public.trip_events set trip_id = 'synthetic-other-ic-trip', extras = '{}'::jsonb where id = $1", [moved.id]);
     assert.deepEqual((await firstRow("select extras from public.trip_events where id = $1", [moved.id])).extras, {});
     await sync([]);
+  });
+
+  await check("accepts a newer retry algorithm despite device clock correction and blocks older algorithm replays", async () => {
+    let event = await createIcFixture({ icResolveStatus: "failed", icResolveAlgorithmVersion: 15,
+      icResolveRetryCount: 3, icResolveLastAttemptAt: icAttempt2, odo: 200, expresswaySessionId: "synthetic-version-session" });
+    event = await writeIcFixture(event, { ...event.extras, icResolveStatus: "pending", icResolveAlgorithmVersion: 16,
+      icResolveRetryCount: 1, icResolveLastAttemptAt: icAttempt1 });
+    assert.equal(event.extras.icResolveAlgorithmVersion, 16);
+    assert.equal(event.extras.icResolveRetryCount, 1);
+    assert.equal(event.extras.icResolveLastAttemptAt, icAttempt1);
+    const current = event.extras;
+    event = await writeIcFixture(event, { ...current, icResolveAlgorithmVersion: 15, icResolveRetryCount: 4,
+      icResolveStatus: "failed", icResolveLastAttemptAt: icAttempt2 });
+    assert.deepEqual(event.extras, current);
+    event = await writeIcFixture(event, { icName: "旧版候補（推定）", icNameEstimate: icEstimate,
+      icResolveAlgorithmVersion: 15, icResolveStatus: "resolved", icResolveLastAttemptAt: icAttempt2,
+      odo: 201, expresswaySessionId: "synthetic-version-session" });
+    assert.equal(event.extras.icName, undefined, "older algorithms cannot revive a candidate after a newer unresolved attempt");
+    assert.equal(event.extras.icResolveAlgorithmVersion, 16);
+    assert.equal(event.extras.odo, 201, "non-IC updates remain incoming even while obsolete IC metadata is rejected");
+  });
+  await check("retains detailed address estimates and catalog provenance while advancing the algorithm and retry state", async () => {
+    const saved = { ...icEstimate, source: "saved_address_official_sources", estimatedAt: icAttempt2 };
+    const catalog = { ...icEstimate, displayName: "合成道路候補IC（推定）", source: "mlit_n06_2025",
+      sourceDatasetDate: "2025-01-01", estimatedAt: icAttempt1, candidateNames: ["合成道路候補IC"] };
+    let event = await createIcFixture({ icName: saved.displayName, icNameEstimate: saved, icDistanceM: 50,
+      icResolveGeoSource: "synthetic-saved", icResolveStatus: "pending", icResolveAlgorithmVersion: 15,
+      icResolveRetryCount: 3, icResolveLastAttemptAt: icAttempt2 });
+    event = await writeIcFixture(event, { icName: catalog.displayName, icNameEstimate: catalog, icDistanceM: 75,
+      icResolveGeoSource: "synthetic-catalog", icResolveStatus: "resolved", icResolveAlgorithmVersion: 16,
+      icResolveRetryCount: 0, icResolveLastAttemptAt: icAttempt1 });
+    assert.equal(event.extras.icName, saved.displayName);
+    assert.deepEqual(event.extras.icNameEstimate, saved);
+    assert.equal(event.extras.icDistanceM, 50);
+    assert.equal(event.extras.icResolveGeoSource, "synthetic-saved");
+    assert.equal(event.extras.icResolveAlgorithmVersion, 16);
+    assert.equal(event.extras.icResolveStatus, "resolved");
+    assert.equal(event.extras.icResolveRetryCount, 0);
+    assert.deepEqual(event.extras.icNameEstimateHistory, [saved, catalog]);
+    const current = event.extras;
+    event = await writeIcFixture(event, { icName: "旧版別候補（推定）", icNameEstimate: { ...saved, estimatedAt: "2026-07-10T02:00:00.000Z" },
+      icResolveAlgorithmVersion: 15, icResolveStatus: "resolved" });
+    assert.equal(event.extras.icResolveAlgorithmVersion, 16, "a later device clock cannot downgrade the automatic algorithm");
+    assert.equal(event.extras.icName, current.icName);
+    assert.deepEqual(event.extras.icNameEstimate, current.icNameEstimate);
+    assert.deepEqual(event.extras.icNameEstimateHistory.slice(0, 2), [saved, catalog]);
+    const retainedHistory = event.extras.icNameEstimateHistory;
+    event = await writeIcFixture(event, { icName: current.icName, icResolveAlgorithmVersion: 16,
+      icResolveStatus: "resolved", note: "legacy metadata omission" });
+    assert.deepEqual(event.extras.icNameEstimate, saved);
+    assert.deepEqual(event.extras.icNameEstimateHistory, retainedHistory, "older clients must not erase the supplementary catalog provenance");
+  });
+  await check("allows newer confirmed algorithms across clock correction while preserving manual and confirmed priority", async () => {
+    let event = await createIcFixture({ icName: "旧確認済みIC", icResolveStatus: "resolved",
+      icResolveAlgorithmVersion: 15, icResolveLastAttemptAt: icAttempt2 });
+    event = await writeIcFixture(event, { icName: "新確認済みIC", icResolveStatus: "resolved",
+      icResolveAlgorithmVersion: 16, icResolveLastAttemptAt: icAttempt1 });
+    assert.equal(event.extras.icName, "新確認済みIC");
+    event = await writeIcFixture(event, { icName: icEstimate.displayName, icNameEstimate: icEstimate,
+      icResolveStatus: "resolved", icResolveAlgorithmVersion: 17 });
+    assert.equal(event.extras.icName, "新確認済みIC", "an algorithm bump never promotes an estimate over a confirmed IC");
+    event = await writeIcFixture(event, { icName: "手動確認IC", icResolvedManually: true,
+      icResolveManualUpdatedAt: icAttempt1, icResolveAlgorithmVersion: 15 });
+    assert.equal(event.extras.icName, "手動確認IC", "explicit manual edits stay above automatic algorithm versions");
+    event = await writeIcFixture(event, { icName: "自動確認IC", icResolveStatus: "resolved", icResolveAlgorithmVersion: 17 });
+    assert.equal(event.extras.icName, "手動確認IC");
   });
 
   const workTripId = "other-work-trip";

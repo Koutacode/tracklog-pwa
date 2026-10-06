@@ -132,4 +132,39 @@ assert.equal(isEstimatedIcName({ icName: '旧端末候補（推定）', icResolv
 assert.equal(mergeIcMetadata({ icName: '旧端末候補（推定）', icResolveStatus: 'resolved' }, {
   icName: '更新候補（推定候補）', icResolveStatus: 'resolved',
 })?.icName, '更新候補（推定候補）', 'legacy labels without estimate objects stay estimates and do not throw');
+
+const catalogueEstimate = { displayName: '合成中央IC（推定）', candidateNames: ['合成中央IC'],
+  source: 'mlit_n06_2025', sourceDatasetDate: '2025-12-31', certainty: 'estimated',
+  sourceUrls: ['https://example.invalid/public-dataset'], note: 'IC付近の候補、入口と方向は未確認',
+  estimatedAt: '2026-09-01T00:40:00.000Z' };
+const catalogueResult = { icName: catalogueEstimate.displayName, icNameEstimate: catalogueEstimate,
+  icResolveStatus: 'resolved', icResolveAlgorithmVersion: 16, icResolveRetryCount: 0,
+  icResolveLastAttemptAt: '2026-09-01T00:40:00.000Z', icDistanceM: 70, unrelated: 'new-cloud-value' };
+const richerAddress = mergeIcMetadata(estimatedEvent.extras, catalogueResult, { incomingIsNewer: true });
+assert.equal(richerAddress?.icName, estimate.displayName, 'a generic catalogue IC cannot erase specific entrance candidates');
+assert.deepEqual(richerAddress?.icNameEstimate, estimate, 'the original address evidence stays the primary estimate');
+assert.deepEqual(richerAddress?.icNameEstimateHistory, [estimate, catalogueEstimate],
+  'both the original candidates and current catalogue evidence remain available to the UI');
+assert.equal(richerAddress?.icResolveStatus, 'resolved');
+assert.equal(richerAddress?.icResolveAlgorithmVersion, 16);
+assert.equal(richerAddress?.icDistanceM, (estimatedEvent.extras as Record<string, unknown>).icDistanceM,
+  'distance to a generic catalogue feature is not relabelled as distance to a specific entrance');
+assert.equal(richerAddress?.unrelated, 'new-cloud-value');
+assert.equal(isEstimatedIcName(richerAddress), true, 'successful lookup does not confirm the address candidates');
+assert.equal(mergeIcMetadata(corrected, catalogueResult, { incomingIsNewer: true })?.icName, '手動合成C入口',
+  'catalogue lookup cannot replace a driver correction');
+const futureEstimate = { ...catalogueEstimate, estimatedAt: '2040-01-01T00:00:00.000Z', displayName: '未来時計の旧候補（推定）' };
+const skewed = { ...catalogueResult, icName: futureEstimate.displayName, icNameEstimate: futureEstimate,
+  icResolveStatus: 'pending', icResolveAlgorithmVersion: 15, icResolveRetryCount: 32,
+  icResolveLastAttemptAt: '2040-01-01T00:00:00.000Z' };
+const currentFailure = mergeIcMetadata(skewed, { icResolveStatus: 'failed', icResolveAlgorithmVersion: 16,
+  icResolveRetryCount: 1, icResolveLastAttemptAt: '2026-09-01T00:50:00.000Z' });
+assert.equal(currentFailure?.icResolveRetryCount, 1, 'a new algorithm budget cannot be reset by an old future clock');
+assert.equal(currentFailure?.icResolveAlgorithmVersion, 16);
+assert.equal(mergeIcMetadata(skewed, catalogueResult)?.icName, catalogueEstimate.displayName,
+  'a new algorithm lookup beats the previous algorithm future estimate timestamp');
+assert.equal(mergeIcMetadata({ ...skewed, icResolveAlgorithmVersion: 16 }, catalogueResult,
+  { incomingIsNewer: true })?.icName, catalogueEstimate.displayName, 'a proven local lookup survives a backward clock adjustment');
+assert.equal(mergeIcMetadata(catalogueResult, skewed, { incomingIsNewer: true })?.icName, catalogueEstimate.displayName,
+  'an old algorithm cannot return merely by carrying a later clock or sync revision');
 console.log('reportResolvedIc: read projection assertions passed');

@@ -1,6 +1,7 @@
 import { createClient } from 'npm:@supabase/supabase-js@2.58.0';
 import { normalizeRadiusM, OverpassUnavailableError, resolveExpresswayFromOverpass } from './resolver.ts';
 import { normalizeIcSearchQuery, searchExpresswayIcByName } from './name-search.ts';
+import { resolveExpresswayIcName } from './ic-name-resolution.ts';
 
 type JsonRecord = Record<string, unknown>;
 
@@ -128,7 +129,9 @@ Deno.serve(async (req: Request) => {
       const data = await searchExpresswayIcByName(query);
       return jsonResponse({ ok: true, data });
     }
-    if (payload.action != null) throw new HttpError(400, 'Unknown resolver action');
+    if (payload.action != null && payload.action !== 'resolve-name') {
+      throw new HttpError(400, 'Unknown resolver action');
+    }
 
     const lat = requiredCoordinate(payload, 'lat', -90, 90);
     const lon = requiredCoordinate(payload, 'lon', -180, 180);
@@ -138,6 +141,12 @@ Deno.serve(async (req: Request) => {
       throw new HttpError(400, 'eventType is invalid');
     }
     const travelBearing = payload.travelBearing == null ? undefined : requiredCoordinate(payload, 'travelBearing', 0, 360);
+    if (payload.action === 'resolve-name') {
+      const data = await resolveExpresswayIcName(lat, lon, radiusM, { eventType: eventType ?? undefined, travelBearing });
+      return jsonResponse({ ok: true, data });
+    }
+    // Native road probes must retain actual road/gate evidence. A nearby IC
+    // catalog point cannot indicate that a vehicle is on or off an expressway.
     const data = await resolveExpresswayFromOverpass(lat, lon, radiusM, { eventType: eventType ?? undefined, travelBearing });
     return jsonResponse({ ok: true, data });
   } catch (error) {

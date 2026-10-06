@@ -689,6 +689,146 @@ async function testRetrySuccessRetainsOldEstimateEvidence() {
   assert.deepEqual(await savedExtras(), extras, 'the replacement estimate and history survive restart');
 }
 
+async function testOfflineCatalogResolvesOldExhaustedEventWithoutRequests() {
+  await reset([], { extras: { icResolveStatus: 'failed', icResolveAlgorithmVersion: IC_RESOLVE_ALGORITHM_VERSION - 1,
+    icResolveRetryCount: 6, icResolveError: 'old synthetic upstream failure', expresswaySessionId: 'synthetic-preserved-session', odoKm: 1234 } });
+  const original = (await db.events.get(eventId))!;
+  let requests = 0;
+  const run = createExpresswayIcResolutionRunner(async () => {
+    requests += 1; throw new Error('offline must not invoke the network adapter');
+  }, (_lat, _lon, context) => {
+    assert.equal(context?.eventType, 'expressway_end');
+    return { icName: '合成公的IC（推定）', distanceM: 100, confidence: 'estimated', candidates: ['合成公的IC'],
+      estimateSource: 'mlit_n06_2025', sourceDatasetDate: '2025-12-31', sourceUrls: ['https://example.invalid/public-dataset'],
+      note: '2025-12-31現況の候補。入口・出口・進行方向未確認。' };
+  });
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { onLine: false } });
+  try {
+    assert.equal(await createExpresswayIcRetryBatchRunner(run, true)(12), true);
+    assert.equal(requests, 0);
+    const saved = (await db.events.get(eventId))!;
+    assert.equal(saved.extras?.icResolveStatus, 'resolved');
+    assert.equal(saved.extras?.icResolveAlgorithmVersion, IC_RESOLVE_ALGORITHM_VERSION);
+    assert.equal(saved.extras?.icResolveRetryCount, 0);
+    assert.equal(saved.extras?.icResolveError, undefined);
+    assert.equal((saved.extras?.icNameEstimate as Record<string, unknown>)?.source, 'mlit_n06_2025');
+    assert.equal((saved.extras?.icNameEstimate as Record<string, unknown>)?.sourceDatasetDate, '2025-12-31');
+    assert.equal(saved.extras?.expresswaySessionId, original.extras?.expresswaySessionId);
+    assert.equal(saved.extras?.odoKm, original.extras?.odoKm);
+    assert.equal(saved.ts, original.ts);
+    assert.deepEqual(saved.geo, original.geo);
+    db.close(); await db.open();
+    assert.deepEqual((await db.events.get(eventId))?.extras, saved.extras);
+  } finally {
+    Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { onLine: true } });
+  }
+}
+
+async function testOfflineCatalogMissKeepsLastErrorAndBudget() {
+  await reset([], { extras: { icResolveStatus: 'pending', icResolveAlgorithmVersion: IC_RESOLVE_ALGORITHM_VERSION - 1,
+    icResolveRetryCount: 2, icResolveError: 'old synthetic timeout', icResolveNextRetryAt: '2026-09-18T04:00:00Z' } });
+  const before = await savedExtras();
+  let requests = 0;
+  const run = createExpresswayIcResolutionRunner(async () => { requests += 1; return null; }, () => null);
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { onLine: false } });
+  try {
+    assert.equal(await createExpresswayIcRetryBatchRunner(run, true)(12), false);
+    assert.equal(requests, 0);
+    assert.deepEqual(await savedExtras(), before);
+  } finally {
+    Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { onLine: true } });
+  }
+}
+
+async function testAddressAloneCannotInferAnIcName() {
+  await reset([], { geo: undefined, address: '合成市合成区（その他）' });
+  let lookups = 0;
+  const run = createExpresswayIcResolutionRunner(async () => { lookups += 1; return null; }, () => { lookups += 1; return null; });
+  assert.equal((await run({ eventId, source: 'manual' })).status, 'failed');
+  assert.equal(lookups, 0, 'a broad address cannot be used as an IC coordinate or an entrance selection');
+  assert.equal((await savedExtras()).icName, undefined);
+  assert.match(String((await savedExtras()).icResolveError), /有効な位置情報/);
+  assert.equal((await db.events.get(eventId))?.ts, timestamp);
+}
+
+async function testLocalSupplementPrecedesFailingExternalLookup() {
+  for (const online of [true, false]) {
+    await reset([point('synthetic-local-supplement', -20, 500)]);
+    let requests = 0;
+    const localQueries: number[] = [];
+    const run = createExpresswayIcResolutionRunner(async () => {
+      requests += 1; throw new IcResolverError('synthetic unavailable upstream', true, 503);
+    }, (lat) => {
+      localQueries.push(lat);
+      return lat === originalGeo.lat ? null : {
+        icName: '合成補足IC（推定）', distanceM: 100, confidence: 'estimated',
+        candidates: ['合成補足IC'], estimateSource: 'mlit_n06_2025', sourceDatasetDate: '2025-12-31',
+      };
+    });
+    Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { onLine: online } });
+    try {
+      assert.equal((await run({ eventId, source: 'retry' })).status, 'resolved');
+      assert.equal(requests, 0, 'all bounded local route fixes precede external lookup regardless of connectivity');
+      assert.deepEqual(localQueries, [originalGeo.lat, geoAt(500).lat]);
+      const saved = await savedExtras();
+      assert.equal(saved.icName, '合成補足IC（推定）');
+      assert.equal(saved.icResolveGeoSource, 'route');
+      assert.equal(saved.icResolveGeoOffsetSeconds, -20);
+      assert.ok(Number(saved.icDistanceM) >= 600 && Number(saved.icDistanceM) <= 601, 'supplement distance is an upper bound from the original event');
+      assert.equal((saved.icNameEstimate as Record<string, unknown>).source, 'mlit_n06_2025');
+      assert.equal((await db.events.get(eventId))?.ts, timestamp);
+    } finally {
+      Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { onLine: true } });
+    }
+  }
+}
+
+async function testDifferentLocalSupplementsRemainUnconfirmedCandidates() {
+  await reset([point('synthetic-local-before', -10, 400), point('synthetic-local-earlier', -50, -400)]);
+  let requests = 0;
+  const run = createExpresswayIcResolutionRunner(async () => { requests += 1; return null; }, lat => {
+    if (lat === originalGeo.lat) return null;
+    const name = lat > originalGeo.lat ? '合成北IC' : '合成南IC';
+    return { icName: `${name}（推定）`, distanceM: 80, confidence: 'estimated',
+      candidates: [name], estimateSource: 'mlit_n06_2025' };
+  });
+  assert.equal((await run({ eventId, source: 'retry' })).status, 'resolved');
+  assert.equal(requests, 0, 'different local candidates do not need a remote request to pick a winner');
+  const saved = await savedExtras();
+  const estimate = saved.icNameEstimate as Record<string, unknown>;
+  assert.deepEqual(new Set(estimate.candidateNames as string[]), new Set(['合成北IC', '合成南IC']));
+  assert.equal(estimate.certainty, 'ambiguous_candidates');
+  assert.match(String(estimate.note), /保存軌跡.*元イベント.*未確認/);
+  assert.ok(Number(saved.icDistanceM) >= 480 && Number(saved.icDistanceM) <= 481);
+}
+
+async function testLocalSupplementBoundsEveryAlternativeFromOriginalEvent() {
+  for (const offset of [500, 1000]) {
+    await reset([point('synthetic-multiple-local', -20, offset)]);
+    let requests = 0;
+    const run = createExpresswayIcResolutionRunner(async () => { requests += 1; return null; }, lat => {
+      if (lat === originalGeo.lat) return null;
+      return { icName: '合成近傍IC（推定）', distanceM: 80, confidence: 'estimated',
+        candidates: ['合成近傍IC', '合成別IC'], estimateSource: 'mlit_n06_2025' };
+    });
+    Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { onLine: false } });
+    try {
+      const outcome = await run({ eventId, source: 'retry' });
+      assert.equal(requests, 0);
+      if (offset === 500) {
+        assert.equal(outcome.status, 'resolved');
+        assert.deepEqual(((await savedExtras()).icNameEstimate as Record<string, unknown>).candidateNames, ['合成近傍IC', '合成別IC']);
+        assert.ok(Number((await savedExtras()).icDistanceM) >= 1700 && Number((await savedExtras()).icDistanceM) <= 1701);
+      } else {
+        assert.equal(outcome.status, 'deferred');
+        assert.equal((await savedExtras()).icName, undefined, 'an unbounded alternative is not hidden by keeping only the representative');
+      }
+    } finally {
+      Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { onLine: true } });
+    }
+  }
+}
+
 async function testManualCorrectionClearsAutomaticOriginMetadata() {
   await reset([], {
     extras: { icName: '自動合成IC', icResolveStatus: 'resolved', icResolveGeoSource: 'route', icResolveGeoOffsetSeconds: -20 },
@@ -733,6 +873,12 @@ const tests = [
   testManualRetryNeverOverwritesExistingManualName,
   testEstimateResponseSavesProvenanceAndEventContext,
   testRetrySuccessRetainsOldEstimateEvidence,
+  testOfflineCatalogResolvesOldExhaustedEventWithoutRequests,
+  testOfflineCatalogMissKeepsLastErrorAndBudget,
+  testAddressAloneCannotInferAnIcName,
+  testLocalSupplementPrecedesFailingExternalLookup,
+  testDifferentLocalSupplementsRemainUnconfirmedCandidates,
+  testLocalSupplementBoundsEveryAlternativeFromOriginalEvent,
 ];
 
 async function main() {

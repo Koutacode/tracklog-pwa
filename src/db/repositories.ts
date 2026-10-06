@@ -2129,7 +2129,8 @@ export type ExpresswayIcResolutionWriteGuard = {
 
 type IcResolutionEstimate = {
   candidates: string[];
-  source: 'overpass_nearby';
+  source: 'overpass_nearby' | 'mlit_n06_2025';
+  sourceDatasetDate?: string;
   sourceUrls: string[];
   note: string;
   estimatedAt: string;
@@ -2139,9 +2140,29 @@ function estimateFromIcResult(result: IcResult): IcResolutionEstimate | undefine
   if (result.confidence !== 'estimated') return undefined;
   return {
     candidates: result.candidates?.length ? result.candidates : [result.icName],
-    source: 'overpass_nearby', sourceUrls: result.sourceUrls ?? [], note: result.note ?? '',
+    source: result.estimateSource ?? 'overpass_nearby',
+    ...(result.sourceDatasetDate ? { sourceDatasetDate: result.sourceDatasetDate } : {}),
+    sourceUrls: result.sourceUrls ?? [], note: result.note ?? '',
     estimatedAt: new Date(Date.now()).toISOString(),
   };
+}
+
+function nextIcMetadataTimestamp(previous: unknown, observed?: string): string {
+  const previousMs = typeof previous === 'string' ? Date.parse(previous) : NaN;
+  const observedMs = observed ? Date.parse(observed) : NaN;
+  return new Date(Math.max(Date.now(), Number.isFinite(previousMs) ? previousMs + 1 : 0,
+    Number.isFinite(observedMs) ? observedMs : 0)).toISOString();
+}
+
+function latestIcEstimateTimestamp(extras?: Record<string, unknown>): string | undefined {
+  const estimates = [extras?.icNameEstimate,
+    ...(Array.isArray(extras?.icNameEstimateHistory) ? extras.icNameEstimateHistory : [])];
+  const latest = estimates.reduce<number>((maximum, estimate) => {
+    const value = estimate && typeof estimate === 'object' ? (estimate as IcNameEstimate).estimatedAt : undefined;
+    const parsed = value ? Date.parse(value) : NaN;
+    return Number.isFinite(parsed) ? Math.max(maximum, parsed) : maximum;
+  }, 0);
+  return latest ? new Date(latest).toISOString() : undefined;
 }
 
 export async function updateExpresswayResolved(params: {
@@ -2188,9 +2209,11 @@ export async function updateExpresswayResolved(params: {
       if (params.estimate && params.icName) {
         const estimate: IcNameEstimate = {
           note: params.estimate.note, source: params.estimate.source,
+          ...(params.estimate.sourceDatasetDate ? { sourceDatasetDate: params.estimate.sourceDatasetDate } : {}),
           certainty: params.estimate.candidates.length > 1 ? 'ambiguous_candidates' : 'estimated',
           sourceUrls: params.estimate.sourceUrls, displayName: params.icName,
-          estimatedAt: params.estimate.estimatedAt, candidateNames: params.estimate.candidates,
+          estimatedAt: nextIcMetadataTimestamp(latestIcEstimateTimestamp(ev.extras),
+            params.estimate.estimatedAt), candidateNames: params.estimate.candidates,
         };
         extras.icNameEstimate = estimate;
       }
@@ -2204,7 +2227,7 @@ export async function updateExpresswayResolved(params: {
       }
       extras.icResolveRetryCount = 0;
       delete extras.icResolveNextRetryAt;
-      extras.icResolveLastAttemptAt = new Date(Date.now()).toISOString();
+      extras.icResolveLastAttemptAt = nextIcMetadataTimestamp(ev.extras?.icResolveLastAttemptAt);
       delete extras.icResolveError;
       if (params.clearManualResolution) {
         delete extras.icResolvedManually;
@@ -2219,7 +2242,7 @@ export async function updateExpresswayResolved(params: {
       } else if (extras.icResolveRetryCount == null) {
         extras.icResolveRetryCount = 0;
       }
-      extras.icResolveLastAttemptAt = new Date(Date.now()).toISOString();
+      extras.icResolveLastAttemptAt = nextIcMetadataTimestamp(ev.extras?.icResolveLastAttemptAt);
       if (params.nextRetryAt) {
         extras.icResolveNextRetryAt = params.nextRetryAt;
       } else {
@@ -2289,7 +2312,7 @@ export async function markExpresswayResolveFailure(params: {
     extras.icResolveStatus = 'failed';
     extras.icResolveAlgorithmVersion = IC_RESOLVE_ALGORITHM_VERSION;
     extras.icResolveRetryCount = retryCount;
-    extras.icResolveLastAttemptAt = new Date(nowMs).toISOString();
+    extras.icResolveLastAttemptAt = nextIcMetadataTimestamp(ev.extras?.icResolveLastAttemptAt);
     if (nextRetryAt) {
       extras.icResolveNextRetryAt = nextRetryAt;
     } else {

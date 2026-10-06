@@ -20,6 +20,29 @@ function estimateNames(value: unknown): string[] {
   return name ? [name] : [...estimateNames(estimate.candidateNames), ...estimateNames(estimate.candidates)];
 }
 
+function latestCatalogueSupplement(
+  extras: Record<string, unknown>,
+  estimate: Record<string, unknown>,
+): { names: string[]; datasetDate?: string } | undefined {
+  if (estimate.source !== 'saved_address_official_sources' || !Array.isArray(extras.icNameEstimateHistory)) return;
+  let latest: Record<string, unknown> | undefined;
+  let latestAt = -Infinity;
+  for (const value of extras.icNameEstimateHistory) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+    const candidate = value as Record<string, unknown>;
+    const at = Date.parse(text(candidate.estimatedAt) ?? '');
+    if (candidate.source !== 'mlit_n06_2025' || !Number.isFinite(at) || at < latestAt) continue;
+    latest = candidate;
+    latestAt = at;
+  }
+  if (!latest) return;
+  const primaryNames = estimateNames(estimate.candidateNames);
+  const names = [...new Set(estimateNames(latest.candidateNames).filter(name => !primaryNames.includes(name)))];
+  if (!names.length) return;
+  const date = text(latest.sourceDatasetDate);
+  return { names, datasetDate: date && /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : undefined };
+}
+
 /** Presentation only: never promotes address estimates or alters event data. */
 export function getExpresswayIcDisplay(extras: Record<string, unknown> = {}): ExpresswayIcDisplay {
   const name = text(extras.icName);
@@ -71,10 +94,19 @@ export function getExpresswayIcDisplay(extras: Record<string, unknown> = {}): Ex
     const candidateLabel = displayName
       ? /[（(]推定(?:候補)?[）)]/.test(displayName) ? displayName : `${displayName}（推定候補）`
       : '推定候補あり';
+    // The address evidence can identify a specific entrance/exit while the
+    // national catalogue supplies a generic nearby IC. Show both as estimates,
+    // keeping the latest catalogue candidates separate from the primary name.
+    const supplement = activeEstimate && estimate && typeof estimate === 'object' && !Array.isArray(estimate)
+      ? latestCatalogueSupplement(extras, estimate as Record<string, unknown>) : undefined;
+    const supplementLabel = supplement
+      ? ` / 補助候補: ${supplement.names.join(' / ')}（国土数値情報・推定）` : '';
+    const supplementDetail = supplement
+      ? `国土数値情報${supplement.datasetDate ? `（${supplement.datasetDate}時点）` : ''}の補助候補を併記しています。入口・出口・進行方向は未確定です。` : '';
     return {
       name: displayName,
-      label: `${candidateLabel} / ${statusLabel}`,
-      detail: `推定候補のため未確定です。${guidance}`,
+      label: `${candidateLabel}${supplementLabel} / ${statusLabel}`,
+      detail: `推定候補のため未確定です。${supplementDetail}${guidance}`,
       state: 'estimated',
     };
   }

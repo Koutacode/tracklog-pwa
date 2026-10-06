@@ -6,9 +6,9 @@ import { onDriverAuthStateChange } from '../services/remoteAuth';
 
 /**
  * IcResolverJob periodically checks for expressway events whose IC names have
- * not yet been resolved. When the browser is online it attempts to resolve
- * the nearest interchange using the device's recorded GPS coordinates. The
- * update is then persisted back into the database. Only a small number of
+ * not yet been resolved. It uses bundled public IC candidates first, including
+ * offline, and queries the resolver online only when the catalogue has no
+ * candidate near the saved position. Results are persisted back into the database. Only a small number of
  * pending events are processed per timer interval to avoid excessive network
  * requests. Recovery triggers respect the same persisted delay and budget.
  * Least recently attempted events are selected first to avoid starvation.

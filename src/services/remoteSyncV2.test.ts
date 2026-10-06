@@ -10,6 +10,7 @@ import { getReportTrip, listReportTrips, saveReportTripSnapshot } from '../db/re
 import { buildTripDetailReportSnapshot } from '../ui/screens/tripDetailReportSnapshot';
 import type { AppEvent } from '../domain/types';
 import type { Trip } from '../domain/reportTypes';
+import { IC_RESOLVE_ALGORITHM_VERSION } from './expresswayIcRetryPolicy';
 
 type Request = Parameters<Parameters<typeof synchronizeRemoteOutbox>[1]>[0];
 const USER = '11111111-1111-4111-8111-111111111111';
@@ -282,10 +283,69 @@ async function testIcMetadataSurvivesSyncConflictAndRestart() {
   console.log('PASS IC estimates/manual edits through retries, concurrent sync, conflict, and IndexedDB reopen');
 }
 
+async function testCatalogueEvidenceAndClockSkewPersistence() {
+  await reset();
+  const event = integrationEvents()[1];
+  const future = '2040-01-01T00:00:00.000Z';
+  const estimate = { displayName: '合成北入口／合成南入口（推定候補）', candidateNames: ['合成北入口', '合成南入口'],
+    source: 'saved_address_official_sources', certainty: 'ambiguous_candidates',
+    sourceUrls: ['https://example.invalid/entrances'], note: '利用入口と方向は未確認', estimatedAt: future };
+  await db.events.put({ ...event, extras: { ...event.extras, icName: estimate.displayName, icNameEstimate: estimate,
+    icResolveStatus: 'pending', icResolveAlgorithmVersion: IC_RESOLVE_ALGORITHM_VERSION - 1,
+    icResolveRetryCount: 32, icResolveLastAttemptAt: future, odoKm: 123 } });
+  await updateExpresswayResolved({ eventId: event.id, status: 'failed', retryCount: 1,
+    nextRetryAt: null, errorMessage: 'synthetic network failure' });
+  let saved = (await db.events.get(event.id))!;
+  assert.equal(saved.extras?.icResolveRetryCount, 1, 'a future old timestamp cannot prevent the new finite budget');
+  assert.equal(saved.extras?.icResolveAlgorithmVersion, IC_RESOLVE_ALGORITHM_VERSION);
+  assert.ok(Date.parse(String(saved.extras?.icResolveLastAttemptAt)) > Date.parse(future));
+  const firstAttempt = String(saved.extras?.icResolveLastAttemptAt);
+  await updateExpresswayResolved({ eventId: event.id, status: 'failed', retryCount: 2,
+    nextRetryAt: null, errorMessage: 'synthetic second failure' });
+  saved = (await db.events.get(event.id))!;
+  assert.equal(saved.extras?.icResolveRetryCount, 2, 'same-algorithm failures advance even when the device clock moved backwards');
+  assert.ok(Date.parse(String(saved.extras?.icResolveLastAttemptAt)) > Date.parse(firstAttempt));
+  await updateExpresswayResolved({ eventId: event.id, status: 'resolved', icName: '合成IC（推定）', icDistanceM: 80,
+    estimate: { candidates: ['合成IC'], source: 'mlit_n06_2025', sourceDatasetDate: '2025-12-31',
+      sourceUrls: ['https://example.invalid/public-catalogue'], note: 'IC中心付近の推定、入口は未確認', estimatedAt: TS } });
+  saved = (await db.events.get(event.id))!;
+  assert.equal(saved.extras?.icName, estimate.displayName);
+  assert.deepEqual(saved.extras?.icNameEstimate, estimate, 'catalogue resolution preserves the original detailed candidate evidence');
+  const history = saved.extras?.icNameEstimateHistory as Array<Record<string, unknown>>;
+  assert.deepEqual(history[0], estimate);
+  assert.equal(history[1].source, 'mlit_n06_2025');
+  assert.equal(history[1].sourceDatasetDate, '2025-12-31');
+  assert.deepEqual(history[1].candidateNames, ['合成IC']);
+  assert.ok(Date.parse(String(history[1].estimatedAt)) > Date.parse(future), 'fresh evidence has a monotonic metadata timestamp');
+  assert.equal(saved.extras?.icResolveStatus, 'resolved');
+  assert.equal(saved.extras?.icResolveRetryCount, 0);
+  assert.equal(saved.extras?.odoKm, 123);
+  assert.equal(saved.ts, event.ts);
+  assert.equal(saved.extras?.expresswaySessionId, event.extras?.expresswaySessionId);
+  await updateExpresswayResolved({ eventId: event.id, status: 'resolved', icName: '合成隣接IC（推定）',
+    estimate: { candidates: ['合成隣接IC'], source: 'mlit_n06_2025', sourceDatasetDate: '2025-12-31',
+      sourceUrls: ['https://example.invalid/public-catalogue'], note: '追加の未確認候補', estimatedAt: TS } });
+  const newerHistory = (await db.events.get(event.id))!.extras!.icNameEstimateHistory as Array<Record<string, unknown>>;
+  assert.deepEqual(newerHistory[0], estimate);
+  assert.ok(Date.parse(String(newerHistory[2].estimatedAt)) > Date.parse(String(history[1].estimatedAt)),
+    'later supplementary catalogue evidence is newer even while the primary address timestamp stays intact');
+  await captureRun();
+  db.close();
+  await db.open();
+  assert.deepEqual((await db.events.get(event.id))?.extras?.icNameEstimateHistory, newerHistory,
+    'both address and catalogue evidence survive successful sync and IndexedDB reopen');
+  await updateExpresswayIcNameManual(event.id, '合成手動出口');
+  assert.equal(await updateExpresswayResolved({ eventId: event.id, status: 'resolved', icName: '別合成IC（推定）',
+    estimate: { candidates: ['別合成IC'], source: 'mlit_n06_2025', sourceUrls: [], note: '', estimatedAt: TS } }), false);
+  assert.equal((await db.events.get(event.id))?.extras?.icName, '合成手動出口');
+  console.log('PASS catalogue provenance, detailed entrance candidates, clock skew, retry budget, and restart');
+}
+
 async function main() {
   await testTripEndEditDuringHeaderAckPreservesEventAndReport();
   await testPagedDownloadProtectsReportThenSendsIcCorrection();
   await testIcMetadataSurvivesSyncConflictAndRestart();
+  await testCatalogueEvidenceAndClockSkewPersistence();
   await reset();
   assert.equal((await captureRun()).length, 1, 'idle polling retains one pull for other-device changes');
 
