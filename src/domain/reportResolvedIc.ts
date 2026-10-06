@@ -1,14 +1,9 @@
 import type { AppEvent } from './types';
 import type { Trip, TripEvent } from './reportTypes';
 import { hasNewPendingReportSourceMutation } from './reportSourceEvents';
+import { IC_METADATA_FIELDS, mergeIcMetadata } from './icMetadata';
 
 const EXPRESSWAY_TYPES = new Set(['expressway', 'expressway_start', 'expressway_end']);
-const IC_FIELDS = [
-  'icName', 'icDistanceM', 'icResolveStatus', 'icResolveAlgorithmVersion',
-  'icResolvedManually', 'icResolveManualUpdatedAt', 'icResolveGeoSource',
-  'icResolveGeoOffsetSeconds', 'icResolveRetryCount', 'icResolveNextRetryAt',
-  'icResolveLastAttemptAt', 'icResolveError',
-] as const;
 
 function text(value: unknown): string | null {
   return typeof value === 'string' && value.trim() ? value.trim() : null;
@@ -67,7 +62,7 @@ function mayReplaceSavedIc(saved: TripEvent, current: AppEvent, trip: Trip): boo
 }
 
 /**
- * Refresh resolved IC metadata in an app-generated report from uniquely
+ * Refresh IC names, estimates and progress in an app-generated report from uniquely
  * matching local event rows. This is a read projection: no saved report, raw
  * JSON, event timestamp, address, location, or unrelated extras are rewritten.
  */
@@ -91,17 +86,20 @@ export function projectReportResolvedIc(trip: Trip, canonicalEvents: readonly Ap
       }
       if (exact.length !== 1) return saved; // Missing/ambiguous rows cannot alter saved evidence.
       const current = exact[0];
-      const status = current.extras?.icResolveStatus;
-      if (!text(current.extras?.icName) || (status != null && status !== 'resolved')) return saved;
+      if (!IC_METADATA_FIELDS.some(key => current.extras?.[key] !== undefined)) return saved;
       if (!mayReplaceSavedIc(saved, current, trip)) return saved;
+      const merged = mergeIcMetadata(saved.extras, current.extras, {
+        incomingIsNewer: hasNewPendingReportSourceMutation(trip, saved, current)
+          || (current.remoteChangeSeq ?? 0) > (trip.remoteChangeSeq ?? 0)
+          || Date.parse(current.localUpdatedAt ?? '') > Date.parse(trip.localUpdatedAt ?? ''),
+      });
       const extras = { ...saved.extras };
-      for (const key of IC_FIELDS) {
+      for (const key of IC_METADATA_FIELDS) {
         delete extras[key];
-        if (current.extras && Object.prototype.hasOwnProperty.call(current.extras, key)) {
-          extras[key] = current.extras[key];
+        if (merged && Object.prototype.hasOwnProperty.call(merged, key)) {
+          extras[key] = merged[key];
         }
       }
-      extras.icResolveStatus = 'resolved';
       if (JSON.stringify(extras) === JSON.stringify(saved.extras)) return saved;
       changed = true;
       return { ...saved, extras };

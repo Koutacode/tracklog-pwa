@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
+import { analyzeOverpassElements } from '../../supabase/functions/tracklog-ic-resolver/resolver';
+import { getExpresswayIcDisplay } from '../domain/expresswayIcDisplay';
 import {
   classifyIcResolverHttpStatus,
+  parseIcResult,
   getFunctionErrorDetails,
   getRetryableIcResolverErrorCategory,
   runIcResolverNativeSessionRestore,
@@ -11,6 +14,30 @@ import { computeIcResolveDeferredBackoffMs } from './expresswayIcRetryPolicy';
 import { createIcResolverFunctionInvoker } from './icResolverClient';
 
 async function main() {
+  const parsed = parseIcResult({ icName: '合成入口', distanceM: 10.2, confidence: 'estimated',
+    candidates: ['合成入口', '別合成入口'], sourceUrls: ['https://www.openstreetmap.org/copyright'], note: 'direction unknown' });
+  assert.equal(parsed?.confidence, 'estimated');
+  assert.deepEqual(parsed?.candidates, ['合成入口', '別合成入口']);
+  assert.equal(parseIcResult({ icName: '旧サーバー候補', distanceM: 50 })?.confidence, 'estimated',
+    'old proximity-only responses cannot silently become confirmed IC names');
+  assert.throws(() => parseIcResult({ icName: '合成入口', distanceM: 10, confidence: 'confirmed' }), /確度/);
+  assert.throws(() => parseIcResult({ icName: '合成入口', distanceM: 10, candidates: [null] }), /候補一覧/);
+  // Exercise the deployed server/client contract with anonymous map elements.
+  const signal = analyzeOverpassElements([
+    { type: 'node', lat: 35, lon: 139, tags: { highway: 'motorway_junction', name: '合成入口' } },
+    { type: 'node', lat: 35.0001, lon: 139, tags: { highway: 'motorway_junction', name: '別合成入口' } },
+  ], 35, 139, { eventType: 'expressway_start' });
+  const wireCandidate = signal.nearestIc!;
+  assert.equal(signal.nearIc, true, 'native road proximity remains available with an estimated IC name');
+  assert.equal(wireCandidate.icName, '合成入口（推定）', 'old APKs retain uncertainty when they discard confidence');
+  assert.ok(wireCandidate.icName.length <= 80, 'the old client name-length validation remains compatible');
+  const legacySaved = { icName: wireCandidate.icName, icDistanceM: wireCandidate.distanceM, icResolveStatus: 'resolved' };
+  assert.equal(getExpresswayIcDisplay(legacySaved).state, 'estimated', 'an old APK sync cannot promote this candidate');
+  const currentCandidate = parseIcResult(wireCandidate)!;
+  assert.equal(currentCandidate.icName, wireCandidate.icName, 'the backwards-compatible display suffix is preserved');
+  assert.deepEqual(currentCandidate.candidates, ['合成入口', '別合成入口'], 'the display suffix does not add a duplicate candidate');
+  assert.equal(currentCandidate.confidence, 'estimated');
+
   const stalledError = Object.assign(new Error('server unavailable'), {
     context: new Response(new ReadableStream({ start() {} }), { status: 503 }),
   });

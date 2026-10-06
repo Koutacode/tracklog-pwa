@@ -163,11 +163,11 @@ const pendingOpen = buildTripExpresswayHistorySummaries([
 assert.ok(pendingOpen);
 assert.deepEqual(
   formatTripExpresswayHistorySummary(pendingOpen, { tripActive: true }),
-  { routeLabel: '確認中 → 走行中', countLabel: undefined, state: 'pending' },
+  { routeLabel: 'IC名未取得（取得中・取得待ち） → 走行中', countLabel: undefined, state: 'pending' },
 );
 assert.deepEqual(
   formatTripExpresswayHistorySummary(pendingOpen, { tripActive: false }),
-  { routeLabel: '確認中 → 終了記録なし', countLabel: undefined, state: 'unresolved' },
+  { routeLabel: 'IC名未取得（取得中・取得待ち） → 終了記録なし', countLabel: undefined, state: 'unresolved' },
 );
 
 const retryingEnd = buildTripExpresswayHistorySummaries([
@@ -188,7 +188,7 @@ const retryingEnd = buildTripExpresswayHistorySummaries([
 assert.ok(retryingEnd);
 assert.deepEqual(
   formatTripExpresswayHistorySummary(retryingEnd, { tripActive: false }),
-  { routeLabel: '未特定 → 再確認待ち', countLabel: undefined, state: 'unresolved' },
+  { routeLabel: 'IC名未取得（取得失敗） → IC名未取得（取得失敗・再取得待ち）', countLabel: undefined, state: 'unresolved' },
 );
 
 const orphan = buildTripExpresswayHistorySummaries([

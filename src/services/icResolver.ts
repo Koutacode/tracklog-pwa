@@ -5,7 +5,20 @@ import { restoreNativeResidentLocationSession } from './nativeResidentLocation';
 import { driverAuthSupabase, SUPABASE_CONFIGURED } from './supabase';
 import { invokeIcResolverFunction, withIcResolverTimeout } from './icResolverClient';
 
-export type IcResult = { icName: string; distanceM: number };
+export type IcResult = {
+  icName: string;
+  distanceM: number;
+  confidence?: 'estimated';
+  candidates?: string[];
+  estimateSource?: 'overpass_nearby';
+  sourceUrls?: string[];
+  note?: string;
+};
+
+export type IcLookupContext = {
+  eventType?: 'expressway' | 'expressway_start' | 'expressway_end';
+  travelBearing?: number;
+};
 
 export type ExpresswaySignal = {
   resolved: boolean;
@@ -100,7 +113,7 @@ function assertCoordinates(lat: number, lon: number) {
   }
 }
 
-function parseIcResult(value: unknown): IcResult | null {
+export function parseIcResult(value: unknown): IcResult | null {
   if (value == null) return null;
   if (typeof value !== 'object') throw new Error('IC解決サーバーの応答が不正です');
   const row = value as Record<string, unknown>;
@@ -109,9 +122,33 @@ function parseIcResult(value: unknown): IcResult | null {
   if (!icName || icName.length > 80 || !Number.isFinite(distanceM) || distanceM < 0) {
     throw new Error('IC解決サーバーの応答が不正です');
   }
+  if (row.confidence != null && row.confidence !== 'estimated') {
+    throw new Error('IC解決サーバーの候補確度が不正です');
+  }
+  if (row.candidates != null && (!Array.isArray(row.candidates)
+    || row.candidates.length > 12
+    || row.candidates.some(name => typeof name !== 'string' || !name.trim() || name.length > 80))) {
+    throw new Error('IC解決サーバーの候補一覧が不正です');
+  }
+  // The server labels icName for old APKs that discard confidence metadata.
+  // Keep that visible label, but avoid duplicating it as a second candidate.
+  const candidates = [...new Set([
+    icName, ...(Array.isArray(row.candidates) ? row.candidates as string[] : []),
+  ].map(name => name.replace(/[（(]推定(?:候補)?[）)]$/u, '').trim()).filter(Boolean))];
   return {
     icName,
     distanceM: Math.round(distanceM),
+    // Proximity alone cannot prove which entrance, exit or direction was used.
+    // Old servers lacking confidence are conservative estimates as well.
+    confidence: 'estimated',
+    candidates,
+    estimateSource: 'overpass_nearby',
+    sourceUrls: Array.isArray(row.sourceUrls)
+      ? row.sourceUrls.filter((url): url is string => typeof url === 'string' && /^https:\/\//.test(url)).slice(0, 4)
+      : [],
+    note: typeof row.note === 'string' && row.note.trim()
+      ? row.note.trim().slice(0, 300)
+      : '近接する地図上の候補。利用した入口・出口・進行方向は未確認。',
   };
 }
 
@@ -348,8 +385,9 @@ export async function resolveNearestIC(
   lat: number,
   lon: number,
   radiusM = DEFAULT_RADIUS_M,
+  context?: IcLookupContext,
 ): Promise<IcResult | null> {
-  const signal = await detectExpresswaySignal(lat, lon, radiusM);
+  const signal = await detectExpresswaySignal(lat, lon, radiusM, context);
   return signal.nearestIc;
 }
 
@@ -357,10 +395,15 @@ export async function detectExpresswaySignal(
   lat: number,
   lon: number,
   radiusM = DEFAULT_RADIUS_M,
+  context?: IcLookupContext,
 ): Promise<ExpresswaySignal> {
   assertCoordinates(lat, lon);
   if (typeof navigator !== 'undefined' && !navigator.onLine) {
     return unresolvedSignal();
   }
-  return parseSignal(await invokeIcResolverAction<EdgeExpresswaySignal>({ lat, lon, radiusM: normalizeRadius(radiusM) }));
+  return parseSignal(await invokeIcResolverAction<EdgeExpresswaySignal>({
+    lat, lon, radiusM: normalizeRadius(radiusM),
+    ...(context?.eventType ? { eventType: context.eventType } : {}),
+    ...(Number.isFinite(context?.travelBearing) ? { travelBearing: context!.travelBearing } : {}),
+  }));
 }

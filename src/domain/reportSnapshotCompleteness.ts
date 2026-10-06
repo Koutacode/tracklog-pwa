@@ -2,6 +2,7 @@ import type { DeletedEventTombstone } from '../db/db';
 import type { Trip, TripEvent } from './reportTypes';
 import type { AppEvent } from './types';
 import { hasNewPendingReportSourceMutation, readReportSourceEvents } from './reportSourceEvents';
+import { mergeIcMetadata, sameIcMetadata } from './icMetadata';
 
 const SESSION_KEYS = ['expresswaySessionId', 'restSessionId', 'breakSessionId', 'loadSessionId', 'unloadSessionId', 'ferrySessionId', 'waitSessionId', 'workSessionId'];
 const HIGHWAY_TYPES = new Set(['expressway', 'expressway_start', 'expressway_end']);
@@ -40,7 +41,8 @@ export function canAutomaticallyReplaceReportSnapshot(
       if (HIGHWAY_TYPES.has(event.type) && typeof event.extras?.icName === 'string' && event.extras.icName.trim()) {
         // The read projection already checked whether a new IC has evidence to
         // replace this value. An older/partial writer must not undo it.
-        return matched[0].extras?.icName === event.extras.icName;
+        return matched[0].extras?.icName === event.extras.icName
+          && sameIcMetadata(mergeIcMetadata(event.extras, matched[0].extras), matched[0].extras);
       }
       return true;
     }

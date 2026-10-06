@@ -41,7 +41,8 @@ export function buildIcNameSearchQuery(value: string) {
 }
 
 function sameSite(a: NamedIcCandidate, b: NamedIcCandidate) {
-  // Collapse duplicate entrance/exit OSM objects, not names in distant regions.
+  // Collapse only same-name objects at one site. Entrance/exit names remain
+  // separate, as do identical names in distant regions.
   const dy = (a.lat - b.lat) * 111_195;
   const dx = (a.lon - b.lon) * 111_195 * Math.cos(a.lat * Math.PI / 180);
   return a.icName === b.icName && Math.hypot(dx, dy) < 1000;

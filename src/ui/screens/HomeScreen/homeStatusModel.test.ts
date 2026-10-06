@@ -282,7 +282,7 @@ const pendingOpenStart: AppEvent = {
 };
 assert.equal(
   summarizeExpressway([pendingOpenStart], pendingOpenStart).value,
-  '開始ICを確認中…',
+  '開始IC: IC名未取得（取得中・取得待ち）',
 );
 
 const openStart: AppEvent = {
@@ -303,14 +303,14 @@ const retryingEnd: AppEvent = {
   },
 };
 const retryingSummary = summarizeExpressway([openStart, retryingEnd], null);
-assert.equal(retryingSummary.value, '終了ICを再確認中');
+assert.equal(retryingSummary.value, '終了IC: IC名未取得（取得失敗・再取得待ち）');
 assert.doesNotMatch(retryingSummary.detail, /internal detail/);
 
 const terminalEnd: AppEvent = {
   ...retryingEnd,
   extras: { icResolveStatus: 'failed' },
 };
-assert.equal(summarizeExpressway([terminalEnd], null).value, '終了ICが特定できませんでした');
+assert.equal(summarizeExpressway([terminalEnd], null).value, '終了IC: IC名未取得（取得失敗）');
 
 const pendingPrompt = {
   tripId: 'trip-1',

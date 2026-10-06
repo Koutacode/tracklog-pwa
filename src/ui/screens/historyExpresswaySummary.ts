@@ -1,4 +1,5 @@
 import type { AppEvent } from '../../domain/types';
+import { getExpresswayIcDisplay } from '../../domain/expresswayIcDisplay';
 
 type ExpresswayEventType = 'expressway' | 'expressway_start' | 'expressway_end';
 
@@ -49,35 +50,10 @@ function getSessionId(event: ExpresswayHistoryEvent): string | null {
 }
 
 function summarizeIc(event: ExpresswayHistoryEvent): IcEndpointSummary {
-  const name = readString(event.extras, 'icName');
-  const status = readString(event.extras, 'icResolveStatus');
-  const nextRetryAt = readString(event.extras, 'icResolveNextRetryAt');
-
-  if (status === 'pending') {
-    return {
-      label: name ? `${name}（確認中）` : '確認中',
-      state: 'pending',
-    };
-  }
-
-  if (status === 'failed') {
-    if (nextRetryAt) {
-      return {
-        label: name ? `${name}（再確認待ち）` : '再確認待ち',
-        state: 'pending',
-      };
-    }
-    return {
-      label: name ? `${name}（未確定）` : '未特定',
-      state: 'unresolved',
-    };
-  }
-
-  if (name) {
-    return { label: name, state: 'resolved' };
-  }
-
-  return { label: '未特定', state: 'unresolved' };
+  const display = getExpresswayIcDisplay(event.extras);
+  return { label: display.label,
+    state: display.state === 'resolved' || display.state === 'manual' ? 'resolved'
+      : display.state === 'pending' ? 'pending' : 'unresolved' };
 }
 
 function eventOrder(left: ExpresswayHistoryEvent, right: ExpresswayHistoryEvent): number {

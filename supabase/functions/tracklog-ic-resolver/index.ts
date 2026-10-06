@@ -133,7 +133,12 @@ Deno.serve(async (req: Request) => {
     const lat = requiredCoordinate(payload, 'lat', -90, 90);
     const lon = requiredCoordinate(payload, 'lon', -180, 180);
     const radiusM = normalizeRadiusM(Number(payload.radiusM));
-    const data = await resolveExpresswayFromOverpass(lat, lon, radiusM);
+    const eventType = payload.eventType;
+    if (eventType != null && eventType !== 'expressway_start' && eventType !== 'expressway_end' && eventType !== 'expressway') {
+      throw new HttpError(400, 'eventType is invalid');
+    }
+    const travelBearing = payload.travelBearing == null ? undefined : requiredCoordinate(payload, 'travelBearing', 0, 360);
+    const data = await resolveExpresswayFromOverpass(lat, lon, radiusM, { eventType: eventType ?? undefined, travelBearing });
     return jsonResponse({ ok: true, data });
   } catch (error) {
     const status = error instanceof HttpError ? error.status : error instanceof OverpassUnavailableError ? 502 : 500;

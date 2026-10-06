@@ -13,6 +13,7 @@ import {
 } from '../db/repositories';
 import { listReportTrips } from '../db/reportRepository';
 import type { AppEvent, EventType, RoutePoint } from '../domain/types';
+import { mergeIcMetadata } from '../domain/icMetadata';
 import {
   findOpenToggleStart,
   PERSISTED_BASIC_TOGGLE_DEFINITIONS,
@@ -245,30 +246,6 @@ function parseRemoteEvent(raw: unknown): AppEvent | null {
     syncStatus: normalizeSyncStatus(row.sync_status),
     ...(normalizeRemoteExtras(row.extras) ? { extras: normalizeRemoteExtras(row.extras)! } : {}),
   };
-}
-
-function parseExtrasPositiveInt(raw: unknown): number {
-  const value = Number(raw);
-  if (!Number.isFinite(value)) return 0;
-  return Math.max(0, Math.floor(value));
-}
-
-function hasResolvedIcName(event: AppEvent): boolean {
-  const name = (event as any).extras?.icName;
-  return typeof name === 'string' && name.trim().length > 0;
-}
-
-function getIcResolveAlgorithmVersion(event: AppEvent): number {
-  return parseExtrasPositiveInt((event as any).extras?.icResolveAlgorithmVersion);
-}
-
-function shouldKeepLocalIcResolution(local: AppEvent | undefined, remote: AppEvent): boolean {
-  if (!local || !EXPRESSWAY_REMOTE_EVENT_TYPES.has(remote.type)) return false;
-  const localHasIc = hasResolvedIcName(local);
-  const remoteHasIc = hasResolvedIcName(remote);
-  if (localHasIc && !remoteHasIc) return true;
-  if (remoteHasIc) return false;
-  return getIcResolveAlgorithmVersion(local) > getIcResolveAlgorithmVersion(remote);
 }
 
 function parseRemoteRoutePoint(raw: unknown): RoutePoint | null {
@@ -561,7 +538,13 @@ async function applyRemoteDownload(rows: {
     const local = localEventsById.get(item.id);
     if (!local) return true;
     if (local.syncStatus !== 'synced') return false;
-    return !shouldKeepLocalIcResolution(local, item);
+    return true;
+  }).map(item => {
+    const local = localEventsById.get(item.id);
+    if (!local || local.type !== item.type || !EXPRESSWAY_REMOTE_EVENT_TYPES.has(item.type)
+      || (local.extras?.expresswaySessionId && item.extras?.expresswaySessionId
+        && local.extras.expresswaySessionId !== item.extras.expresswaySessionId)) return item;
+    return { ...item, extras: mergeIcMetadata(local.extras, item.extras) };
   });
 
   const remoteTripIds = [...new Set(prunedHeaders.map(item => item.trip_id))];

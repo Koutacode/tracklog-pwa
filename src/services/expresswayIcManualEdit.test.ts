@@ -136,11 +136,14 @@ async function main() {
   assert.equal(saved.extras!.icDistanceM, undefined);
   assert.equal(saved.extras!.icResolveNextRetryAt, undefined);
   assert.equal(saved.syncStatus, 'pending');
+  const previousManualAt = saved.extras!.icResolveManualUpdatedAt;
   await assert.rejects(updateExpresswayIcNameManual('manual-ic-fixture', '別名IC', selected));
   assert.equal((await db.events.get('manual-ic-fixture'))!.extras!.icName, selected.icName);
 
   await updateExpresswayIcNameManual('manual-ic-fixture', '手入力IC');
   saved = (await db.events.get('manual-ic-fixture'))!;
+  assert.ok(Date.parse(String(saved.extras!.icResolveManualUpdatedAt)) > Date.parse(String(previousManualAt)),
+    'successive manual edits have monotonic timestamps even inside the same millisecond');
   assert.equal(saved.address, selected.address, 'name-only fallback never guesses an address');
   assert.deepEqual(saved.geo, eventGeo);
   assert.equal(saved.extras!.icNameSearchSourceId, undefined, 'old selection metadata is removed for plain manual edits');

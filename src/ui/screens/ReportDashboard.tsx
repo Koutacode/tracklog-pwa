@@ -21,6 +21,7 @@ import {
 import { getEventsByTripId } from '../../db/repositories';
 import { buildTripViewModel } from '../../state/selectors';
 import { TripRecordedTimes } from './TripRecordedTimes';
+import { getExpresswayIcDisplay } from '../../domain/expresswayIcDisplay';
 import {
   EXPRESSWAY_TOGGLE_DEFINITIONS,
   resolveTogglePairing,
@@ -525,7 +526,7 @@ export function DailyView({ day, metrics, expresswaySessions }: {
         <div className="report-card" style={{ padding: 16 }}>
           <div className="report-section-title">高速道路区間</div>
           <div className="report-section-caption" style={{ marginBottom: 12 }}>
-            高速開始・高速終了イベントに保存された IC 名を表示します。未解決の IC はオンライン時の再解決後に反映されます。
+            高速開始・高速終了イベントの IC 名と取得状態を表示します。推定候補は未確定です。
           </div>
           {expresswaySessions.map((session, index) => (
             <ExpresswaySessionCard key={`expressway-${index}`} session={session} />
@@ -561,6 +562,8 @@ export type ExpresswaySession = {
   endTs?: string;
   startIcName?: string;
   endIcName?: string;
+  startIcLabel?: string;
+  endIcLabel?: string;
   startIcDistanceM?: number;
   endIcDistanceM?: number;
   legacy?: boolean;
@@ -575,6 +578,11 @@ function getNumberExtra(event: TripEvent | undefined, key: string): number | und
   const value = event?.extras?.[key];
   const n = typeof value === 'number' ? value : Number(value);
   return Number.isFinite(n) ? n : undefined;
+}
+
+function getConfirmedIcDistance(event: TripEvent): number | undefined {
+  return getExpresswayIcDisplay(event.extras).state === 'resolved'
+    ? getNumberExtra(event, 'icDistanceM') : undefined;
 }
 
 export function getExpresswaySessions(days: readonly DayRecord[]): Map<number, ExpresswaySession[]> {
@@ -599,8 +607,10 @@ export function getExpresswaySessions(days: readonly DayRecord[]): Map<number, E
       endTs: pair.end.ts,
       startIcName: getStringExtra(pair.start, 'icName'),
       endIcName: getStringExtra(pair.end, 'icName'),
-      startIcDistanceM: getNumberExtra(pair.start, 'icDistanceM'),
-      endIcDistanceM: getNumberExtra(pair.end, 'icDistanceM'),
+      startIcLabel: getExpresswayIcDisplay(pair.start.extras).label,
+      endIcLabel: getExpresswayIcDisplay(pair.end.extras).label,
+      startIcDistanceM: getConfirmedIcDistance(pair.start),
+      endIcDistanceM: getConfirmedIcDistance(pair.end),
     });
   }
 
@@ -608,7 +618,8 @@ export function getExpresswaySessions(days: readonly DayRecord[]): Map<number, E
     append(eventDayIndexes.get(open.start), {
       startTs: open.start.ts,
       startIcName: getStringExtra(open.start, 'icName'),
-      startIcDistanceM: getNumberExtra(open.start, 'icDistanceM'),
+      startIcLabel: getExpresswayIcDisplay(open.start.extras).label,
+      startIcDistanceM: getConfirmedIcDistance(open.start),
     });
   }
 
@@ -616,7 +627,8 @@ export function getExpresswaySessions(days: readonly DayRecord[]): Map<number, E
     append(eventDayIndexes.get(legacy), {
       startTs: legacy.ts,
       startIcName: getStringExtra(legacy, 'icName'),
-      startIcDistanceM: getNumberExtra(legacy, 'icDistanceM'),
+      startIcLabel: getExpresswayIcDisplay(legacy.extras).label,
+      startIcDistanceM: getConfirmedIcDistance(legacy),
       legacy: true,
     });
   }
@@ -634,7 +646,7 @@ function formatIcDistance(distanceM?: number) {
 }
 
 function formatIcName(name?: string) {
-  return name || 'IC未解決';
+  return name || 'IC名未取得';
 }
 
 function getExpresswayTimelineDetail(event: TripEvent): string | undefined {
@@ -647,9 +659,9 @@ function getExpresswayTimelineDetail(event: TripEvent): string | undefined {
       : event.type === 'expressway_end'
         ? '終了IC'
         : 'IC';
-  const icName = getStringExtra(event, 'icName');
-  const distanceM = getNumberExtra(event, 'icDistanceM');
-  return `${prefix}: ${formatIcName(icName)}${formatIcDistance(distanceM)}`;
+  const display = getExpresswayIcDisplay(event.extras);
+  const distanceM = getConfirmedIcDistance(event);
+  return `${prefix}: ${display.label}${formatIcDistance(distanceM)}`;
 }
 
 function getRefuelLiters(event: TripEvent): number | undefined {
@@ -815,11 +827,11 @@ function ExpresswaySessionCard({ session }: { session: ExpresswaySession }) {
         </span>
       </div>
       <div className="report-load-item__meta">
-        <span>開始IC: {formatIcName(session.startIcName)}{formatIcDistance(session.startIcDistanceM)}</span>
+        <span>開始IC: {session.startIcLabel ?? formatIcName(session.startIcName)}{formatIcDistance(session.startIcDistanceM)}</span>
         {session.legacy ? (
           <span className="report-badge">旧形式</span>
         ) : (
-          <span>終了IC: {formatIcName(session.endIcName)}{formatIcDistance(session.endIcDistanceM)}</span>
+          <span>終了IC: {session.endTs ? session.endIcLabel ?? formatIcName(session.endIcName) : '終了記録なし'}{formatIcDistance(session.endIcDistanceM)}</span>
         )}
       </div>
     </div>

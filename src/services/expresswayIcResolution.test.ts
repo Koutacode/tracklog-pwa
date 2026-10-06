@@ -12,7 +12,7 @@ import {
   selectIcResolutionSupplementalPoints,
 } from './expresswayIcResolution';
 import { IcResolverError, type IcResult } from './icResolver';
-import { IC_RESOLVE_ALGORITHM_VERSION } from './expresswayIcRetryPolicy';
+import { IC_RESOLVE_ALGORITHM_VERSION, IC_RESOLVE_RETRY_LIMIT } from './expresswayIcRetryPolicy';
 import { buildTripDetailReportSnapshot } from '../ui/screens/tripDetailReportSnapshot';
 
 // All fixtures are synthetic; no device/session/network data is used.
@@ -179,7 +179,7 @@ async function addPendingEvents(count: number, futureBackoff = false) {
       icResolveStatus: 'pending',
       icResolveAlgorithmVersion: IC_RESOLVE_ALGORITHM_VERSION,
       ...(futureBackoff ? {
-        icResolveRetryCount: 12,
+        icResolveRetryCount: 2,
         icResolveNextRetryAt: new Date(Date.now() + 12 * 60 * 60 * 1000).toISOString(),
       } : {}),
     },
@@ -221,7 +221,7 @@ async function testSlowFirstRequestDoesNotBlockLaterEventsAndConcurrencyIsBounde
   }
 }
 
-async function testRecoveryDuringTimerBatchIsNotDiscarded() {
+async function testRecoveryDuringTimerBatchPreservesBackoff() {
   await reset();
   await addPendingEvents(2, true);
   await db.events.update(eventId, { extras: {
@@ -249,14 +249,14 @@ async function testRecoveryDuringTimerBatchIsNotDiscarded() {
   await timerBatch;
   assert.deepEqual(requested, [
     { id: eventId, recovery: false },
-    { id: 'synthetic-following-1', recovery: true },
   ]);
-  assert.equal((await db.events.get('synthetic-following-1'))?.extras?.icName, '復旧合成IC');
+  assert.equal((await db.events.get('synthetic-following-1'))?.extras?.icName, undefined);
+  assert.equal((await db.events.get('synthetic-following-1'))?.extras?.icResolveRetryCount, 2);
 }
 
-async function testOneRecoveryDrainsMoreThanOnePageWithoutRepeatingFailures() {
+async function testRecoveryRespectsBatchLimitWithoutRepeatingFailures() {
   await reset();
-  await addPendingEvents(13, true);
+  await addPendingEvents(13);
   const requested = new Map<string, number>();
   let retry!: ReturnType<typeof createExpresswayIcRetryBatchRunner>;
   const resolver = createExpresswayIcResolutionRunner(async () => {
@@ -269,11 +269,11 @@ async function testOneRecoveryDrainsMoreThanOnePageWithoutRepeatingFailures() {
     return resolver(request);
   });
   assert.equal(await within(retry(12, { ignorePendingBackoff: true })), false);
-  assert.equal(requested.size, 13, 'one recovery also reaches the thirteenth delayed event');
+  assert.equal(requested.size, 12, 'one recovery is limited to twelve due events');
   assert.ok([...requested.values()].every(count => count === 1), 'each event is attempted once per recovery');
   const saved = await db.events.toArray();
-  assert.ok(saved.every(event => event.extras?.icResolveRetryCount === 1));
-  assert.equal(await retry(12), false, 'ordinary ticks respect the new authorization delay');
+  assert.equal(saved.filter(event => event.extras?.icResolveRetryCount === 1).length, 12);
+  assert.equal(await retry(12), false, 'the next tick reaches the remaining unattempted event');
   assert.equal([...requested.values()].reduce((sum, count) => sum + count, 0), 13);
 }
 
@@ -301,7 +301,7 @@ async function testTimerBatchSelectionDoesNotStarveUnattemptedRecords() {
   }
 }
 
-async function testForcedJoinRetriesDeferredImmediateRequestOnce() {
+async function testForcedJoinDoesNotResetDeferredImmediateRequest() {
   await reset();
   const started = deferred<void>();
   const continueFirst = deferred<void>();
@@ -321,9 +321,10 @@ async function testForcedJoinRetriesDeferredImmediateRequestOnce() {
   const recovery = run({ eventId, source: 'retry', resetDeferredBackoff: true });
   assert.equal(immediate, recovery, 'joining callers retain one shared request');
   continueFirst.resolve();
-  assert.equal((await within(recovery)).status, 'resolved');
-  assert.equal(calls, 2, 'the joined recovery runs once after the pre-recovery request defers');
-  assert.equal((await savedExtras()).icName, '復旧合成IC');
+  assert.equal((await within(recovery)).status, 'deferred');
+  assert.equal(calls, 1, 'a joined recovery retains one request and persisted backoff');
+  assert.equal((await savedExtras()).icResolveRetryCount, 1);
+  assert.equal((await savedExtras()).icName, undefined);
 }
 
 async function testRepeatedAuthorizationFailureCannotLoopThroughRecovery() {
@@ -339,7 +340,7 @@ async function testRepeatedAuthorizationFailureCannotLoopThroughRecovery() {
     return resolver(request);
   });
   assert.equal(await within(retry(4)), false);
-  assert.equal(requested.length, 2, 'timer batch gets one recovery pass, then retains backoff');
+  assert.equal(requested.length, 1, 'a token refresh raised by the timer batch cannot trigger another pass');
   assert.equal((await savedExtras()).icResolveRetryCount, 1);
 }
 
@@ -579,6 +580,115 @@ async function testExistingManualNameSurvivesNetworkFailure() {
   assert.equal(extras.icName, '手動合成IC');
 }
 
+async function testTemporaryAndAuthFailuresHaveFinitePersistedBudget() {
+  for (const status of [503, 403]) {
+    await reset();
+    const actualNow = Date.now;
+    let now = actualNow();
+    Date.now = () => now;
+    let calls = 0;
+    const resolve = async () => { calls += 1; throw new IcResolverError('synthetic unavailable', true, status); };
+    try {
+      for (let attempt = 1; attempt <= IC_RESOLVE_RETRY_LIMIT; attempt += 1) {
+        // Recreate the runner and reopen storage: budgets must survive restart.
+        if (attempt > 1) { db.close(); await db.open(); }
+        const run = createExpresswayIcResolutionRunner(resolve);
+        const outcome = await run({ eventId, source: 'retry', resetDeferredBackoff: true });
+        const extras = await savedExtras();
+        assert.equal(extras.icResolveRetryCount, attempt);
+        if (attempt < IC_RESOLVE_RETRY_LIMIT) {
+          assert.equal(outcome.status, 'deferred');
+          assert.equal(extras.icResolveStatus, 'pending');
+          await createExpresswayIcRetryBatchRunner(run)(12, { ignorePendingBackoff: true });
+          assert.equal(calls, attempt, 'online/auth/startup triggers respect the stored delay');
+          now = Date.parse(String(extras.icResolveNextRetryAt)) + 1;
+        } else {
+          assert.equal(outcome.status, 'failed');
+          assert.equal(extras.icResolveStatus, 'failed');
+          assert.equal(extras.icResolveNextRetryAt, undefined);
+        }
+      }
+      await createExpresswayIcRetryBatchRunner(createExpresswayIcResolutionRunner(resolve))(12, { ignorePendingBackoff: true });
+      assert.equal(calls, IC_RESOLVE_RETRY_LIMIT);
+      await createExpresswayIcResolutionRunner(resolve)({ eventId, source: 'manual' });
+      assert.equal((await savedExtras()).icResolveRetryCount, 1, 'explicit manual retry starts a new finite series');
+    } finally {
+      Date.now = actualNow;
+    }
+  }
+}
+
+async function testEstimatePendingSurvivesFailureOfflineAndRestart() {
+  const estimate = { displayName: '合成入口（推定）', candidateNames: ['合成入口'],
+    source: 'synthetic-address', note: 'synthetic evidence', estimatedAt: timestamp };
+  await reset([], { extras: { icName: '合成入口（推定）', icNameEstimate: estimate,
+    icResolveStatus: 'pending', icResolveRetryCount: 2, icResolveAlgorithmVersion: IC_RESOLVE_ALGORITHM_VERSION } });
+  const run = createExpresswayIcResolutionRunner(async () => { throw new IcResolverError('synthetic timeout', true); });
+  assert.equal((await run({ eventId, source: 'retry' })).status, 'deferred');
+  const before = await savedExtras();
+  assert.equal(before.icName, estimate.displayName);
+  assert.deepEqual(before.icNameEstimate, estimate);
+  db.close(); await db.open();
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { onLine: false } });
+  try {
+    assert.equal((await run({ eventId, source: 'manual' })).status, 'deferred');
+    assert.deepEqual(await savedExtras(), before, 'offline restart never removes saved estimate or retry state');
+  } finally {
+    Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { onLine: true } });
+  }
+}
+
+async function testManualRetryNeverOverwritesExistingManualName() {
+  await reset([], { extras: { icName: '手動合成IC', icResolveStatus: 'resolved', icResolvedManually: true } });
+  let requests = 0;
+  const run = createExpresswayIcResolutionRunner(async () => { requests += 1; return { icName: '別合成IC', distanceM: 50 }; });
+  assert.equal((await run({ eventId, source: 'manual' })).status, 'deferred');
+  assert.equal(requests, 0);
+  assert.equal((await savedExtras()).icName, '手動合成IC');
+}
+
+async function testEstimateResponseSavesProvenanceAndEventContext() {
+  await reset([], { type: 'expressway_start' });
+  const before = (await db.events.get(eventId))!;
+  const run = createExpresswayIcResolutionRunner(async (_lat, _lng, _radius, context) => {
+    assert.deepEqual(context, { eventType: 'expressway_start' });
+    return { icName: '合成入口', distanceM: 90, confidence: 'estimated',
+      candidates: ['合成入口', '別合成入口'], estimateSource: 'overpass_nearby',
+      sourceUrls: ['https://www.openstreetmap.org/copyright'], note: 'direction remains unknown' };
+  });
+  assert.equal((await run({ eventId, source: 'immediate' })).status, 'resolved');
+  const saved = (await db.events.get(eventId))!;
+  assert.equal(saved.extras?.icName, '合成入口');
+  assert.equal(saved.extras?.icResolveStatus, 'resolved');
+  assert.deepEqual((saved.extras?.icNameEstimate as Record<string, unknown>)?.candidateNames, ['合成入口', '別合成入口']);
+  assert.equal((saved.extras?.icNameEstimate as Record<string, unknown>)?.certainty, 'ambiguous_candidates');
+  assert.equal(saved.ts, before.ts);
+  assert.deepEqual(saved.geo, before.geo);
+  assert.equal(saved.type, before.type);
+}
+
+async function testRetrySuccessRetainsOldEstimateEvidence() {
+  const estimate = { displayName: '旧合成候補（推定）', candidateNames: ['旧合成候補'],
+    source: 'synthetic-address', note: 'synthetic evidence', estimatedAt: timestamp };
+  await reset([], { extras: { icName: estimate.displayName, icNameEstimate: estimate, icResolveStatus: 'pending' } });
+  const run = createExpresswayIcResolutionRunner(async () => { throw new IcResolverError('synthetic timeout', true); });
+  assert.equal((await run({ eventId, source: 'retry' })).status, 'deferred');
+  db.close(); await db.open();
+  const retry = createExpresswayIcResolutionRunner(async () => ({
+    icName: '新合成候補', distanceM: 80, confidence: 'estimated', candidates: ['新合成候補'],
+  }));
+  assert.equal((await retry({ eventId, source: 'manual' })).status, 'resolved');
+  const extras = await savedExtras();
+  assert.equal(extras.icName, '新合成候補');
+  assert.equal(extras.icResolveRetryCount, 0);
+  assert.equal(extras.icResolveNextRetryAt, undefined);
+  assert.equal(extras.icResolveError, undefined);
+  assert.ok((extras.icNameEstimateHistory as Array<Record<string, unknown>>).some(item => item.displayName === estimate.displayName),
+    'a successful retry preserves the prior candidate and its evidence');
+  db.close(); await db.open();
+  assert.deepEqual(await savedExtras(), extras, 'the replacement estimate and history survive restart');
+}
+
 async function testManualCorrectionClearsAutomaticOriginMetadata() {
   await reset([], {
     extras: { icName: '自動合成IC', icResolveStatus: 'resolved', icResolveGeoSource: 'route', icResolveGeoOffsetSeconds: -20 },
@@ -598,10 +708,10 @@ const tests = [
   testDiscardedFailureDoesNotReportBatchUpdate,
   testRemovedBatchItemDoesNotBlockOtherPendingIc,
   testSlowFirstRequestDoesNotBlockLaterEventsAndConcurrencyIsBounded,
-  testRecoveryDuringTimerBatchIsNotDiscarded,
-  testOneRecoveryDrainsMoreThanOnePageWithoutRepeatingFailures,
+  testRecoveryDuringTimerBatchPreservesBackoff,
+  testRecoveryRespectsBatchLimitWithoutRepeatingFailures,
   testTimerBatchSelectionDoesNotStarveUnattemptedRecords,
-  testForcedJoinRetriesDeferredImmediateRequestOnce,
+  testForcedJoinDoesNotResetDeferredImmediateRequest,
   testRepeatedAuthorizationFailureCannotLoopThroughRecovery,
   testMountedDetailQueryRefreshesResolvedIcAndRemoteWrites,
   testValidPrimaryMissRecoversUsingRouteAndRecordsOrigin,
@@ -618,6 +728,11 @@ const tests = [
   testConcurrentManualCorrectionWinsOverDelayedLookup,
   testExistingManualNameSurvivesNetworkFailure,
   testManualCorrectionClearsAutomaticOriginMetadata,
+  testTemporaryAndAuthFailuresHaveFinitePersistedBudget,
+  testEstimatePendingSurvivesFailureOfflineAndRestart,
+  testManualRetryNeverOverwritesExistingManualName,
+  testEstimateResponseSavesProvenanceAndEventContext,
+  testRetrySuccessRetainsOldEstimateEvidence,
 ];
 
 async function main() {

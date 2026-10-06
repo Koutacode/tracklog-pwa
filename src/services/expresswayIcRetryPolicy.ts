@@ -2,7 +2,7 @@ import type { BaseEvent } from '../domain/types';
 
 export const IC_RESOLVE_RETRY_LIMIT = 6;
 // Bump this when resolver behavior changes so previously exhausted failures retry.
-export const IC_RESOLVE_ALGORITHM_VERSION = 14;
+export const IC_RESOLVE_ALGORITHM_VERSION = 15;
 
 const IC_RESOLVE_BACKOFF_BASE_MS = 2 * 60 * 1000;
 const IC_RESOLVE_BACKOFF_CAP_MS = 60 * 60 * 1000;
@@ -10,7 +10,6 @@ const IC_RESOLVE_TEMPORARY_BACKOFF_BASE_MS = 15 * 1000;
 export const IC_RESOLVE_TEMPORARY_BACKOFF_CAP_MS = 60 * 60 * 1000;
 const IC_RESOLVE_AUTH_BACKOFF_BASE_MS = 15 * 60 * 1000;
 export const IC_RESOLVE_AUTH_BACKOFF_CAP_MS = 12 * 60 * 60 * 1000;
-const IC_RESOLVE_PERSISTED_RETRY_COUNT_CAP = 32;
 
 export type IcResolveDeferredCategory = 'authorization-recoverable' | 'temporary';
 
@@ -122,16 +121,15 @@ export function computeIcResolveBackoffMs(retryCount: number): number {
 
 export function getNextIcResolveDeferredRetryCount(
   extras: IcResolveExtras,
-  resetAfterRecovery = false,
+  resetByUser = false,
 ): number {
   if (
-    resetAfterRecovery
+    resetByUser
     || isStaleIcResolveAlgorithm(extras)
-    || extras?.icResolveStatus !== 'pending'
   ) {
     return 1;
   }
-  return Math.min(IC_RESOLVE_PERSISTED_RETRY_COUNT_CAP, getIcResolveRetryCount(extras) + 1);
+  return Math.min(IC_RESOLVE_RETRY_LIMIT, getIcResolveRetryCount(extras) + 1);
 }
 
 export function computeIcResolveDeferredBackoffMs(
@@ -151,8 +149,10 @@ export function computeIcResolveDeferredBackoffMs(
 export function canRetryIcResolve(
   extras: IcResolveExtras,
   nowMs: number,
-  ignorePendingBackoff = false,
+  _legacyIgnorePendingBackoff = false,
 ): boolean {
+  // Automatic recovery never replaces a driver's explicit correction.
+  if (extras?.icResolvedManually === true) return false;
   const icName = extras?.icName;
   const status = extras?.icResolveStatus;
   // Legacy named events did not always persist a status. Keep those stable, but
@@ -168,8 +168,10 @@ export function canRetryIcResolve(
   }
   if (isStaleIcResolveAlgorithm(extras)) return true;
 
+  // All failures share a finite persisted budget, including transport/auth.
+  // Connectivity, foreground and token-refresh events do not reset it.
+  if (getIcResolveRetryCount(extras) >= IC_RESOLVE_RETRY_LIMIT) return false;
   if (status == null || status === 'pending') {
-    if (ignorePendingBackoff) return true;
     const nextRetryMs = getIcResolveNextRetryAtMs(extras);
     return nextRetryMs == null || nextRetryMs <= nowMs;
   }

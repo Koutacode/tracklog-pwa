@@ -60,8 +60,8 @@ assertEqual(
     icResolveStatus: 'pending',
     icResolveNextRetryAt: '2026-07-17T08:02:00.000Z',
   }, nowMs, true),
-  true,
-  'auth and online recovery can bypass pending backoff',
+  false,
+  'auth and online recovery preserve persisted pending backoff',
 );
 assertEqual(
   canRetryIcResolve({
@@ -158,7 +158,7 @@ assertEqual(
     icResolveRetryCount: 12,
   }, true),
   1,
-  'an explicit recovery trigger restarts deferred backoff',
+  'only an explicit user retry restarts deferred backoff',
 );
 assertEqual(
   getNextIcResolveDeferredRetryCount({
@@ -175,9 +175,18 @@ assertEqual(
     icResolveStatus: 'failed',
     icResolveRetryCount: 5,
   }),
-  1,
-  'a retryable failure starts a separate pending backoff series',
+  6,
+  'mixed failure categories share one persisted attempt budget',
 );
+
+assertEqual(canRetryIcResolve({
+  icResolveAlgorithmVersion: IC_RESOLVE_ALGORITHM_VERSION,
+  icResolveStatus: 'pending', icResolveRetryCount: 6,
+}, nowMs, true), false, 'legacy recovery flags cannot restart exhausted pending events');
+assertEqual(canRetryIcResolve({
+  icName: '手動IC', icResolvedManually: true, icResolveStatus: 'pending',
+  icResolveAlgorithmVersion: IC_RESOLVE_ALGORITHM_VERSION - 1,
+}, nowMs, true), false, 'manual names remain protected even with inconsistent legacy status');
 
 assertEqual(
   classifyIcResolverHttpStatus(403),

@@ -12,6 +12,7 @@ import type {
   RemoteTripHeader,
 } from '../domain/remoteTypes';
 import type { AppEvent, EventType, RoutePoint } from '../domain/types';
+import { IC_METADATA_FIELDS, mergeIcMetadata, sameIcMetadata } from '../domain/icMetadata';
 import {
   normalizeRoutePointAccuracy,
   normalizeRoutePointHeading,
@@ -624,8 +625,23 @@ function normalizeRemoteDeletedReport(row: RemoteDeletedReportTombstone, userId:
   };
 }
 
-function hasResolvedIc(event: AppEvent | undefined) {
-  return typeof event?.extras?.icName === 'string' && event.extras.icName.trim().length > 0;
+function mergeRemoteEventIc(local: AppEvent | undefined, remote: AppEvent, keepLocalFields = false): AppEvent {
+  if (!local || local.tripId !== remote.tripId || local.type !== remote.type
+    || !['expressway', 'expressway_start', 'expressway_end'].includes(remote.type)
+    || (local.extras?.expresswaySessionId && remote.extras?.expresswaySessionId
+      && local.extras.expresswaySessionId !== remote.extras.expresswaySessionId)) {
+    return keepLocalFields && local ? { ...remote, extras: local.extras } : remote;
+  }
+  const merged = mergeIcMetadata(local.extras, remote.extras, {
+    incomingIsNewer: (remote.remoteChangeSeq ?? 0) > (local.remoteChangeSeq ?? 0),
+  });
+  if (!keepLocalFields) return { ...remote, extras: merged };
+  const extras: Record<string, unknown> = { ...local.extras };
+  for (const key of IC_METADATA_FIELDS) {
+    delete extras[key];
+    if (merged && Object.prototype.hasOwnProperty.call(merged, key)) extras[key] = merged[key];
+  }
+  return { ...remote, extras };
 }
 
 function snapshotMatches(
@@ -772,6 +788,22 @@ async function applyChanges(
       db.events, db.routePoints, db.reportTrips, db.deletedEventTombstones,
       db.deletedTripTombstones, db.deletedReportTombstones, db.meta,
     ], async () => {
+      const saveRemoteEvent = async (local: AppEvent | undefined, remote: AppEvent) => {
+        const merged = mergeRemoteEventIc(local, remote);
+        if (!sameIcMetadata(merged.extras, remote.extras)) {
+          const key = `remoteSyncV2IcRepair:${userId}:${remote.id}`;
+          const revision = String(remote.remoteRevision ?? 0);
+          if ((await db.meta.get(key))?.value !== revision) {
+            await db.meta.put({ key, value: revision, updatedAt: nowIso() });
+            // Rebase IC metadata only onto the cloud's operational fields. One
+            // repair per revision keeps estimates/manual edits shareable without
+            // re-sending an entire stale trip event or looping on a conflict.
+            await db.events.put({ ...merged, syncStatus: 'pending', __remoteSyncApply: false });
+            return;
+          }
+        }
+        await db.events.put(merged);
+      };
       const deleteReportUnlessPending = async (
         tripId: string,
         options?: { snapshot?: MutationSnapshot; deleteMatchingSnapshot?: boolean },
@@ -945,15 +977,19 @@ async function applyChanges(
           const keepLocal = shouldKeepLocalAfterConflict(ack, local, snapshot);
           if (keepLocal) {
             if (local && revision) {
+              const extras = row
+                ? mergeRemoteEventIc(local, normalizeRemoteEvent(row as unknown as RemoteTripEvent), true).extras
+                : local.extras;
               await db.events.update(ack.entityId, {
                 __remoteSyncApply: true,
                 remoteRevision: revision,
                 remoteChangeSeq: changeSeq,
+                extras,
               });
             }
           } else if (row) {
             if (local) await storeConflictBackup(userId, ack, local, snapshot);
-            await db.events.put(normalizeRemoteEvent(row as unknown as RemoteTripEvent));
+            await saveRemoteEvent(local, normalizeRemoteEvent(row as unknown as RemoteTripEvent));
           } else if (local) {
             await storeConflictBackup(userId, ack, local, snapshot);
             await db.events.update(ack.entityId, { __remoteSyncApply: true, syncStatus: 'error' });
@@ -1072,6 +1108,8 @@ async function applyChanges(
       for (const remote of remoteEvents) {
         if (remote.ownerUserId !== userId) throw new Error('別アカウントのイベントを受信しました');
         const local = await db.events.get(remote.id);
+        if (local?.remoteChangeSeq != null && remote.remoteChangeSeq != null
+          && local.remoteChangeSeq > remote.remoteChangeSeq) continue;
         if (local?.syncStatus === 'pending') {
           await db.events.update(remote.id, {
             __remoteSyncApply: true,
@@ -1079,6 +1117,7 @@ async function applyChanges(
             originDeviceId: remote.originDeviceId,
             remoteRevision: remote.remoteRevision,
             remoteChangeSeq: remote.remoteChangeSeq,
+            extras: mergeRemoteEventIc(local, remote, true).extras,
           });
           continue;
         }
@@ -1087,8 +1126,7 @@ async function applyChanges(
         } else if (remote.type === 'trip_end') {
           await db.events.delete(`${HEADER_END_PREFIX}${remote.tripId}`);
         }
-        if (hasResolvedIc(local) && !hasResolvedIc(remote)) remote.extras = { ...(remote.extras ?? {}), ...(local?.extras ?? {}) };
-        await db.events.put(remote);
+        await saveRemoteEvent(local, remote);
       }
       for (const remote of remoteRoutePoints) {
         if (remote.ownerUserId !== userId) throw new Error('別アカウントの位置点を受信しました');

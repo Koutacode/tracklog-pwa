@@ -1,7 +1,6 @@
 import { db } from '../db/db';
 import {
   getPendingExpresswayEvents,
-  markExpresswayResolveFailure,
   updateExpresswayResolved,
 } from '../db/repositories';
 import type { BaseEvent, EventType, Geo, RoutePoint } from '../domain/types';
@@ -12,6 +11,9 @@ import {
 } from './icResolver';
 import {
   computeIcResolveDeferredBackoffMs,
+  computeIcResolveBackoffMs,
+  canRetryIcResolve,
+  IC_RESOLVE_RETRY_LIMIT,
   captureIcResolutionEventVersion,
   getNextIcResolveDeferredRetryCount,
 } from './expresswayIcRetryPolicy';
@@ -44,7 +46,7 @@ export type ExpresswayIcResolutionRequest = {
   eventId: string;
   geo?: Geo;
   source: ExpresswayIcResolutionSource;
-  /** Recovery triggers bypass the stored delay and restart its backoff series. */
+  /** Legacy callers may send this flag; only an explicit manual retry resets the budget. */
   resetDeferredBackoff?: boolean;
 };
 
@@ -229,7 +231,7 @@ async function loadEventGeo(eventId: string) {
   }
   const expectedVersion = captureIcResolutionEventVersion(event);
   const referenceTs = getIcResolutionReferenceTs(event);
-  const context = { expectedVersion, referenceTs, tripId: event.tripId, eventType: event.type };
+  const context = { expectedVersion, referenceTs, tripId: event.tripId, eventType: event.type, extras: event.extras };
   // Reload the authoritative fix with the version guard. A queued request can
   // still carry the old geo after a driver corrects the event's location.
   if (isUsableIcResolutionGeo(event.geo)) {
@@ -259,7 +261,7 @@ async function resolveAtNearbyPoints(
   geoSource: 'event' | 'route';
   geoOffsetSeconds: number;
 } | null> {
-  const primaryResult = await resolveIc(geo.lat, geo.lng);
+  const primaryResult = await resolveIc(geo.lat, geo.lng, undefined, { eventType: context.eventType });
   if (primaryResult) {
     return { result: primaryResult, geoSource: context.geoSource, geoOffsetSeconds: context.geoOffsetSeconds };
   }
@@ -274,7 +276,7 @@ async function resolveAtNearbyPoints(
   for (const supplementalGeo of supplementalGeos) {
     // A thrown request must propagate, even after an earlier candidate: unseen
     // responses could disagree, and transport failure is not a map-data miss.
-    const candidate = await resolveIc(supplementalGeo.lat, supplementalGeo.lng);
+    const candidate = await resolveIc(supplementalGeo.lat, supplementalGeo.lng, undefined, { eventType: context.eventType });
     if (!candidate) continue;
     names.add(normalizedIcName(candidate.icName));
     // The API returns distance, not IC coordinates. Triangle inequality gives
@@ -300,28 +302,45 @@ async function performResolution(
   if (!eventId) throw new Error('eventId is required');
   const context = await loadEventGeo(eventId);
   const { geo, expectedVersion } = context;
-  const guard = {
-    expectedVersion,
-    allowExistingManual: request.source === 'manual',
-  };
-  const preserveExistingManual = expectedVersion.resolvedManually;
-
+  const guard = { expectedVersion };
+  if (expectedVersion.resolvedManually) {
+    return { status: 'deferred', source: request.source, reason: 'superseded',
+      error: '手動修正済みのIC名は保持されます。変更する場合はIC名を編集してください' };
+  }
+  if (request.source !== 'manual' && !canRetryIcResolve(context.extras, Date.now())) {
+    return { status: 'deferred', source: request.source, reason: 'temporary',
+      error: '保存済みの再試行待ち時間と上限を維持しています' };
+  }
   if (!isOnline()) {
-    if (!preserveExistingManual) {
-      await updateExpresswayResolved({ eventId, status: 'pending', guard });
-    }
+    // An offline observation is not an attempt. Do not erase the saved timer,
+    // accumulated budget, prior error, manual name or estimate provenance.
     return { status: 'deferred', source: request.source, reason: 'offline' };
   }
 
-  if (!geo) {
-    const message = 'イベント付近の有効な位置情報が見つかりません';
-    // A later route point can still arrive after the event was persisted, so
-    // retain the bounded retry/backoff rather than making the first miss final.
-    if (!preserveExistingManual) {
-      const failure = await markExpresswayResolveFailure({ eventId, errorMessage: message, guard });
-      if (!failure.applied) return supersededOutcome(request.source);
+  const saveFailure = async (
+    message: string, category: ReturnType<typeof getRetryableIcResolverErrorCategory>,
+  ): Promise<ExpresswayIcResolutionOutcome> => {
+    const retryCount = getNextIcResolveDeferredRetryCount(context.extras, request.source === 'manual');
+    const exhausted = retryCount >= IC_RESOLVE_RETRY_LIMIT;
+    const delayMs = category
+      ? computeIcResolveDeferredBackoffMs(category, retryCount)
+      : computeIcResolveBackoffMs(retryCount);
+    const applied = await updateExpresswayResolved({
+      eventId,
+      status: category && !exhausted ? 'pending' : 'failed',
+      retryCount,
+      nextRetryAt: exhausted ? null : new Date(Date.now() + delayMs).toISOString(),
+      errorMessage: message,
+      guard,
+    });
+    if (!applied) return supersededOutcome(request.source);
+    if (category && !exhausted) {
+      return { status: 'deferred', source: request.source, reason: 'temporary', error: message };
     }
     return { status: 'failed', source: request.source, error: message };
+  };
+  if (!geo) {
+    return saveFailure('イベント付近の有効な位置情報が見つかりません', null);
   }
 
   try {
@@ -335,85 +354,33 @@ async function performResolution(
       icDistanceM: result.distanceM,
       resolutionSource: resolved.geoSource,
       resolutionOffsetSeconds: resolved.geoOffsetSeconds,
-      clearManualResolution: request.source === 'manual',
+      ...(result.confidence === 'estimated' ? { estimate: {
+        candidates: result.candidates ?? [result.icName],
+        source: 'overpass_nearby' as const,
+        sourceUrls: result.sourceUrls ?? [],
+        note: result.note ?? '近接する地図上の候補。利用した入口・出口・進行方向は未確認。',
+        estimatedAt: new Date(Date.now()).toISOString(),
+      } } : {}),
       guard,
     });
     if (!applied) return supersededOutcome(request.source);
     return { status: 'resolved', source: request.source, result };
   } catch (error) {
-    const message = errorMessage(error);
-    const deferredCategory = getRetryableIcResolverErrorCategory(error);
-    if (deferredCategory) {
-      const event = await db.events.get(eventId);
-      const retryCount = getNextIcResolveDeferredRetryCount(
-        event?.extras,
-        request.resetDeferredBackoff === true || request.source === 'manual',
-      );
-      const retryDelayMs = computeIcResolveDeferredBackoffMs(deferredCategory, retryCount);
-      if (!preserveExistingManual) {
-        await updateExpresswayResolved({
-          eventId,
-          status: 'pending',
-          nextRetryAt: new Date(Date.now() + retryDelayMs).toISOString(),
-          errorMessage: message,
-          retryCount,
-          guard,
-        });
-      }
-      return {
-        status: 'deferred',
-        source: request.source,
-        reason: 'temporary',
-        error: message,
-      };
-    }
-    if (!preserveExistingManual) {
-      const failure = await markExpresswayResolveFailure({ eventId, errorMessage: message, guard });
-      if (!failure.applied) return supersededOutcome(request.source);
-    }
-    return { status: 'failed', source: request.source, error: message };
+    return saveFailure(errorMessage(error), getRetryableIcResolverErrorCategory(error));
   }
 }
 
 /** Keep the production database/write guards when substituting the network adapter. */
 export function createExpresswayIcResolutionRunner(resolveIc = resolveNearestIC) {
-  const inFlightByEventId = new Map<string, {
-    promise: Promise<ExpresswayIcResolutionOutcome>;
-    recoveryRequested: boolean;
-    recoveryStarted: boolean;
-  }>();
+  const inFlightByEventId = new Map<string, Promise<ExpresswayIcResolutionOutcome>>();
   return (request: ExpresswayIcResolutionRequest): Promise<ExpresswayIcResolutionOutcome> => {
     const eventId = request.eventId.trim();
     const current = inFlightByEventId.get(eventId);
-    if (current) {
-      if (request.resetDeferredBackoff && !current.recoveryStarted) current.recoveryRequested = true;
-      return current.promise;
-    }
-    const entry = {
-      promise: null as unknown as Promise<ExpresswayIcResolutionOutcome>,
-      recoveryRequested: false,
-      recoveryStarted: request.resetDeferredBackoff === true,
-    };
-    const next = (async () => {
-      const outcome = await performResolution({ ...request, eventId }, resolveIc);
-      if (
-        entry.recoveryRequested
-        && outcome.status === 'deferred'
-        && outcome.reason !== 'superseded'
-        && isOnline()
-      ) {
-        // A recovery can join an immediate/manual request that began before
-        // connectivity returned. Retry once with fresh DB/auth inputs rather
-        // than inheriting its old backoff; token refresh cannot recurse here.
-        entry.recoveryStarted = true;
-        return performResolution({ ...request, eventId, resetDeferredBackoff: true }, resolveIc);
-      }
-      return outcome;
-    })();
-    entry.promise = next;
-    inFlightByEventId.set(eventId, entry);
+    if (current) return current;
+    const next = performResolution({ ...request, eventId }, resolveIc);
+    inFlightByEventId.set(eventId, next);
     const clear = () => {
-      if (inFlightByEventId.get(eventId) === entry) inFlightByEventId.delete(eventId);
+      if (inFlightByEventId.get(eventId) === next) inFlightByEventId.delete(eventId);
     };
     void next.then(clear, clear);
     return next;
@@ -447,68 +414,34 @@ export function enqueueNotificationExpresswayEndIcResolution(input: {
 
 export function createExpresswayIcRetryBatchRunner(resolve = resolveExpresswayIcResolution) {
   let retryBatchInFlight: Promise<boolean> | null = null;
-  let recoveryRequestedLimit = 0;
-  let recoveryStarted = false;
-  return async (limit = 8, options?: { ignorePendingBackoff?: boolean }): Promise<boolean> => {
-    const boundedLimit = Math.min(20, Math.max(1, Math.round(limit)));
-    if (retryBatchInFlight) {
-      // The home screen and the global job share this worker. An online/auth
-      // recovery arriving during a timer batch must still bypass saved delays.
-      if (options?.ignorePendingBackoff && !recoveryStarted) {
-        recoveryRequestedLimit = Math.max(recoveryRequestedLimit, boundedLimit);
-      }
-      return retryBatchInFlight;
-    }
+  return async (limit = 8, _legacyOptions?: { ignorePendingBackoff?: boolean }): Promise<boolean> => {
+    const boundedLimit = Number.isFinite(limit) ? Math.min(20, Math.max(1, Math.round(limit))) : 8;
+    // All triggers share the same bounded pass. A TOKEN_REFRESHED event raised
+    // by this worker cannot enqueue another pass or erase persisted backoff.
+    if (retryBatchInFlight) return retryBatchInFlight;
     if (!isOnline()) return false;
-
     retryBatchInFlight = (async () => {
       let updatedAny = false;
-      let currentLimit = boundedLimit;
-      let ignorePendingBackoff = options?.ignorePendingBackoff === true;
-      do {
-        recoveryRequestedLimit = 0;
-        recoveryStarted = ignorePendingBackoff;
-        // Freeze one recovery generation. All saved pending rows get one
-        // attempt, including rows beyond the normal per-tick limit. Refresh
-        // events raised by these requests do not restart the same generation.
-        const candidates = await getPendingExpresswayEvents(undefined, { ignorePendingBackoff });
-        const pending = ignorePendingBackoff ? candidates : candidates.slice(0, currentLimit);
-        for (let offset = 0; offset < pending.length; offset += currentLimit) {
-          const page = pending.slice(offset, offset + currentLimit);
-          let nextIndex = 0;
-          const worker = async () => {
-            while (nextIndex < page.length && isOnline()) {
-              const event = page[nextIndex++];
-              try {
-                const outcome = await resolve({
-                  eventId: event.id,
-                  source: 'retry',
-                  resetDeferredBackoff: ignorePendingBackoff,
-                });
-                if (outcome.status !== 'deferred') updatedAny = true;
-              } catch {
-                // A record can be deleted or converted after the batch was read.
-                // Leave unrelated pending events eligible in this same pass.
-              }
-            }
-          };
-          // A slow network request must not hold every later event behind it.
-          // Keep concurrency small to avoid flooding the upstream map service.
-          await Promise.all(Array.from({ length: Math.min(2, page.length) }, worker));
-          if (!isOnline()) break;
+      const pending = (await getPendingExpresswayEvents()).slice(0, boundedLimit);
+      let nextIndex = 0;
+      const worker = async () => {
+        while (nextIndex < pending.length && isOnline()) {
+          const event = pending[nextIndex++];
+          try {
+            const outcome = await resolve({ eventId: event.id, source: 'retry' });
+            if (outcome.status !== 'deferred') updatedAny = true;
+          } catch {
+            // A record may be deleted or converted after the batch was read.
+          }
         }
-        currentLimit = recoveryRequestedLimit;
-        ignorePendingBackoff = true;
-      } while (currentLimit > 0 && isOnline());
+      };
+      await Promise.all(Array.from({ length: Math.min(2, pending.length) }, worker));
       return updatedAny;
     })();
-
     try {
       return await retryBatchInFlight;
     } finally {
       retryBatchInFlight = null;
-      recoveryRequestedLimit = 0;
-      recoveryStarted = false;
     }
   };
 }
@@ -517,11 +450,11 @@ export const retryPendingExpresswayIcResolutions = createExpresswayIcRetryBatchR
 
 /**
  * Explicit recovery hook for online, sign-in, token refresh, or device
- * re-approval transitions. It bypasses the delay once and restarts backoff if
- * the dependency is still unavailable.
+ * re-approval transitions. Persisted backoff and finite attempt budgets apply
+ * to every automatic trigger, including app restart.
  */
 export function retryPendingExpresswayIcResolutionsAfterRecovery(limit = 12) {
-  return retryPendingExpresswayIcResolutions(limit, { ignorePendingBackoff: true });
+  return retryPendingExpresswayIcResolutions(limit);
 }
 
 export async function resolveExpresswayIcManually(eventId: string): Promise<IcResult> {
