@@ -1,5 +1,5 @@
 import { db } from '../db/db';
-import { IC_CATALOG_MAX_DISTANCE_M } from '../../shared/ic-catalog/index';
+import { IC_CATALOG_MAX_CANDIDATES, IC_CATALOG_MAX_DISTANCE_M } from '../../shared/ic-catalog/index';
 import {
   getPendingExpresswayEvents,
   updateExpresswayResolved,
@@ -308,6 +308,9 @@ async function resolveAtNearbyPoints(
     }
   }
   if (mergeLocalCandidates && best) {
+    // Each lookup is bounded independently; combining route fixes must obey
+    // the same contract without silently discarding alternative IC names.
+    if (localNames.size > IC_CATALOG_MAX_CANDIDATES) return null;
     return { ...best, result: {
       ...best.result,
       confidence: 'estimated',

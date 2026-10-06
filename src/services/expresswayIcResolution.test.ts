@@ -829,6 +829,31 @@ async function testLocalSupplementBoundsEveryAlternativeFromOriginalEvent() {
   }
 }
 
+async function testLocalSupplementUnionOverflowDoesNotTruncateCandidates() {
+  await reset([point('synthetic-overflow-before', -10, 400), point('synthetic-overflow-earlier', -50, -400)]);
+  const before = await savedExtras();
+  let requests = 0;
+  let supplements = 0;
+  const run = createExpresswayIcResolutionRunner(async () => { requests += 1; return null; }, lat => {
+    if (lat === originalGeo.lat) return null;
+    supplements += 1;
+    const prefix = lat > originalGeo.lat ? '合成北' : '合成南';
+    const candidates = Array.from({ length: 7 }, (_, index) => `${prefix}${index + 1}IC`);
+    return { icName: `${candidates[0]}（推定）`, distanceM: 80, confidence: 'estimated',
+      candidates, estimateSource: 'mlit_n06_2025' };
+  });
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { onLine: false } });
+  try {
+    const result = await run({ eventId, source: 'retry' });
+    assert.equal(supplements, 2, 'two individually valid seven-name results are combined');
+    assert.equal(result.status, 'deferred');
+    assert.equal(requests, 0);
+    assert.deepEqual(await savedExtras(), before, 'a fourteen-name union is rejected without saving a truncated subset');
+  } finally {
+    Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { onLine: true } });
+  }
+}
+
 async function testManualCorrectionClearsAutomaticOriginMetadata() {
   await reset([], {
     extras: { icName: '自動合成IC', icResolveStatus: 'resolved', icResolveGeoSource: 'route', icResolveGeoOffsetSeconds: -20 },
@@ -879,6 +904,7 @@ const tests = [
   testLocalSupplementPrecedesFailingExternalLookup,
   testDifferentLocalSupplementsRemainUnconfirmedCandidates,
   testLocalSupplementBoundsEveryAlternativeFromOriginalEvent,
+  testLocalSupplementUnionOverflowDoesNotTruncateCandidates,
 ];
 
 async function main() {
