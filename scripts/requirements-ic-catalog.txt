@@ -1,0 +1,4 @@
+# Maintenance-only, for offline generation from the reviewed public PMTiles.
+# These packages are not app dependencies and are not needed for ordinary builds.
+pmtiles==3.5.0
+mapbox-vector-tile==2.2.0

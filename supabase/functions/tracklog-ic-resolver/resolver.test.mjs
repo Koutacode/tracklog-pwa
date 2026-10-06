@@ -372,16 +372,30 @@ test('hard request ceiling applies even to excessive configured endpoints', asyn
   assert.equal(calls, 3);
 });
 
-test('total deadline includes all providers and a stalled body', { timeout: 2000 }, async () => {
+test('total deadline includes all providers and a stalled body', { timeout: 2000 }, async (t) => {
+  // A real timer can fire one millisecond early and legitimately start a tiny
+  // third request. Advance a controlled clock to verify the deadline itself.
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 1_000_000 });
   let calls = 0;
-  const start = Date.now();
-  await assert.rejects(fetchOverpassElements('query', {
+  const pending = assert.rejects(fetchOverpassElements('query', {
     endpoints: ['https://slow-one.invalid', 'https://slow-two.invalid', 'https://never.invalid'],
     timeoutMs: 100, totalTimeoutMs: 150,
-    fetchImpl: async () => { calls += 1; return new Promise(() => undefined); },
+    fetchImpl: async () => {
+      calls += 1;
+      const response = new Response('', { status: 200 });
+      response.json = () => new Promise(() => undefined);
+      return response;
+    },
   }), /total request timeout/);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls, 1);
+  t.mock.timers.tick(100);
+  await new Promise(resolve => setImmediate(resolve));
   assert.equal(calls, 2);
-  assert.ok(Date.now() - start < 600);
+  t.mock.timers.tick(50);
+  await pending;
+  assert.equal(calls, 2);
+  assert.equal(Date.now(), 1_000_150);
 });
 
 test('fetch implementation errors never expose request coordinates or private query text', async () => {

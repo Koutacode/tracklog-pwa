@@ -1,7 +1,8 @@
 /** Address-derived candidates remain estimates until independently confirmed. */
 export type IcNameEstimate = {
   note: string;
-  source: 'saved_address_official_sources' | string;
+  source: string;
+  sourceDatasetDate?: string;
   certainty: 'estimated' | 'ambiguous_candidates';
   sourceUrls: string[];
   displayName: string;
@@ -74,6 +75,17 @@ export function mergeIcMetadata(
     && (oldManual || existing.icResolveStatus == null || existing.icResolveStatus === 'resolved');
   const nextConfirmed = !!nextName && !isEstimatedIcName(incoming)
     && (nextManual || incoming?.icResolveStatus == null || incoming.icResolveStatus === 'resolved');
+  const oldVersion = Number(existing.icResolveAlgorithmVersion ?? 0);
+  const nextVersion = Number(incoming?.icResolveAlgorithmVersion ?? 0);
+  const olderAlgorithm = oldVersion > 0 && nextVersion > 0 && nextVersion < oldVersion;
+  const incomingProvenNewer = options.incomingIsNewer === true || (oldVersion > 0 && nextVersion > oldVersion);
+  const oldEstimate = existing.icNameEstimate as IcNameEstimate | undefined;
+  const nextEstimate = incoming?.icNameEstimate as IcNameEstimate | undefined;
+  // A national catalogue locates a generic IC, but does not identify the
+  // specific entrance/exit or direction represented by address evidence.
+  const preserveAddressCandidates = isEstimatedIcName(existing) && isEstimatedIcName(incoming)
+    && oldEstimate?.source === 'saved_address_official_sources'
+    && nextEstimate?.source === 'mlit_n06_2025';
   let keepOldResolution = false;
   if (oldManual) {
     keepOldResolution = nextManual
@@ -83,29 +95,34 @@ export function mergeIcMetadata(
   } else if (nextManual && timestamp(existing.icResolveManualClearedAt) > 0
     && timestamp(existing.icResolveManualClearedAt) >= nextManualAt) {
     keepOldResolution = true; // An old device must not resurrect an explicitly replaced manual value.
+  } else if (olderAlgorithm && !nextManual) {
+    keepOldResolution = true;
   } else if (oldConfirmed) {
     keepOldResolution = !nextConfirmed || (!nextManual
-      && (Number(incoming?.icResolveAlgorithmVersion ?? 0) < Number(existing.icResolveAlgorithmVersion ?? 0)
-        || (timestamp(existing.icResolveLastAttemptAt) > 0 && timestamp(incoming?.icResolveLastAttemptAt) > 0
+      && (olderAlgorithm
+        || (!incomingProvenNewer && timestamp(existing.icResolveLastAttemptAt) > 0 && timestamp(incoming?.icResolveLastAttemptAt) > 0
           && timestamp(existing.icResolveLastAttemptAt) > timestamp(incoming?.icResolveLastAttemptAt))));
   } else if (isEstimatedIcName(existing) && isEstimatedIcName(incoming)) {
-    keepOldResolution = timestamp((existing.icNameEstimate as IcNameEstimate | undefined)?.estimatedAt)
-      > timestamp((incoming?.icNameEstimate as IcNameEstimate | undefined)?.estimatedAt);
+    keepOldResolution = olderAlgorithm || (!incomingProvenNewer
+      && timestamp(oldEstimate?.estimatedAt) > timestamp(nextEstimate?.estimatedAt));
   }
   if (keepOldResolution) {
     for (const key of IC_METADATA_FIELDS) {
       delete result[key];
       if (Object.prototype.hasOwnProperty.call(existing, key)) result[key] = existing[key];
     }
-  } else if (oldName && !nextName) {
+  } else if (preserveAddressCandidates || (oldName && !nextName)) {
     // A failure may update progress, but a previously saved estimate stays visible.
     for (const key of ['icName', 'icDistanceM', 'icResolveGeoSource', 'icResolveGeoOffsetSeconds'] as const) {
+      delete result[key];
       if (Object.prototype.hasOwnProperty.call(existing, key)) result[key] = existing[key];
     }
+    if (preserveAddressCandidates) result.icNameEstimate = existing.icNameEstimate;
   }
   if (!result.icNameEstimate && existing.icNameEstimate) result.icNameEstimate = existing.icNameEstimate;
   if (!keepOldResolution && ['pending', 'failed'].includes(String(incoming?.icResolveStatus))
-    && timestamp(existing.icResolveLastAttemptAt) > timestamp(incoming?.icResolveLastAttemptAt)) {
+    && (olderAlgorithm || (!incomingProvenNewer
+      && timestamp(existing.icResolveLastAttemptAt) > timestamp(incoming?.icResolveLastAttemptAt)))) {
     for (const key of ['icResolveStatus', 'icResolveAlgorithmVersion', 'icResolveRetryCount',
       'icResolveNextRetryAt', 'icResolveLastAttemptAt', 'icResolveError'] as const) {
       delete result[key];
@@ -115,7 +132,9 @@ export function mergeIcMetadata(
   const history = [
     ...(Array.isArray(existing.icNameEstimateHistory) ? existing.icNameEstimateHistory : []),
     ...(Array.isArray(incoming?.icNameEstimateHistory) ? incoming.icNameEstimateHistory : []),
-    ...(existing.icNameEstimate && !sameValue(result.icNameEstimate, existing.icNameEstimate) ? [existing.icNameEstimate] : []),
+    ...(existing.icNameEstimate && (preserveAddressCandidates || !sameValue(result.icNameEstimate, existing.icNameEstimate))
+      ? [existing.icNameEstimate] : []),
+    ...(incoming?.icNameEstimate && !sameValue(result.icNameEstimate, incoming.icNameEstimate) ? [incoming.icNameEstimate] : []),
   ].filter((item, index, all) => !!item && typeof item === 'object'
     && all.findIndex(other => sameValue(other, item)) === index);
   if (history.length) result.icNameEstimateHistory = history.length > 8 ? [history[0], ...history.slice(-7)] : history;

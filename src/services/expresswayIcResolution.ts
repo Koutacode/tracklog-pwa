@@ -1,4 +1,5 @@
 import { db } from '../db/db';
+import { IC_CATALOG_MAX_CANDIDATES, IC_CATALOG_MAX_DISTANCE_M } from '../../shared/ic-catalog/index';
 import {
   getPendingExpresswayEvents,
   updateExpresswayResolved,
@@ -7,6 +8,7 @@ import type { BaseEvent, EventType, Geo, RoutePoint } from '../domain/types';
 import {
   getRetryableIcResolverErrorCategory,
   resolveNearestIC,
+  resolveLocalNearestIC,
   type IcResult,
 } from './icResolver';
 import {
@@ -256,6 +258,7 @@ async function resolveAtNearbyPoints(
   context: Awaited<ReturnType<typeof loadEventGeo>>,
   geo: Geo,
   resolveIc: typeof resolveNearestIC,
+  mergeLocalCandidates = false,
 ): Promise<{
   result: IcResult;
   geoSource: 'event' | 'route';
@@ -272,16 +275,30 @@ async function resolveAtNearbyPoints(
     points, context.referenceTs, context.eventType, geo,
   );
   const names = new Set<string>();
+  const localNames = new Map<string, string>();
+  let localDistanceUpperBound = 0;
   let best: { result: IcResult; geoSource: 'route'; geoOffsetSeconds: number } | null = null;
   for (const supplementalGeo of supplementalGeos) {
     // A thrown request must propagate, even after an earlier candidate: unseen
     // responses could disagree, and transport failure is not a map-data miss.
     const candidate = await resolveIc(supplementalGeo.lat, supplementalGeo.lng, undefined, { eventType: context.eventType });
     if (!candidate) continue;
-    names.add(normalizedIcName(candidate.icName));
+    if (!mergeLocalCandidates) names.add(normalizedIcName(candidate.icName));
     // The API returns distance, not IC coordinates. Triangle inequality gives
     // a conservative 2 km upper bound from the original event/fallback fix.
-    if (distanceMeters(geo, supplementalGeo) + candidate.distanceM > IC_GEO_MAX_EVENT_DISTANCE_M) continue;
+    // A local result may contain multiple ICs; every one is within the catalog
+    // radius, but distanceM describes only the representative. Bound the whole
+    // set by that radius instead of silently selecting its nearest member.
+    const candidateNames = candidate.candidates?.length
+      ? candidate.candidates : [candidate.icName.replace(/[（(]推定(?:候補)?[）)]$/u, '')];
+    const upperBound = distanceMeters(geo, supplementalGeo) + (
+      mergeLocalCandidates && candidateNames.length > 1 ? IC_CATALOG_MAX_DISTANCE_M : candidate.distanceM
+    );
+    if (upperBound > IC_GEO_MAX_EVENT_DISTANCE_M) continue;
+    if (mergeLocalCandidates) {
+      localDistanceUpperBound = Math.max(localDistanceUpperBound, upperBound);
+      for (const name of candidateNames) localNames.set(normalizedIcName(name), name);
+    }
     if (!best || candidate.distanceM < best.result.distanceM) {
       best = {
         result: candidate,
@@ -290,6 +307,18 @@ async function resolveAtNearbyPoints(
       };
     }
   }
+  if (mergeLocalCandidates && best) {
+    // Each lookup is bounded independently; combining route fixes must obey
+    // the same contract without silently discarding alternative IC names.
+    if (localNames.size > IC_CATALOG_MAX_CANDIDATES) return null;
+    return { ...best, result: {
+      ...best.result,
+      confidence: 'estimated',
+      candidates: [...localNames.values()],
+      distanceM: Math.ceil(localDistanceUpperBound),
+      note: `保存軌跡の補足点から得た近傍候補。距離は元イベント位置から候補全体までの保守的な上限。${best.result.note ?? '利用した入口・出口・進行方向は未確認。'}`,
+    } };
+  }
   if (names.size > 1) throw new Error('付近の軌跡でIC候補が一致しないため自動確定できません');
   return best;
 }
@@ -297,6 +326,7 @@ async function resolveAtNearbyPoints(
 async function performResolution(
   request: ExpresswayIcResolutionRequest,
   resolveIc: typeof resolveNearestIC,
+  resolveOfflineIc?: typeof resolveLocalNearestIC,
 ): Promise<ExpresswayIcResolutionOutcome> {
   const eventId = request.eventId.trim();
   if (!eventId) throw new Error('eventId is required');
@@ -311,11 +341,10 @@ async function performResolution(
     return { status: 'deferred', source: request.source, reason: 'temporary',
       error: '保存済みの再試行待ち時間と上限を維持しています' };
   }
-  if (!isOnline()) {
-    // An offline observation is not an attempt. Do not erase the saved timer,
-    // accumulated budget, prior error, manual name or estimate provenance.
-    return { status: 'deferred', source: request.source, reason: 'offline' };
-  }
+  const offlineOutcome = (): ExpresswayIcResolutionOutcome => ({
+    status: 'deferred', source: request.source, reason: 'offline',
+  });
+  if (!isOnline() && !resolveOfflineIc) return offlineOutcome();
 
   const saveFailure = async (
     message: string, category: ReturnType<typeof getRetryableIcResolverErrorCategory>,
@@ -340,12 +369,25 @@ async function performResolution(
     return { status: 'failed', source: request.source, error: message };
   };
   if (!geo) {
+    if (!isOnline()) return offlineOutcome();
     return saveFailure('イベント付近の有効な位置情報が見つかりません', null);
   }
 
   try {
-    const resolved = await resolveAtNearbyPoints(context, geo, resolveIc);
-    if (!resolved) throw new Error('近傍ICを取得できませんでした');
+    // Complete the bounded saved-route catalog search before any request.
+    // Otherwise a primary catalog miss followed by an upstream timeout would
+    // prevent a usable nearby saved fix from ever being checked locally.
+    const localResolved = resolveOfflineIc
+      ? await resolveAtNearbyPoints(context, geo,
+          async (lat, lon, _radius, lookupContext) => resolveOfflineIc(lat, lon, lookupContext), true)
+      : null;
+    const resolved = localResolved ?? (isOnline()
+      ? await resolveAtNearbyPoints(context, geo, resolveIc)
+      : null);
+    if (!resolved) {
+      if (!isOnline()) return offlineOutcome();
+      throw new Error('近傍ICを取得できませんでした');
+    }
     const { result } = resolved;
     const applied = await updateExpresswayResolved({
       eventId,
@@ -356,7 +398,8 @@ async function performResolution(
       resolutionOffsetSeconds: resolved.geoOffsetSeconds,
       ...(result.confidence === 'estimated' ? { estimate: {
         candidates: result.candidates ?? [result.icName],
-        source: 'overpass_nearby' as const,
+        source: result.estimateSource ?? 'overpass_nearby',
+        ...(result.sourceDatasetDate ? { sourceDatasetDate: result.sourceDatasetDate } : {}),
         sourceUrls: result.sourceUrls ?? [],
         note: result.note ?? '近接する地図上の候補。利用した入口・出口・進行方向は未確認。',
         estimatedAt: new Date(Date.now()).toISOString(),
@@ -366,18 +409,24 @@ async function performResolution(
     if (!applied) return supersededOutcome(request.source);
     return { status: 'resolved', source: request.source, result };
   } catch (error) {
+    // Offline catalog misses/failures are not network attempts. Preserve the
+    // persisted retry budget and last error until online recovery is possible.
+    if (!isOnline()) return offlineOutcome();
     return saveFailure(errorMessage(error), getRetryableIcResolverErrorCategory(error));
   }
 }
 
 /** Keep the production database/write guards when substituting the network adapter. */
-export function createExpresswayIcResolutionRunner(resolveIc = resolveNearestIC) {
+export function createExpresswayIcResolutionRunner(
+  resolveIc = resolveNearestIC,
+  resolveOfflineIc = resolveIc === resolveNearestIC ? resolveLocalNearestIC : undefined,
+) {
   const inFlightByEventId = new Map<string, Promise<ExpresswayIcResolutionOutcome>>();
   return (request: ExpresswayIcResolutionRequest): Promise<ExpresswayIcResolutionOutcome> => {
     const eventId = request.eventId.trim();
     const current = inFlightByEventId.get(eventId);
     if (current) return current;
-    const next = performResolution({ ...request, eventId }, resolveIc);
+    const next = performResolution({ ...request, eventId }, resolveIc, resolveOfflineIc);
     inFlightByEventId.set(eventId, next);
     const clear = () => {
       if (inFlightByEventId.get(eventId) === next) inFlightByEventId.delete(eventId);
@@ -412,20 +461,23 @@ export function enqueueNotificationExpresswayEndIcResolution(input: {
   });
 }
 
-export function createExpresswayIcRetryBatchRunner(resolve = resolveExpresswayIcResolution) {
+export function createExpresswayIcRetryBatchRunner(
+  resolve = resolveExpresswayIcResolution,
+  allowOfflineCatalog = resolve === resolveExpresswayIcResolution,
+) {
   let retryBatchInFlight: Promise<boolean> | null = null;
   return async (limit = 8, _legacyOptions?: { ignorePendingBackoff?: boolean }): Promise<boolean> => {
     const boundedLimit = Number.isFinite(limit) ? Math.min(20, Math.max(1, Math.round(limit))) : 8;
     // All triggers share the same bounded pass. A TOKEN_REFRESHED event raised
     // by this worker cannot enqueue another pass or erase persisted backoff.
     if (retryBatchInFlight) return retryBatchInFlight;
-    if (!isOnline()) return false;
+    if (!isOnline() && !allowOfflineCatalog) return false;
     retryBatchInFlight = (async () => {
       let updatedAny = false;
       const pending = (await getPendingExpresswayEvents()).slice(0, boundedLimit);
       let nextIndex = 0;
       const worker = async () => {
-        while (nextIndex < pending.length && isOnline()) {
+        while (nextIndex < pending.length && (isOnline() || allowOfflineCatalog)) {
           const event = pending[nextIndex++];
           try {
             const outcome = await resolve({ eventId: event.id, source: 'retry' });

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { AppEvent } from '../../domain/types';
 import { getExpresswayIcDisplay } from '../../domain/expresswayIcDisplay';
+import { mergeIcMetadata } from '../../domain/icMetadata';
 import { buildReportTripFromAppEvents, computeTripDayMetrics, projectTripReportTimelines } from '../../domain/reportLogic';
 import { buildTripViewModel } from '../../state/selectors';
 import { buildTripAiSummaryPayload } from '../../services/tripAiSummary';
@@ -21,6 +22,24 @@ const estimate = {
   sourceUrls: ['https://example.invalid/synthetic'],
   estimatedAt: '2026-09-01T00:00:00.000Z',
 };
+
+const catalogueEstimate = {
+  ...estimate,
+  displayName: '合成中央IC',
+  candidateNames: ['合成中央IC', '合成第二IC'],
+  source: 'mlit_n06_2025',
+  sourceDatasetDate: '2025-12-31',
+  estimatedAt: '2026-09-01T00:04:00.000Z',
+};
+const oldCatalogueEstimate = { ...catalogueEstimate, displayName: '過去合成IC', candidateNames: ['過去合成IC'],
+  estimatedAt: '2026-09-01T00:01:00.000Z' };
+const catalogueSupplementLabel = `${estimate.displayName} / 補助候補: 合成中央IC / 合成第二IC（国土数値情報・推定）`;
+const mergedCatalogueExtras = mergeIcMetadata({
+  icName: estimate.displayName, icNameEstimate: estimate, icResolveStatus: 'pending', icResolveAlgorithmVersion: 15,
+}, {
+  icName: catalogueEstimate.displayName, icNameEstimate: catalogueEstimate,
+  icResolveStatus: 'resolved', icResolveAlgorithmVersion: 16,
+}, { incomingIsNewer: true })!;
 
 const cases: { name: string; extras: Record<string, unknown>; label: string; state: string }[] = [
   { name: 'no name pending', extras: { icResolveStatus: 'pending' },
@@ -56,6 +75,28 @@ const cases: { name: string; extras: Record<string, unknown>; label: string; sta
   { name: 'retry resolved with retained historic evidence', extras: {
     icName: '合成解決IC', icNameEstimate: estimate, icResolveStatus: 'resolved',
   }, label: '合成解決IC', state: 'resolved' },
+  { name: 'new catalogue result supplements the saved entrance candidates', extras: mergedCatalogueExtras,
+    label: `${catalogueSupplementLabel} / 未確定`, state: 'estimated' },
+  { name: 'latest catalogue history is selected by time and preserved after failure', extras: {
+    icName: estimate.displayName, icNameEstimate: estimate, icResolveStatus: 'failed',
+    icNameEstimateHistory: [catalogueEstimate, oldCatalogueEstimate,
+      { ...oldCatalogueEstimate, source: 'overpass_nearby', estimatedAt: '2026-09-01T00:05:00.000Z' },
+      { ...oldCatalogueEstimate, estimatedAt: 'invalid' }],
+  }, label: `${catalogueSupplementLabel} / 取得失敗`, state: 'estimated' },
+  { name: 'duplicate catalogue candidates are not repeated', extras: {
+    icName: estimate.displayName, icNameEstimate: estimate, icResolveStatus: 'resolved',
+    icNameEstimateHistory: [{ ...catalogueEstimate, candidateNames: estimate.candidateNames }],
+  }, label: `${estimate.displayName} / 未確定`, state: 'estimated' },
+  { name: 'empty latest catalogue does not resurrect stale alternatives', extras: {
+    icName: estimate.displayName, icNameEstimate: estimate, icResolveStatus: 'resolved',
+    icNameEstimateHistory: [oldCatalogueEstimate, { ...catalogueEstimate, candidateNames: [] }],
+  }, label: `${estimate.displayName} / 未確定`, state: 'estimated' },
+  { name: 'catalogue history does not replace a manual name', extras: {
+    ...mergedCatalogueExtras, icName: '合成手動IC', icResolvedManually: true,
+  }, label: '合成手動IC（手動修正）', state: 'manual' },
+  { name: 'catalogue history does not annotate an independently confirmed name', extras: {
+    ...mergedCatalogueExtras, icName: '合成確定IC',
+  }, label: '合成確定IC', state: 'resolved' },
 ];
 
 async function main() {
@@ -75,6 +116,11 @@ async function main() {
     assert.equal(display.label, fixture.label, fixture.name);
     assert.equal(display.state, fixture.state, fixture.name);
     assert.doesNotMatch(display.detail, /synthetic timeout/, 'technical errors are not driver-facing');
+    assert.doesNotMatch(display.label, /過去合成IC/, 'older or unrelated catalogue evidence is not a current candidate');
+    if (fixture.label.includes('補助候補')) {
+      assert.ok(display.detail.includes('2025-12-31'), 'the supplementary source date is available in detail');
+      assert.ok(display.detail.includes('入口・出口・進行方向は未確定'), 'supplementary catalogue names do not assert an entrance or direction');
+    }
 
     const trip = buildReportTripFromAppEvents({ tripId, events, dayRuns: [] });
     const day = trip.days[0]!;
@@ -110,7 +156,7 @@ async function main() {
     assert.ok(paired?.detail?.includes(`高速開始IC: ${fixture.label} / 高速終了IC: 合成出口IC`),
       'entry and exit are independently represented');
   }
-  console.log('expresswayIcPresentation: 11 state cases across daily/detail/timeline/history/home/output passed');
+  console.log(`expresswayIcPresentation: ${cases.length} state cases across daily/detail/timeline/history/home/output passed`);
 }
 
 void main().catch(error => { console.error(error); process.exitCode = 1; });
