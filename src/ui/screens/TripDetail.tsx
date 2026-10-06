@@ -33,6 +33,7 @@ import { projectAutomaticBreakAsRest } from '../../domain/metrics';
 import { buildTripViewModel, TripViewModel } from '../../state/selectors';
 import { DAY_MS, getJstDateInfo } from '../../domain/jst';
 import { getEditableEventTypeOptions } from '../../domain/eventTypeConversion';
+import { getExpresswayIcDisplay } from '../../domain/expresswayIcDisplay';
 import { requestRouteTrackingSync } from '../../app/routeTrackingSignal';
 import TripAiSummaryAction from '../components/TripAiSummaryAction';
 import { deleteTripEverywhere } from '../../services/tripDeletion';
@@ -263,7 +264,7 @@ export function DayReportSummary({
                   <strong>{item.label}</strong>
                   <time>{item.time}</time>
                 </div>
-                {item.icName && <div className="trip-day-location__ic">IC: {item.icName}</div>}
+                {item.icDisplay && <div className="trip-day-location__ic">IC: {item.icDisplay.label}</div>}
                 {item.address && <div className="trip-day-location__address">住所: {item.address}</div>}
               </div>
             ))}
@@ -313,28 +314,10 @@ function isExpresswayEvent(ev: AppEvent) {
 
 function getIcResolveStatusLabel(ev: AppEvent): { label: string; detail: string; level: 'ok' | 'warn' | 'danger' } | null {
   if (!isExpresswayEvent(ev)) return null;
-  const extras = (ev as any).extras ?? {};
-  const status = extras.icResolveStatus;
-  const name = typeof extras.icName === 'string' && extras.icName.trim() ? extras.icName.trim() : '';
-  const distance = Number(extras.icDistanceM);
-  const error = typeof extras.icResolveError === 'string' && extras.icResolveError.trim()
-    ? extras.icResolveError.trim()
-    : '';
-  const nextRetryAt = typeof extras.icResolveNextRetryAt === 'string' && extras.icResolveNextRetryAt.trim()
-    ? extras.icResolveNextRetryAt.trim()
-    : '';
-  if (status === 'resolved') {
-    const method = extras.icResolvedManually ? '手動修正' : '取得済';
-    const suffix = Number.isFinite(distance) ? ` / 約${Math.round(distance)}m` : '';
-    return { label: name || 'IC名未設定', detail: `${method}${suffix}`, level: 'ok' };
-  }
-  if (status === 'failed') {
-    const retry = nextRetryAt ? ` / 次回 ${fmtLocal(nextRetryAt)}` : '';
-    return { label: name || 'IC取得失敗', detail: `${error || '近傍ICを取得できませんでした'}${retry}`, level: 'danger' };
-  }
-  const retry = nextRetryAt ? ` / 次回 ${fmtLocal(nextRetryAt)}` : '';
-  return { label: name || 'IC検索待ち',
-    detail: `${error || 'オンライン時に保存済みの位置情報から再取得します'}${retry}`, level: 'warn' };
+  const display = getExpresswayIcDisplay(ev.extras);
+  return { label: display.label, detail: display.detail,
+    level: display.state === 'resolved' || display.state === 'manual' ? 'ok'
+      : display.state === 'failed' ? 'danger' : 'warn' };
 }
 
 function getDayIndexByStamp(dayStamp: number, startDayStamp: number) {
@@ -567,14 +550,14 @@ function buildTripReviewChecks(
     if (event.type !== 'expressway' && event.type !== 'expressway_start' && event.type !== 'expressway_end') {
       return false;
     }
-    const status = (event as any).extras?.icResolveStatus;
-    return status && status !== 'resolved';
+    const display = getExpresswayIcDisplay(event.extras);
+    return display.state !== 'resolved' && display.state !== 'manual';
   });
   checks.push({
     key: 'expressway',
     label: '高速道路IC',
     detail: unresolvedIc.length > 0
-      ? `IC未解決または失敗が ${unresolvedIc.length}件あります。オンライン時に再解決されます。`
+      ? `IC未取得または未確定が ${unresolvedIc.length}件あります。各イベントの取得状態を確認してください。`
       : '高速道路イベントのIC解決に未処理はありません。',
     level: unresolvedIc.length > 0 ? 'warn' : 'ok',
   });

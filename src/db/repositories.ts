@@ -43,12 +43,13 @@ import {
   resolveTogglePairing,
 } from '../domain/togglePairing';
 import { planEventTypeConversion } from '../domain/eventTypeConversion';
+import { mergeIcMetadata, type IcNameEstimate } from '../domain/icMetadata';
 import {
   assertExpresswayEndCommitAuthorization,
   type ExpresswayEndCommitAuthorization,
 } from '../domain/expresswayEndRequest';
 import { reverseGeocode } from '../services/geo';
-import { resolveNearestIC } from '../services/icResolver';
+import { resolveNearestIC, type IcResult } from '../services/icResolver';
 import { validateExpresswayIcManualSelection, type ExpresswayIcManualSelection } from '../services/expresswayIcManualEdit';
 import { notifyTrackLogEventsChanged } from '../services/localEventsChanged';
 import {
@@ -783,34 +784,40 @@ export async function updateExpresswayIcNameManual(
   if (!name) throw new Error('IC名を入力してください');
   if (name.length > 80) throw new Error('IC名は80文字以内で入力してください');
   if (selection) validateExpresswayIcManualSelection(name, selection);
-  const ev = await db.events.get(eventId);
-  if (!ev) throw new Error('イベントが見つかりません');
-  assertExpresswayEvent(ev);
-  const extras = { ...(ev as any).extras };
-  extras.icName = name;
-  extras.icResolveStatus = 'resolved';
-  extras.icResolveAlgorithmVersion = IC_RESOLVE_ALGORITHM_VERSION;
-  extras.icResolvedManually = true;
-  extras.icResolveManualUpdatedAt = nowIso();
-  extras.icResolveRetryCount = 0;
-  delete extras.icDistanceM;
-  delete extras.icResolveGeoSource;
-  delete extras.icResolveGeoOffsetSeconds;
-  delete extras.icResolveNextRetryAt;
-  delete extras.icResolveLastAttemptAt;
-  delete extras.icResolveError;
-  delete extras.icNameSearchSourceId;
-  delete extras.icNameSearchAddressUpdated;
-  if (selection) {
-    extras.icNameSearchSourceId = selection.id;
-    extras.icNameSearchAddressUpdated = !!selection.address;
-  }
-  // geo remains the observed event position; a chosen IC address is a label
-  // correction and must not move route anchors or recorded trip evidence.
-  await db.events.update(eventId, {
-    extras,
-    ...(selection?.address ? { address: selection.address.trim() } : {}),
-    syncStatus: 'pending',
+  await db.transaction('rw', db.events, async () => {
+    const ev = await db.events.get(eventId);
+    if (!ev) throw new Error('イベントが見つかりません');
+    assertExpresswayEvent(ev);
+    const extras = { ...(ev as any).extras };
+    extras.icName = name;
+    extras.icResolveStatus = 'resolved';
+    extras.icResolveAlgorithmVersion = IC_RESOLVE_ALGORITHM_VERSION;
+    extras.icResolvedManually = true;
+    const previousManualAt = Date.parse(String(extras.icResolveManualUpdatedAt ?? ''));
+    const previousClearAt = Date.parse(String(extras.icResolveManualClearedAt ?? ''));
+    extras.icResolveManualUpdatedAt = new Date(Math.max(Date.now(),
+      Number.isFinite(previousManualAt) ? previousManualAt + 1 : 0,
+      Number.isFinite(previousClearAt) ? previousClearAt + 1 : 0)).toISOString();
+    extras.icResolveRetryCount = 0;
+    delete extras.icDistanceM;
+    delete extras.icResolveGeoSource;
+    delete extras.icResolveGeoOffsetSeconds;
+    delete extras.icResolveNextRetryAt;
+    delete extras.icResolveLastAttemptAt;
+    delete extras.icResolveError;
+    delete extras.icNameSearchSourceId;
+    delete extras.icNameSearchAddressUpdated;
+    if (selection) {
+      extras.icNameSearchSourceId = selection.id;
+      extras.icNameSearchAddressUpdated = !!selection.address;
+    }
+    // geo remains the observed event position; a chosen IC address is a label
+    // correction and must not move route anchors or recorded trip evidence.
+    await db.events.update(eventId, {
+      extras,
+      ...(selection?.address ? { address: selection.address.trim() } : {}),
+      syncStatus: 'pending',
+    });
   });
   notifyRemoteMutation('expressway-ic-manual');
   notifyTrackLogEventsChanged();
@@ -835,7 +842,9 @@ export async function refreshExpresswayIcFromGeo(eventId: string): Promise<{ icN
     throw new Error('このイベントには位置情報が保存されていません');
   }
 
-  const result = await resolveNearestIC(geo.lat, geo.lng);
+  const result = await resolveNearestIC(geo.lat, geo.lng, undefined, {
+    eventType: ev.type as 'expressway' | 'expressway_start' | 'expressway_end',
+  });
   if (!result) {
     if (!preserveExistingManual) {
       await markExpresswayResolveFailure({
@@ -847,11 +856,15 @@ export async function refreshExpresswayIcFromGeo(eventId: string): Promise<{ icN
     }
     throw new Error('近傍ICを取得できませんでした');
   }
+  if (preserveExistingManual && result.confidence === 'estimated') {
+    throw new Error('取得結果は推定候補のため、手動修正したIC名を保持しました');
+  }
   await updateExpresswayResolved({
     eventId,
     status: 'resolved',
     icName: result.icName,
     icDistanceM: result.distanceM,
+    estimate: estimateFromIcResult(result),
     clearManualResolution: true,
     guard: { expectedVersion, allowExistingManual: true },
   });
@@ -2067,13 +2080,16 @@ export async function backfillPendingExpresswayIcs(limit = 8): Promise<boolean> 
       }
 
       try {
-        const result = await resolveNearestIC(geo.lat, geo.lng);
+        const result = await resolveNearestIC(geo.lat, geo.lng, undefined, {
+          eventType: ev.type as 'expressway' | 'expressway_start' | 'expressway_end',
+        });
         if (result) {
           const applied = await updateExpresswayResolved({
             eventId: ev.id,
             status: 'resolved',
             icName: result.icName,
             icDistanceM: result.distanceM,
+            estimate: estimateFromIcResult(result),
             guard,
           });
           updatedAny = applied || updatedAny;
@@ -2111,11 +2127,29 @@ export type ExpresswayIcResolutionWriteGuard = {
   allowExistingManual?: boolean;
 };
 
+type IcResolutionEstimate = {
+  candidates: string[];
+  source: 'overpass_nearby';
+  sourceUrls: string[];
+  note: string;
+  estimatedAt: string;
+};
+
+function estimateFromIcResult(result: IcResult): IcResolutionEstimate | undefined {
+  if (result.confidence !== 'estimated') return undefined;
+  return {
+    candidates: result.candidates?.length ? result.candidates : [result.icName],
+    source: 'overpass_nearby', sourceUrls: result.sourceUrls ?? [], note: result.note ?? '',
+    estimatedAt: new Date(Date.now()).toISOString(),
+  };
+}
+
 export async function updateExpresswayResolved(params: {
   eventId: string;
   status: 'resolved' | 'failed' | 'pending';
   icName?: string;
   icDistanceM?: number;
+  estimate?: IcResolutionEstimate;
   resolutionSource?: 'event' | 'route';
   resolutionOffsetSeconds?: number;
   nextRetryAt?: string | null;
@@ -2128,6 +2162,8 @@ export async function updateExpresswayResolved(params: {
   await db.transaction('rw', db.events, async () => {
     const ev = await db.events.get(params.eventId);
     if (!ev) return;
+    if (ev.extras?.icResolvedManually === true && !(params.status === 'resolved'
+      && params.clearManualResolution && !params.estimate && params.guard?.allowExistingManual)) return;
     if (
       params.guard
       && !canApplyIcResolutionResult(
@@ -2144,11 +2180,20 @@ export async function updateExpresswayResolved(params: {
     ) {
       return;
     }
-    const extras = { ...(ev as any).extras };
+    let extras = { ...(ev as any).extras };
     extras.icResolveStatus = params.status;
     extras.icResolveAlgorithmVersion = IC_RESOLVE_ALGORITHM_VERSION;
     if (params.status === 'resolved') {
       if (params.icName) extras.icName = params.icName;
+      if (params.estimate && params.icName) {
+        const estimate: IcNameEstimate = {
+          note: params.estimate.note, source: params.estimate.source,
+          certainty: params.estimate.candidates.length > 1 ? 'ambiguous_candidates' : 'estimated',
+          sourceUrls: params.estimate.sourceUrls, displayName: params.icName,
+          estimatedAt: params.estimate.estimatedAt, candidateNames: params.estimate.candidates,
+        };
+        extras.icNameEstimate = estimate;
+      }
       if (params.icDistanceM != null) extras.icDistanceM = params.icDistanceM;
       if (params.resolutionSource) extras.icResolveGeoSource = params.resolutionSource;
       else delete extras.icResolveGeoSource;
@@ -2159,20 +2204,22 @@ export async function updateExpresswayResolved(params: {
       }
       extras.icResolveRetryCount = 0;
       delete extras.icResolveNextRetryAt;
-      delete extras.icResolveLastAttemptAt;
+      extras.icResolveLastAttemptAt = new Date(Date.now()).toISOString();
       delete extras.icResolveError;
       if (params.clearManualResolution) {
         delete extras.icResolvedManually;
         delete extras.icResolveManualUpdatedAt;
+        extras.icResolveManualClearedAt = new Date(Math.max(Date.now(),
+          Date.parse(String(ev.extras?.icResolveManualUpdatedAt ?? '')) || 0)).toISOString();
       }
     }
-    if (params.status === 'pending') {
+    if (params.status === 'pending' || params.status === 'failed') {
       if (Number.isFinite(params.retryCount)) {
         extras.icResolveRetryCount = Math.max(0, Math.floor(params.retryCount ?? 0));
       } else if (extras.icResolveRetryCount == null) {
         extras.icResolveRetryCount = 0;
       }
-      extras.icResolveLastAttemptAt = new Date().toISOString();
+      extras.icResolveLastAttemptAt = new Date(Date.now()).toISOString();
       if (params.nextRetryAt) {
         extras.icResolveNextRetryAt = params.nextRetryAt;
       } else {
@@ -2185,6 +2232,7 @@ export async function updateExpresswayResolved(params: {
         delete extras.icResolveError;
       }
     }
+    extras = mergeIcMetadata(ev.extras, extras, { incomingIsNewer: true }) ?? extras;
     await db.events.update(params.eventId, { extras, syncStatus: 'pending' });
     applied = true;
   });
@@ -2210,6 +2258,7 @@ export async function markExpresswayResolveFailure(params: {
   await db.transaction('rw', db.events, async () => {
     const ev = await db.events.get(params.eventId);
     if (!ev) return;
+    if (ev.extras?.icResolvedManually === true) return;
     if (
       params.guard
       && !canApplyIcResolutionResult(
@@ -2221,9 +2270,8 @@ export async function markExpresswayResolveFailure(params: {
       return;
     }
     const previousAlgorithmVersion = getIcResolveAlgorithmVersion(ev);
-    const previousResolveStatus = (ev as any).extras?.icResolveStatus;
     const previousRetryCount =
-      previousAlgorithmVersion < IC_RESOLVE_ALGORITHM_VERSION || previousResolveStatus !== 'failed'
+      previousAlgorithmVersion < IC_RESOLVE_ALGORITHM_VERSION
         ? 0
         : getIcResolveRetryCount(ev);
     const retryCount = previousRetryCount + 1;

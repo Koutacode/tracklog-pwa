@@ -1,4 +1,5 @@
 import type { AppEvent } from '../../../domain/types';
+import { getExpresswayIcDisplay } from '../../../domain/expresswayIcDisplay';
 import type {
   PendingExpresswayEndDecision,
   PendingExpresswayEndPrompt,
@@ -372,39 +373,17 @@ export function summarizeRouteTracking(params: {
   };
 }
 
-function getExtras(event: AppEvent | null | undefined): Record<string, unknown> {
-  return event?.extras ?? {};
-}
-
 function summarizeIcEvent(event: AppEvent, phase: '開始' | '終了'): HomeStatusSummary {
-  const extras = getExtras(event);
-  const status = extras.icResolveStatus;
-  const icName = hasText(extras.icName) ? extras.icName.trim() : '';
-  const hasRetry = hasText(extras.icResolveNextRetryAt);
-  if (status === 'resolved' && icName) {
-    return {
-      label: '高速区間',
-      value: phase === '開始' ? `高速区間（${icName}から）` : `直近の終了IC: ${icName}`,
-      detail: `${phase}ICを記録済みです`,
-      tone: 'success',
-      icon: '✓',
-    };
-  }
-  if (status === 'failed') {
-    return {
-      label: '高速区間',
-      value: hasRetry ? `${phase}ICを再確認中` : `${phase}ICが特定できませんでした`,
-      detail: hasRetry ? '通信できるときに自動で再確認します' : '運行履歴からIC名を修正できます',
-      tone: hasRetry ? 'warning' : 'error',
-      icon: '!',
-    };
-  }
+  const display = getExpresswayIcDisplay(event.extras);
+  const resolved = display.state === 'resolved' || display.state === 'manual';
   return {
     label: '高速区間',
-    value: `${phase}ICを確認中…`,
-    detail: '位置情報から最寄りのICを確認しています',
-    tone: 'neutral',
-    icon: '…',
+    value: resolved && phase === '開始'
+      ? `高速区間（${display.label}から）` : `${phase}IC: ${display.label}`,
+    detail: display.detail,
+    tone: resolved ? 'success' : display.state === 'failed' ? 'error'
+      : display.state === 'pending' ? 'neutral' : 'warning',
+    icon: resolved ? '✓' : display.state === 'pending' ? '…' : '!',
   };
 }
 

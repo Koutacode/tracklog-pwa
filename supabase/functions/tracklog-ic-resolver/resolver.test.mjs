@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import test from 'node:test';
+import test, { beforeEach } from 'node:test';
 import {
   analyzeOverpassElements,
   buildOverpassUnionQuery,
@@ -10,6 +10,14 @@ import {
   rankIcCandidates,
   resolveExpresswayFromOverpass,
 } from './resolver.ts';
+
+beforeEach(() => clearResolverCacheForTests());
+
+function estimated(icName, distanceM, candidates = [icName]) {
+  return { icName: `${icName}（推定）`, distanceM, confidence: 'estimated', candidates, estimateSource: 'overpass_nearby',
+    sourceUrls: ['https://www.openstreetmap.org/copyright'],
+    note: '近接する地図上の候補。利用した入口・出口・進行方向は未確認。' };
+}
 
 // Synthetic points with exact distances, unrelated to any recorded trip.
 function elementAtDistance(distanceM, tags) {
@@ -30,11 +38,46 @@ test('buildOverpassUnionQuery includes all candidate classes in one union', () =
   assert.match(query, /"highway"="motorway_link"/);
   assert.match(query, /"highway"="motorway"/);
   assert.match(query, /out body center;/);
+  assert.match(query, /around:2200,/);
+  assert.doesNotMatch(query, /around:8000,/);
+});
+
+test('keeps entrance and exit distinctions and rejects destination-only names', () => {
+  const elements = [
+    elementAtDistance(100, { highway: 'motorway_link', name: '合成入口' }),
+    elementAtDistance(90, { highway: 'motorway_link', name: '合成出口' }),
+    elementAtDistance(10, { highway: 'motorway_link', destination: '別地点IC', 'destination:to': '遠方IC' }),
+  ];
+  assert.deepEqual(analyzeOverpassElements(elements, 35, 139, { eventType: 'expressway_start' }).nearestIc,
+    estimated('合成入口', 100));
+  assert.deepEqual(analyzeOverpassElements(elements, 35, 139, { eventType: 'expressway_end' }).nearestIc,
+    estimated('合成出口', 90));
+  assert.deepEqual(analyzeOverpassElements(elements, 35, 139).nearestIc,
+    estimated('合成出口', 90, ['合成出口', '合成入口']));
+});
+
+test('nearby different ICs remain explicit alternatives regardless of travel bearing', () => {
+  const elements = [
+    elementAtDistance(100, { highway: 'motorway_junction', name: '合成北IC' }),
+    elementAtDistance(130, { highway: 'motorway_junction', name: '合成南IC' }),
+    elementAtDistance(20, { highway: 'motorway_junction', name: '合成JCT' }),
+  ];
+  const expected = estimated('合成北IC', 100, ['合成北IC', '合成南IC']);
+  for (const travelBearing of [0, 90, 180, 270]) {
+    assert.deepEqual(analyzeOverpassElements(elements, 35, 139,
+      { eventType: 'expressway_start', travelBearing }).nearestIc, expected);
+  }
+});
+
+test('an exit alone is not returned for an entrance event', () => {
+  assert.equal(analyzeOverpassElements([
+    elementAtDistance(10, { highway: 'motorway_junction', name: '合成出口' }),
+  ], 35, 139, { eventType: 'expressway_start' }).nearestIc, null);
 });
 
 test('normalizes Japanese junction and motorway link names', () => {
   assert.equal(normalizeIcCandidateName('厚木インターチェンジ', 'junction'), '厚木IC');
-  assert.equal(normalizeIcCandidateName('木更津東出口', 'motorway_link'), '木更津東IC');
+  assert.equal(normalizeIcCandidateName('木更津東出口', 'motorway_link'), '木更津東出口');
   assert.equal(normalizeIcCandidateName('E1', 'junction'), null);
 });
 
@@ -69,7 +112,7 @@ test('ranks a named junction ahead of auxiliary toll and road candidates', () =>
   ];
 
   const result = analyzeOverpassElements(elements, 35, 139);
-  assert.deepEqual(result.nearestIc, { icName: '厚木IC', distanceM: 111 });
+  assert.deepEqual(result.nearestIc, estimated('厚木IC', 111, ['厚木IC', '厚木料金所']));
   assert.equal(result.nearIc, true);
   assert.equal(result.nearEtcGate, true);
   assert.equal(result.onExpresswayRoad, true);
@@ -83,7 +126,7 @@ test('selects an acceptable runner-up when the top-scored junction is too far aw
   assert.equal(rankIcCandidates(elements, 35, 139)[0].icName, '遠方IC');
 
   const result = analyzeOverpassElements(elements, 35, 139);
-  assert.deepEqual(result.nearestIc, { icName: '近傍料金所', distanceM: 1150 });
+  assert.deepEqual(result.nearestIc, estimated('近傍料金所', 1150));
   assert.equal(result.nearIc, true);
   assert.equal(result.onExpresswayRoad, false);
   assert.equal(result.nearEtcGate, false);
@@ -95,9 +138,7 @@ test('filters distance before merging junction and toll candidates with the same
     elementAtDistance(1150, { barrier: 'toll_booth', name: '同名IC' }),
   ];
   assert.equal(rankIcCandidates(elements, 35, 139)[0].distanceM, 1400);
-  assert.deepEqual(analyzeOverpassElements(elements, 35, 139).nearestIc, {
-    icName: '同名IC', distanceM: 1150,
-  });
+  assert.deepEqual(analyzeOverpassElements(elements, 35, 139).nearestIc, estimated('同名IC', 1150));
 });
 
 test('keeps primary and corroborated distance acceptance limits without widening them', () => {
@@ -117,7 +158,7 @@ test('keeps primary and corroborated distance acceptance limits without widening
       elementAtDistance(distanceM, { highway: 'motorway_junction', name: '境界IC' }),
       ...evidence,
     ], 35, 139);
-    assert.deepEqual(result.nearestIc, accepted ? { icName: '境界IC', distanceM } : null,
+    assert.deepEqual(result.nearestIc, accepted ? estimated('境界IC', distanceM) : null,
       `distance=${distanceM}, evidence=${evidence.length}`);
     assert.equal(result.nearIc, distanceM <= 1200);
   }
@@ -130,36 +171,22 @@ test('nearIc reflects a nearby candidate even when a corroborated farther name w
     elementAtDistance(100, { barrier: 'toll_booth' }),
     elementAtDistance(100, { highway: 'motorway' }),
   ], 35, 139);
-  assert.deepEqual(result.nearestIc, { icName: '同名IC', distanceM: 1400 });
+  assert.deepEqual(result.nearestIc, estimated('同名IC', 1400));
   assert.equal(result.nearIc, true);
   assert.equal(result.nearEtcGate, true);
   assert.equal(result.onExpresswayRoad, true);
 });
 
-test('retries all endpoints after a failed round', async () => {
+test('does not immediately repeat failed providers even with excessive retry rounds', async () => {
   const calls = [];
-  const fetchImpl = async endpoint => {
-    calls.push(endpoint);
-    if (calls.length < 3) return new Response('', { status: 503 });
-    return new Response(JSON.stringify({ elements: [] }), {
-      status: 200,
-      headers: { 'Content-Type': 'application/json' },
-    });
-  };
-
-  const elements = await fetchOverpassElements('query', {
+  await assert.rejects(fetchOverpassElements('query', {
     endpoints: ['https://one.invalid', 'https://two.invalid'],
-    fetchImpl,
-    retryRounds: 2,
+    fetchImpl: async endpoint => { calls.push(endpoint); return new Response('', { status: 503 }); },
+    retryRounds: 100,
     timeoutMs: 100,
     sleep: async () => undefined,
-  });
-  assert.deepEqual(elements, []);
-  assert.deepEqual(calls, [
-    'https://one.invalid',
-    'https://two.invalid',
-    'https://one.invalid',
-  ]);
+  }), OverpassUnavailableError);
+  assert.deepEqual(calls, ['https://one.invalid', 'https://two.invalid']);
 });
 
 test('applies timeout per endpoint before falling back', async () => {
@@ -236,11 +263,12 @@ test('exhausted runtime errors stay retryable and are not cached as no IC found'
   clearResolverCacheForTests();
   let fetchCount = 0;
   let available = false;
+  let now = 1000;
   const options = {
     endpoints: ['https://one.invalid', 'https://two.invalid'],
     retryRounds: 2,
     sleep: async () => undefined,
-    now: () => 1000,
+    now: () => now,
     fetchImpl: async () => {
       fetchCount += 1;
       return new Response(JSON.stringify(available
@@ -251,15 +279,16 @@ test('exhausted runtime errors stay retryable and are not cached as no IC found'
 
   await assert.rejects(resolveExpresswayFromOverpass(35, 139, 8000, options), error => {
     assert.ok(error instanceof OverpassUnavailableError);
-    assert.match(error.message, /after 4 attempts/);
+    assert.match(error.message, /after 2 attempts/);
     return true;
   });
-  assert.equal(fetchCount, 4);
+  assert.equal(fetchCount, 2);
   available = true;
+  now += 15_001;
   const result = await resolveExpresswayFromOverpass(35, 139, 8000, options);
-  assert.equal(fetchCount, 5);
+  assert.equal(fetchCount, 3);
   assert.equal(result.cached, false);
-  assert.deepEqual(result.nearestIc, { icName: '復旧IC', distanceM: 100 });
+  assert.deepEqual(result.nearestIc, estimated('復旧IC', 100));
 });
 
 test('reuses the in-memory cache for the same location cell', async () => {
@@ -292,5 +321,107 @@ test('reuses the in-memory cache for the same location cell', async () => {
   assert.equal(fetchCount, 1);
   assert.equal(first.cached, false);
   assert.equal(second.cached, true);
-  assert.equal(second.nearestIc?.icName, '厚木IC');
+  assert.equal(second.nearestIc?.icName, '厚木IC（推定）');
+});
+
+test('406 is skipped during provider cooldown and 504 falls through to a healthy provider', async () => {
+  let now = 1000;
+  const calls = [];
+  const options = {
+    endpoints: ['https://rejected.invalid', 'https://unavailable.invalid', 'https://healthy.invalid'],
+    now: () => now,
+    fetchImpl: async endpoint => {
+      calls.push(endpoint);
+      if (endpoint.includes('rejected')) return new Response('', { status: 406 });
+      if (endpoint.includes('unavailable')) return new Response('', { status: 504 });
+      return new Response(JSON.stringify({ elements: [] }), { status: 200 });
+    },
+  };
+  await fetchOverpassElements('synthetic query', options);
+  now += 16_000;
+  await fetchOverpassElements('another synthetic query', options);
+  assert.deepEqual(calls, [
+    'https://rejected.invalid', 'https://unavailable.invalid', 'https://healthy.invalid',
+    'https://unavailable.invalid', 'https://healthy.invalid',
+  ]);
+});
+
+test('429 honors Retry-After without sleeping or repeatedly sending requests', async () => {
+  let now = 1000;
+  let calls = 0;
+  const options = {
+    endpoints: ['https://limited.invalid'], retryRounds: 100, now: () => now,
+    fetchImpl: async () => {
+      calls += 1;
+      return new Response('', { status: 429, headers: { 'Retry-After': '120' } });
+    },
+  };
+  await assert.rejects(fetchOverpassElements('query', options), /after 1 attempts/);
+  now += 60_000;
+  await assert.rejects(fetchOverpassElements('query', options), /after 0 attempts/);
+  assert.equal(calls, 1);
+});
+
+test('hard request ceiling applies even to excessive configured endpoints', async () => {
+  let calls = 0;
+  await assert.rejects(fetchOverpassElements('query', {
+    endpoints: Array.from({ length: 30 }, (_, i) => `https://provider-${i}.invalid`),
+    retryRounds: 100,
+    fetchImpl: async () => { calls += 1; return new Response('', { status: 504 }); },
+  }), /after 3 attempts/);
+  assert.equal(calls, 3);
+});
+
+test('total deadline includes all providers and a stalled body', { timeout: 2000 }, async () => {
+  let calls = 0;
+  const start = Date.now();
+  await assert.rejects(fetchOverpassElements('query', {
+    endpoints: ['https://slow-one.invalid', 'https://slow-two.invalid', 'https://never.invalid'],
+    timeoutMs: 100, totalTimeoutMs: 150,
+    fetchImpl: async () => { calls += 1; return new Promise(() => undefined); },
+  }), /total request timeout/);
+  assert.equal(calls, 2);
+  assert.ok(Date.now() - start < 600);
+});
+
+test('fetch implementation errors never expose request coordinates or private query text', async () => {
+  await assert.rejects(fetchOverpassElements('private query marker', {
+    endpoints: ['https://provider.invalid/private-path?private-token=secret'],
+    fetchImpl: async () => { throw new Error('private query marker'); },
+  }), error => {
+    assert.match(error.message, /provider.invalid network request failed/);
+    assert.doesNotMatch(error.message, /private|secret|marker/);
+    return true;
+  });
+});
+
+test('shared fetch cache is analyzed separately for entrance and exit context', async () => {
+  let calls = 0;
+  const options = {
+    endpoints: ['https://cache.invalid'],
+    fetchImpl: async () => {
+      calls += 1;
+      return new Response(JSON.stringify({ elements: [
+        elementAtDistance(100, { highway: 'motorway_link', name: '合成入口' }),
+        elementAtDistance(90, { highway: 'motorway_link', name: '合成出口' }),
+      ] }), { status: 200 });
+    },
+  };
+  const entry = await resolveExpresswayFromOverpass(35, 139, 8000, { ...options, eventType: 'expressway_start' });
+  const exit = await resolveExpresswayFromOverpass(35, 139, 8000, { ...options, eventType: 'expressway_end' });
+  assert.equal(calls, 1);
+  assert.equal(entry.nearestIc.icName, '合成入口（推定）');
+  assert.equal(exit.nearestIc.icName, '合成出口（推定）');
+});
+
+test('legacy clients that discard confidence still retain explicit estimated names', () => {
+  const result = analyzeOverpassElements([
+    elementAtDistance(100, { highway: 'motorway_junction', name: '合成北IC' }),
+    elementAtDistance(110, { highway: 'motorway_junction', name: '合成南IC' }),
+  ], 35, 139);
+  const legacyStored = { icName: result.nearestIc.icName, icResolveStatus: 'resolved' };
+  assert.match(legacyStored.icName, /（推定）$/);
+  assert.ok(legacyStored.icName.length <= 80);
+  assert.deepEqual(result.nearestIc.candidates, ['合成北IC', '合成南IC']);
+  assert.equal(result.nearIc, true);
 });

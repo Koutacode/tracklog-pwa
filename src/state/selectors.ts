@@ -15,6 +15,7 @@ import {
   projectAutomaticBreakAsRest,
 } from '../domain/metrics';
 import { DAY_MS, getJstDateInfo } from '../domain/jst';
+import { getExpresswayIcDisplay } from '../domain/expresswayIcDisplay';
 import {
   PERSISTED_TOGGLE_DEFINITIONS,
   resolveTogglePairing,
@@ -141,15 +142,7 @@ export function buildTimeline(events: AppEvent[]): TimelineItem[] {
     }
     return undefined;
   };
-  const getIcLabel = (e: AppEvent) => {
-    const extras = (e as any).extras ?? {};
-    const name = typeof extras.icName === 'string' && extras.icName.trim() ? extras.icName.trim() : null;
-    const status = extras.icResolveStatus;
-    if (name) return name;
-    if (status === 'failed') return 'IC未解決（再取得対象）';
-    if (status === 'pending' || status == null) return 'IC未解決';
-    return 'IC未解決';
-  };
+  const getIcLabel = (e: AppEvent) => getExpresswayIcDisplay(e.extras).label;
   const label = (e: AppEvent) => {
     switch (e.type) {
       case 'trip_start':
@@ -215,7 +208,8 @@ export function buildTimeline(events: AppEvent[]): TimelineItem[] {
 
   for (const { definition, start } of pairing.openStarts) {
     const loc = formatGeo(start);
-    const detail = `${fmtRange(start.ts, undefined)}（進行中）${loc ? ' / ' + loc : ''}`;
+    const ic = start.type === 'expressway_start' ? ` / 開始IC: ${getIcLabel(start)}` : '';
+    const detail = `${fmtRange(start.ts, undefined)}（進行中）${ic}${loc ? ' / ' + loc : ''}`;
     timeline.push({ ts: start.ts, title: definition.label, detail });
   }
 
@@ -227,10 +221,7 @@ export function buildTimeline(events: AppEvent[]): TimelineItem[] {
       detail = liters != null ? `${liters} L` : undefined;
     }
     if (e.type === 'expressway' || e.type === 'expressway_start' || e.type === 'expressway_end') {
-      const st = (e as any).extras?.icResolveStatus;
-      const name = (e as any).extras?.icName;
-      detail =
-        st === 'resolved' ? `${name ?? 'IC'}（取得済）` : st === 'failed' ? 'IC取得失敗' : 'IC検索中';
+      detail = getIcLabel(e);
     }
     if (e.type === 'trip_end') {
       const totalKm = (e as any).extras?.totalKm;

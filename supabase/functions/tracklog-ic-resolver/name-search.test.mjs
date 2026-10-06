@@ -49,7 +49,7 @@ test('a candidate carries its own tagged address and can use a way center', () =
     { type: 'way', id: 10, center: { lat: 35, lon: 139 },
       tags: { highway: 'motorway_link', name: '合成IC入口', 'addr:state': '合成県', 'addr:city': '合成市' } },
   ], '合成IC');
-  assert.equal(results[0].icName, '合成IC');
+  assert.equal(results[0].icName, '合成IC入口');
   assert.equal(results[0].address, '合成県合成市');
 });
 
@@ -63,4 +63,11 @@ test('partial address tags never become replacement addresses', () => {
   }
   const [candidate] = selectNamedIcCandidates([junction(1, '合成IC', 35, { 'addr:full': '合成県合成市完全住所' })], '合成');
   assert.equal(candidate.address, '合成県合成市完全住所');
+});
+
+test('manual name search retains separate entrance and exit candidates', () => {
+  const results = selectNamedIcCandidates([
+    junction(1, '合成入口'), junction(2, '合成出口', 35.001),
+  ], '合成');
+  assert.deepEqual(new Set(results.map(result => result.icName)), new Set(['合成入口', '合成出口']));
 });

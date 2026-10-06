@@ -1,7 +1,7 @@
 import { createClient } from '@supabase/supabase-js';
 
-// Six upstream map attempts can take about 27 seconds. Include body reads and
-// any transport work in the limit, not only the arrival of response headers.
+// Bound the complete response including body reads and transport work. The
+// server applies its own smaller upstream budget; neither side waits forever.
 export const IC_RESOLVER_REQUEST_TIMEOUT_MS = 35_000;
 
 export async function withIcResolverTimeout<T>(
@@ -16,7 +16,7 @@ export async function withIcResolverTimeout<T>(
       new Promise<never>((_, reject) => {
         timer = setTimeout(() => {
           controller.abort();
-          reject(new Error('IC取得の通信がタイムアウトしました。自動で再試行します'));
+          reject(new Error('IC取得の通信がタイムアウトしました'));
         }, timeoutMs);
       }),
     ]);

@@ -1,10 +1,12 @@
 import { formatReportMinute, type ProjectedReportTimelineEvent } from '../../domain/reportLogic';
+import { getExpresswayIcDisplay, type ExpresswayIcDisplay } from '../../domain/expresswayIcDisplay';
 
 export type TripDetailLocationInfo = {
   key: string;
   label: string;
   time: string;
   icName?: string;
+  icDisplay?: ExpresswayIcDisplay;
   address?: string;
   expressway: boolean;
 };
@@ -49,6 +51,7 @@ export function buildTripDetailLocationInfo(
       label: LOCATION_EVENT_LABELS[event.type] ?? '記録地点',
       time: formatReportMinute(effectiveMinute),
       icName,
+      icDisplay: expressway ? getExpresswayIcDisplay(event.extras) : undefined,
       address: event.address,
       expressway,
     }];

@@ -4,7 +4,8 @@ import { db } from '../db/db';
 import { withRemoteSyncSignalsSuppressed } from '../app/remoteSyncSignal';
 import { synchronizeRemoteOutbox } from './remoteSyncV2';
 import { SUPABASE_CONFIGURED } from './supabase';
-import { updateEventTimestamp, updateExpresswayIcNameManual } from '../db/repositories';
+import { updateEventTimestamp, updateExpresswayIcNameManual, updateExpresswayResolved,
+  markExpresswayResolveFailure } from '../db/repositories';
 import { getReportTrip, listReportTrips, saveReportTripSnapshot } from '../db/reportRepository';
 import { buildTripDetailReportSnapshot } from '../ui/screens/tripDetailReportSnapshot';
 import type { AppEvent } from '../domain/types';
@@ -180,9 +181,111 @@ async function testPagedDownloadProtectsReportThenSendsIcCorrection() {
   console.log('PASS integrated paged report/event download, partial-save guard, and IC correction upload');
 }
 
+async function testIcMetadataSurvivesSyncConflictAndRestart() {
+  await reset();
+  const original = integrationEvents()[1];
+  const estimate = { displayName: '合成A／合成B入口（推定候補）', candidateNames: ['合成A入口', '合成B入口'],
+    source: 'saved_address_official_sources', certainty: 'ambiguous_candidates',
+    sourceUrls: ['https://example.invalid/synthetic-source'], note: '入口と方向は未確認', estimatedAt: TS };
+  const estimated = { ...original, extras: { ...original.extras, icName: estimate.displayName,
+    icNameEstimate: estimate, icResolveStatus: 'pending', icResolveRetryCount: 2, odoKm: 100 } };
+  const remote = (extras: Record<string, unknown>, revision = 2, changeSeq = 10) => ({
+    id: original.id, trip_id: TRIP, type: original.type, ts: original.ts,
+    owner_user_id: USER, device_id: 'synthetic-other-device', updated_at: TS,
+    revision, change_seq: changeSeq, extras, address: '合成住所', geo: null,
+  });
+  await db.events.put(estimated);
+  await db.reportTrips.put({ ...integrationReport([estimated]), syncStatus: 'synced', __remoteSyncApply: true });
+  const snapshotBefore = await db.reportTrips.get(TRIP);
+  await saveReportTripSnapshot(integrationReport([{ ...estimated, extras: { icName: estimate.displayName,
+    expresswaySessionId: original.extras!.expresswaySessionId, icResolveStatus: 'pending' } }]));
+  assert.deepEqual(await db.reportTrips.get(TRIP), snapshotBefore,
+    'an old snapshot with the same IC name cannot discard estimate provenance');
+  await captureRun(async request => success(request, { changes: { events: [remote({
+    expresswaySessionId: original.extras!.expresswaySessionId, icResolveStatus: 'failed',
+    icResolveRetryCount: 6, icResolveLastAttemptAt: END_TS, odoKm: 120,
+  })] } }));
+  let stored = (await db.events.get(original.id))!;
+  assert.equal(stored.extras?.icName, estimate.displayName, 'a nameless remote retry keeps the estimate');
+  assert.equal(stored.extras?.icResolveStatus, 'failed');
+  assert.equal(stored.extras?.odoKm, 120, 'old IC preservation cannot overwrite an unrelated cloud edit');
+  assert.deepEqual(stored.extras?.icNameEstimate, estimate);
+  assert.equal(stored.ts, original.ts);
+  assert.equal(reportEvent(await getReportTrip(TRIP), original.type)?.extras?.icName, estimate.displayName);
+
+  await updateExpresswayIcNameManual(original.id, '合成手動入口');
+  const manualUpdatedAt = (await db.events.get(original.id))!.extras?.icResolveManualUpdatedAt;
+  let repairedCloudExtras: Record<string, unknown> | undefined;
+  const conflictCalls = await captureRun(async (request, call) => {
+    if (call === 1) return success(request, {
+      acks: request.mutations.map(mutation => ({ ...mutation, status: 'conflict', code: 'revision_conflict',
+        revision: 3, changeSeq: 20, currentRow: remote({ icName: '古い自動入口', icResolveStatus: 'resolved', odoKm: 130 }, 3, 20) })),
+    });
+    assert.equal(call, 2, 'metadata repair performs a single bounded upload');
+    const repair = request.mutations.find(mutation => mutation.entityId === original.id)!;
+    assert.equal(repair.baseRevision, 3);
+    repairedCloudExtras = repair.payload?.extras as Record<string, unknown>;
+    assert.equal(repairedCloudExtras.icName, '合成手動入口', 'protected manual metadata is persisted to the cloud');
+    assert.equal(repairedCloudExtras.odoKm, 130, 'IC repair retains the cloud operational edit');
+    assert.equal(repair.payload?.ts, original.ts);
+    return success(request);
+  });
+  assert.equal(conflictCalls.length, 2);
+  assert.equal(repairedCloudExtras?.icResolveManualUpdatedAt, manualUpdatedAt);
+  stored = (await db.events.get(original.id))!;
+  assert.equal(stored.extras?.icName, '合成手動入口', 'revision conflicts cannot discard a local manual correction');
+  assert.equal(stored.extras?.icResolveManualUpdatedAt, manualUpdatedAt);
+  assert.deepEqual(stored.extras?.icNameEstimate, estimate, 'manual sync retains address-derived provenance');
+  db.close();
+  await db.open();
+  assert.equal((await db.events.get(original.id))?.extras?.icName, '合成手動入口', 'IndexedDB reopen preserves manual data');
+  await captureRun(async request => success(request, { changes: { events: [remote({
+    icName: '別の自動候補', icResolveStatus: 'pending', icResolveRetryCount: 1,
+  }, 4, 21)] } }));
+  assert.equal((await db.events.get(original.id))?.extras?.icName, '合成手動入口', 'post-restart pull preserves manual data');
+
+  await reset();
+  await db.events.put({ ...original, extras: { expresswaySessionId: original.extras!.expresswaySessionId,
+    icResolveStatus: 'pending', odoKm: 100 } });
+  await updateEventTimestamp(original.id, original.ts);
+  const pendingCalls = await captureRun(async (request, call) => {
+    if (call === 1) {
+      const current = (await db.events.get(original.id))!;
+      await db.events.update(original.id, { extras: { ...current.extras, odoKm: 101 }, syncStatus: 'pending' });
+      return success(request, { changes: { events: [remote(estimated.extras, 2, 10)] } });
+    }
+    assert.equal((request.mutations.find(mutation => mutation.entityId === original.id)?.payload?.extras as Record<string, unknown>)?.icName,
+      estimate.displayName, 'concurrent pending edits upload the cloud estimate instead of erasing it');
+    assert.equal((request.mutations.find(mutation => mutation.entityId === original.id)?.payload?.extras as Record<string, unknown>)?.odoKm,
+      101, 'merging incoming IC metadata preserves the concurrent local operation edit');
+    return success(request);
+  });
+  assert.equal(pendingCalls.length, 2);
+  assert.deepEqual((await db.events.get(original.id))?.extras?.icNameEstimate, estimate);
+
+  await updateExpresswayResolved({ eventId: original.id, status: 'failed', retryCount: 6,
+    errorMessage: 'synthetic timeout', nextRetryAt: null });
+  assert.equal((await db.events.get(original.id))?.extras?.icResolveRetryCount, 6);
+  assert.equal((await db.events.get(original.id))?.extras?.icResolveNextRetryAt, undefined);
+  assert.equal((await db.events.get(original.id))?.extras?.icName, estimate.displayName);
+  await updateExpresswayResolved({ eventId: original.id, status: 'resolved', icName: '合成C入口（推定）',
+    estimate: { candidates: ['合成C入口'], source: 'overpass_nearby', sourceUrls: [],
+      note: '公道地物からの候補', estimatedAt: END_TS } });
+  stored = (await db.events.get(original.id))!;
+  assert.equal(stored.extras?.icName, '合成C入口（推定）', 'successful retry stores a new candidate');
+  assert.equal(stored.extras?.icResolveRetryCount, 0);
+  assert.deepEqual(stored.extras?.icNameEstimateHistory, [estimate]);
+  await updateExpresswayIcNameManual(original.id, '合成確認入口');
+  await markExpresswayResolveFailure({ eventId: original.id, errorMessage: 'synthetic late failure' });
+  assert.equal((await db.events.get(original.id))?.extras?.icResolveStatus, 'resolved');
+  assert.equal((await db.events.get(original.id))?.extras?.icName, '合成確認入口');
+  console.log('PASS IC estimates/manual edits through retries, concurrent sync, conflict, and IndexedDB reopen');
+}
+
 async function main() {
   await testTripEndEditDuringHeaderAckPreservesEventAndReport();
   await testPagedDownloadProtectsReportThenSendsIcCorrection();
+  await testIcMetadataSurvivesSyncConflictAndRestart();
   await reset();
   assert.equal((await captureRun()).length, 1, 'idle polling retains one pull for other-device changes');
 

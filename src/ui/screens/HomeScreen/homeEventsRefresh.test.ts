@@ -25,7 +25,7 @@ const refresh = () => {
   displayedSummary = summarizeExpressway([resolvedStart], resolvedStart);
 };
 
-assert.equal(displayedSummary.value, '開始ICを確認中…');
+assert.equal(displayedSummary.value, '開始IC: IC名未取得（取得中・取得待ち）');
 
 // Model React StrictMode's setup -> cleanup -> setup lifecycle. Only the live
 // subscription may refresh the Home snapshot when the resolver commits an IC.
