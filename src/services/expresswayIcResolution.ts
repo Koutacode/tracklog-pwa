@@ -254,6 +254,13 @@ function normalizedIcName(name: string): string {
   return name.normalize('NFKC').toLowerCase().replace(/\s+/g, '').replace(/インターチェンジ/g, 'ic');
 }
 
+class IcCatalogCandidateOverflowError extends Error {
+  constructor() {
+    super('保存軌跡付近のIC候補が上限を超えたため自動選択できません');
+    this.name = 'IcCatalogCandidateOverflowError';
+  }
+}
+
 async function resolveAtNearbyPoints(
   context: Awaited<ReturnType<typeof loadEventGeo>>,
   geo: Geo,
@@ -308,9 +315,10 @@ async function resolveAtNearbyPoints(
     }
   }
   if (mergeLocalCandidates && best) {
-    // Each lookup is bounded independently; combining route fixes must obey
-    // the same contract without silently discarding alternative IC names.
-    if (localNames.size > IC_CATALOG_MAX_CANDIDATES) return null;
+    // Overflow is ambiguous evidence, not a catalog miss. Returning null would
+    // enter the fallback (which also reads this catalog) and could save only one
+    // route fix's subset. Stop this attempt without discarding alternatives.
+    if (localNames.size > IC_CATALOG_MAX_CANDIDATES) throw new IcCatalogCandidateOverflowError();
     return { ...best, result: {
       ...best.result,
       confidence: 'estimated',

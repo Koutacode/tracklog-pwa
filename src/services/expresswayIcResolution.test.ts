@@ -854,6 +854,47 @@ async function testLocalSupplementUnionOverflowDoesNotTruncateCandidates() {
   }
 }
 
+async function testOnlineLocalUnionOverflowCannotFallbackToSharedRepresentative() {
+  const estimate = { displayName: '既存合成候補（推定）', candidateNames: ['既存合成候補'],
+    source: 'overpass_nearby', note: 'synthetic prior evidence', certainty: 'estimated',
+    sourceUrls: ['https://example.invalid/synthetic-evidence'], estimatedAt: ts(-60) };
+  const history = [{ ...estimate, displayName: '前の合成候補（推定）', candidateNames: ['前の合成候補'], estimatedAt: ts(-90) }];
+  await reset([point('synthetic-shared-before', -10, 400), point('synthetic-shared-earlier', -50, -400)], {
+    extras: { icName: estimate.displayName, icNameEstimate: estimate, icNameEstimateHistory: history,
+      icResolveStatus: 'pending', icResolveAlgorithmVersion: IC_RESOLVE_ALGORITHM_VERSION,
+      icResolveRetryCount: IC_RESOLVE_RETRY_LIMIT - 1, icResolveNextRetryAt: ts(-1) },
+  });
+  let requests = 0;
+  let localCalls = 0;
+  const lookupLocal = (lat: number): IcResult | null => {
+    localCalls += 1;
+    if (lat === originalGeo.lat) return null;
+    const prefix = lat > originalGeo.lat ? '合成北' : '合成南';
+    // Seven names per fix, a common representative, thirteen names in total.
+    const candidates = ['共通合成IC', ...Array.from({ length: 6 }, (_, index) => `${prefix}${index + 1}IC`)];
+    return { icName: '共通合成IC（推定）', distanceM: 80, confidence: 'estimated',
+      candidates, estimateSource: 'mlit_n06_2025' };
+  };
+  const run = createExpresswayIcResolutionRunner(async lat => {
+    requests += 1;
+    return lookupLocal(lat); // Model the production fallback's catalog-first behavior.
+  }, lookupLocal);
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { onLine: true } });
+  assert.equal((await run({ eventId, source: 'retry' })).status, 'failed');
+  assert.equal(requests, 0, 'overflow stops before the online fallback can save a seven-name subset');
+  const saved = await savedExtras();
+  assert.equal(saved.icName, estimate.displayName);
+  assert.deepEqual(saved.icNameEstimate, estimate);
+  assert.deepEqual(saved.icNameEstimateHistory, history);
+  assert.equal(saved.icResolveRetryCount, IC_RESOLVE_RETRY_LIMIT);
+  assert.equal(saved.icResolveStatus, 'failed');
+  assert.equal(saved.icResolveNextRetryAt, undefined);
+  assert.match(String(saved.icResolveError), /候補が上限/);
+  assert.equal((await run({ eventId, source: 'retry' })).status, 'deferred');
+  assert.equal(localCalls, 3, 'an exhausted attempt budget prevents further automatic catalog searches');
+  assert.equal(requests, 0);
+}
+
 async function testManualCorrectionClearsAutomaticOriginMetadata() {
   await reset([], {
     extras: { icName: '自動合成IC', icResolveStatus: 'resolved', icResolveGeoSource: 'route', icResolveGeoOffsetSeconds: -20 },
@@ -905,6 +946,7 @@ const tests = [
   testDifferentLocalSupplementsRemainUnconfirmedCandidates,
   testLocalSupplementBoundsEveryAlternativeFromOriginalEvent,
   testLocalSupplementUnionOverflowDoesNotTruncateCandidates,
+  testOnlineLocalUnionOverflowCannotFallbackToSharedRepresentative,
 ];
 
 async function main() {
