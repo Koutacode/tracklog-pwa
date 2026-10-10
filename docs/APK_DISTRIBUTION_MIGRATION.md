@@ -16,7 +16,7 @@
 - ソース／既存署名のActions実行元: `Koutacode/tracklog-pwa`。
 - 新しい公開配布専用repo案: `Koutacode/tracklog-releases`。既存repoのfork・mirror・push・履歴コピーを使わず、新規の独立したrepoとして作る。READMEのみの初期commitを作り、個人氏名・メールではなく確認済みGitHub noreplyと公開ハンドルを使う。
 - 公開するファイルは `tracklog-assist-debug.apk` と `.sha256` のみ。リリース文は固定文。source commit・changelog・自動生成release notesを新repoへ渡さない。GitHubの自動Source archiveも新repo自身のREADMEだけになる。
-- 最新の利用者指示「とりあえず90日でいこ」により、現在は保存済みFine-grained PATを使う。対象は配布repoのみ、Contents Read and write / Metadata Read。元repoのActions repository secret `TRACKLOG_DISTRIBUTION_TOKEN` から公開stepにだけ注入する。
+- 当時の検討案では、保存済みFine-grained PATを使う方針だった。対象は配布repoのみ、Contents Read and write / Metadata Read。元repoのActions repository secret `TRACKLOG_DISTRIBUTION_TOKEN` から公開stepにだけ注入する。
 - PAT値をチャット・ローカル・APK・Driveへコピーせず、表示・抽出・試用しない。ビルド前の存在確認には値ではなくbooleanだけを使う。未設定なら停止し、期限切れ・権限不足も公開処理のpreflightで停止する。元repo token、App、ローカル認証等へのfallbackはない。
 - 既存PATの期限は親の確認記録では2026-12-31。90日運用の方針変更はtokenの実期限を延長しない。期限前に利用者がGitHubで更新し同名Secretへ保存する運用とし、この作業でtoken発行・更新・期限変更は行わない。
 - GitHub App登録・配布repo限定install・`TRACKLOG_DISTRIBUTION_APP_CLIENT_ID` 変数はそのまま保持する。`TRACKLOG_DISTRIBUTION_APP_PRIVATE_KEY` は未設定・利用保留。現在のworkflowはAppもこれらの変数/Secretも参照しない。将来の方式変更は別の承認済み変更で行う。
@@ -99,6 +99,6 @@ Google Driveへの反映は親側で既存月次文書へこの非秘密の記�
 
 ## PAT方式への復帰（2026-10-03、最新判断）
 
-ユーザーの「とりあえず90日でいこ」を受け、PR #21のworkflowを保存済み`TRACKLOG_DISTRIBUTION_TOKEN`方式へ戻した。Appの過去記録は履歴として保持するが、現行方式は本節と冒頭の記述を正本とする。秘密値は読み出していない。PATの実認証・公開書込みは今回の通常CIでは検証しない。
+当時の方針に従い、PR #21のworkflowを保存済み`TRACKLOG_DISTRIBUTION_TOKEN`方式へ戻した。Appの過去記録は履歴として保持するが、現行方式は本節と冒頭の記述を正本とする。秘密値は読み出していない。PATの実認証・公開書込みは今回の通常CIでは検証しない。
 
 配布repoの独立README初期commitは作成済み。merge・Release/deploy・元repo非公開化は引き続き未承認。通常CI成功後も、公開前にmergeと正式Releaseの実行承認、公開対象SHA/版/署名/新旧APK照合の確認が必要。端末移行確認と非公開化は別段階のまま保持する。
