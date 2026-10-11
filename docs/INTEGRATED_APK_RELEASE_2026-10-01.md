@@ -10,7 +10,7 @@
 - 両作業の基準コミット: `92172ac720460fb6c3cf1205a784150d69d3d1e6`
 - Disk IO側の詳細: [SUPABASE_DISK_IO_2026-10-01.md](SUPABASE_DISK_IO_2026-10-01.md)
 - 既適用の本番migration: `20260930165335_tracklog_sync_v2_reduce_disk_io.sql`
-- 相手チャット: `01a0f320-e8cd-74f2-8f6b-09c05ac2c0be`、host `durable`
+- 相手チャット: （非公開記録を参照）、host `durable`
 - 完了確認: 2026-10-01 02:41以降の確認で相手のturnが `completed`、chatが `idle`。
 
 ## 差分の受け取り状況
@@ -89,7 +89,7 @@ Cloud手順PR [#13](https://github.com/Koutacode/tracklog-pwa/pull/13) / `ee0ccf
 
 新しい通常Cloudチャットの受入試験について通常タスク作成による検証の承認を得た。再公開済み「TrackLog-修復」で通常タスク開始を試したが、同じroot特定エラーで実行前に失敗し、通常タスクのIDは作成されなかった。元の入力下書きは復元し、空白を正規化した内容一致を確認した。
 
-既存環境を残し、公式作成UIで同じ `Koutacode/tracklog-pwa` / mainを選んで新規セットアップを開始した。セットアップチャット `01a0f4d2-29e2-7420-9e82-b832e6ae208b` は09:16 JSTにコマンド実行まで進んだ。既存環境固有の問題かを比較する試験であり、まだ通常タスクの受入成功とは扱わない。新環境名は「TrackLog-APK」、非公開を維持し、アプリ変更・新Releaseを作らないよう依頼した。Cloudは基本的に高速モードが使えないという利用者の補足も共有skillとガイドへ反映した。
+既存環境を残し、公式作成UIで同じ `Koutacode/tracklog-pwa` / mainを選んで新規セットアップを開始した。セットアップチャット （非公開記録を参照） は09:16 JSTにコマンド実行まで進んだ。既存環境固有の問題かを比較する試験であり、まだ通常タスクの受入成功とは扱わない。新環境名は「TrackLog-APK」、非公開を維持し、アプリ変更・新Releaseを作らないよう依頼した。Cloudは基本的に高速モードが使えないという利用者の補足も共有skillとガイドへ反映した。
 
 新規セットアップは09:27 JSTに完了。Node 22.23.3、完全なJDK 21.0.12.1/javac、SDK 36/Build Tools 36.0.0、gh 2.46.0を実確認し、基本6検証・同期19件・offline37資産・Capacitor sync、Android単体85件（失敗/skip0）・本体/androidTest APKコンパイルが成功した。再実行も12秒/200 tasks up-to-dateで成功。公開Linux verifierは初回GitHub API取得失敗後の再実行exit0で、公開v0.1.64/code62、7,422,451 bytes、既存署名と上記SHAが一致して正式outputへ保存された。Git追跡差分はなし、新Release/tag/pushも行っていない。
 
