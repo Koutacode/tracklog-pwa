@@ -163,7 +163,7 @@ idx_scan=0の観測窓は全履歴を意味しない。pg_cron未導入。DB外�
 ## 別チャットとの照合
 
 対象: 「TrackLog修正：IC名と運行終了時刻」
-非公開の関連作業記録で追跡する。
+codex://threads/01a0f320-e8cd-74f2-8f6b-09c05ac2c0be?hostId=durable
 
 基点は双方92172ac。相手側はIC再試行の公平性/並行処理/画面通知、終了時刻・日報更新、Cloud CI/release検証を作業中。
 照合時点の主変更: repositories.ts、expresswayIcResolution.ts、ReportDashboard/TripDetail/TripRecordedTimes、CSS、CI/Cloud文書。こちらの保存/sync/SQLと主実装ファイルは重ならない。package.jsonのtest登録は今後競合し得るため両者を残す。
