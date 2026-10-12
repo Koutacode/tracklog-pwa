@@ -1,3 +1,4 @@
+import { hasDriverCandidateAttempt } from './driverCandidateAuth';
 import { db } from '../db/db';
 import {
   deleteTrip,
@@ -824,6 +825,7 @@ export function subscribeRemoteSyncState(listener: Listener) {
 }
 
 export async function runRemoteSync(reason = 'manual'): Promise<RemoteSyncState> {
+  if (hasDriverCandidateAttempt()) return getRemoteSyncState();
   if (inFlight) return inFlight;
   // Polling, resume, reconnect and manual sync also drain the route outbox.
   // Do not leave its old timer behind to issue a redundant empty pull later.
@@ -918,3 +920,6 @@ export function installImmediateRemoteSyncListener() {
     if (scheduledRemoteSync === scheduler) scheduledRemoteSync = null;
   };
 }
+
+/** A confirmation waits for pre-existing sync before adopting a new session. */
+export async function waitForRemoteSyncIdle() { await inFlight; }

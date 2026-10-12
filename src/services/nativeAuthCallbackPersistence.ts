@@ -1,3 +1,4 @@
+import { isDriverCandidateCallback } from './driverCandidateAuth';
 const NATIVE_AUTH_CALLBACK_URL_KEY = '__tracklog_native_auth_callback_url__';
 const NATIVE_AUTH_CALLBACK_INTENT_KEY = '__tracklog_native_auth_callback_intent__';
 const NATIVE_AUTH_ATTEMPT_KEY = '__tracklog_native_auth_attempt__';
@@ -402,7 +403,7 @@ export function consumeNativeAuthCallbackIntent(): NativeAuthCallbackIntent | nu
 }
 
 export function persistNativeAuthCallbackUrl(url: string, now = Date.now()): void {
-  if (!url || !isAuthCallbackUrl(url)) return;
+  if (!url || isDriverCandidateCallback(url) || !isAuthCallbackUrl(url)) return;
   const callbackAttemptId = getCallbackAttemptId(url);
   const activeAttempt = getNativeAuthAttempt(now);
   if (activeAttempt && callbackAttemptId !== activeAttempt.id) return;

@@ -729,11 +729,27 @@ async function claimDeviceProfile(payload: JsonRecord, user: TracklogUser, admin
     approval_decided_by: nullableText(existing?.approval_decided_by),
   };
 
-  const { data, error } = await adminClient
-    .from('device_profiles')
-    .upsert(row, { onConflict: 'device_id' })
-    .select('*')
-    .single();
+  // A lost response may be retried after another claim or an administrator's
+  // decision. Never replace a row using a snapshot that is no longer current.
+  let mutation;
+  if (existing) {
+    const revision = textValue(existing.updated_at);
+    if (!revision) throw new HttpError(409, 'Device profile changed; retry registration');
+    mutation = adminClient.from('device_profiles').update(row)
+      .eq('device_id', deviceId).eq('updated_at', revision);
+    for (const column of ['auth_user_id', 'approval_status', 'approval_requested_at', 'approval_decided_at', 'approval_decided_by']) {
+      mutation = existing[column] == null
+        ? mutation.is(column, null)
+        : mutation.eq(column, textValue(existing[column]));
+    }
+  } else {
+    // ON CONFLICT UPDATE would let two first claims replace each other's owner.
+    mutation = adminClient.from('device_profiles').insert(row);
+  }
+  const { data, error } = await mutation.select('*').maybeSingle();
+  if (error?.code === '23505' || (!error && !data)) {
+    throw new HttpError(409, 'Device profile changed; retry registration');
+  }
   if (error) throw new HttpError(500, `Device profile claim failed: ${error.message}`);
   return data;
 }

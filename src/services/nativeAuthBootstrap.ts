@@ -1,3 +1,4 @@
+import { hasDriverCandidateAttempt } from './driverCandidateAuth';
 import { Capacitor } from '@capacitor/core';
 import {
   AUTH_CLEARED_KEY_SUFFIX,
@@ -67,7 +68,7 @@ export function seedNativeDriverSessionBeforeClient(): Promise<boolean> {
 async function seedNativeDriverSession(isActive: () => boolean): Promise<boolean> {
   if (!Capacitor.isNativePlatform() || Capacitor.getPlatform() !== 'android') return false;
   if (typeof window === 'undefined') return false;
-  if (isDriverExplicitSignOutRequested()) return false;
+  if (isDriverExplicitSignOutRequested() || hasDriverCandidateAttempt()) return false;
   const authIntent = getDriverAuthIntentGeneration();
 
   // Seed from the native owner's current snapshot before creating clients.
@@ -92,7 +93,7 @@ async function seedNativeDriverSession(isActive: () => boolean): Promise<boolean
   } catch {
     // Native and localStorage remain sufficient if IndexedDB is unavailable.
   }
-  if (!isActive() || !isCurrentDriverAuthIntent(authIntent) || isDriverExplicitSignOutRequested()) return false;
+  if (hasDriverCandidateAttempt() || !isActive() || !isCurrentDriverAuthIntent(authIntent) || isDriverExplicitSignOutRequested()) return false;
   const persistedRaw = selectPreferredPersistedAuthSession(localRaw, indexedRaw);
   const nextSession = buildNativeBootstrappedSession({
     nativeAccessToken: authorization.accessToken,

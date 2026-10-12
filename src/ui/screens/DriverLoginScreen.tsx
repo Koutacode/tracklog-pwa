@@ -1,3 +1,5 @@
+import DriverGoogleRegistration from './DriverGoogleRegistration';
+import { hasDriverCandidateAttempt } from '../../services/driverCandidateAuth';
 import { Capacitor } from '@capacitor/core';
 import { FormEvent, useEffect, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
@@ -51,6 +53,8 @@ function isCloudSyncCheckError(error: any) {
 export default function DriverLoginScreen() {
   const navigate = useNavigate();
   const location = useLocation();
+  const [candidatePending, setCandidatePending] = useState(hasDriverCandidateAttempt);
+  const [showRecovery, setShowRecovery] = useState(false);
   const [email, setEmail] = useState('');
   const [token, setToken] = useState('');
   const [status, setStatus] = useState<'idle' | 'checking' | 'sending' | 'verifying'>('checking');
@@ -82,7 +86,7 @@ export default function DriverLoginScreen() {
 
   useEffect(() => {
     let active = true;
-    void initializeDriverIdentity()
+    if (!hasDriverCandidateAttempt()) void initializeDriverIdentity()
       .then(identity => {
         if (!active) return;
         setEmail(identity.email ?? '');
@@ -100,8 +104,9 @@ export default function DriverLoginScreen() {
           setMessage(formatDriverLoginError(error));
         }
       });
+    if (hasDriverCandidateAttempt()) setStatus('idle');
     const unsubscribe = onDriverAuthStateChange(event => {
-      if (event !== 'SIGNED_IN') return;
+      if (event !== 'SIGNED_IN' || hasDriverCandidateAttempt()) return;
       void finishLogin('driver-login-auth').catch(error => {
         if (!active) return;
         setStatus('idle');
@@ -177,9 +182,12 @@ export default function DriverLoginScreen() {
           </div>
         </div>
 
+        <DriverGoogleRegistration key={location.key} onPendingChange={setCandidatePending} onComplete={() => finishLogin('driver-google-confirmed')} />
+        {!candidatePending && <button className="trip-btn" onClick={() => setShowRecovery(v => !v)}>既存アカウントをメール認証で復旧</button>}
+        {!candidatePending && showRecovery && <>
         <div className="settings-note">
           すでに登録・承認済みのメールアドレスを別のブラウザやPWAで使う場合は、ここからログインしてください。
-          ログイン状態はブラウザごとに別ですが、運行履歴と承認状態はアカウント単位で同期されます。
+          既存アカウントの復旧用です。新しい端末には管理者の承認が必要です。
         </div>
 
         <form className="driver-registration" onSubmit={event => void handleSendLogin(event)}>
@@ -239,6 +247,7 @@ export default function DriverLoginScreen() {
           </button>
         </div>
 
+        </>}
         {message && (
           <div
             className="settings-toast"

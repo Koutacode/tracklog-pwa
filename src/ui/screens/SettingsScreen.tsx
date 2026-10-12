@@ -10,7 +10,6 @@ import {
 import {
   getDriverAuthWorkflowErrorCode,
   getDriverIdentity,
-  sendDriverMagicLink,
   setDriverProfileLocal,
 } from '../../services/remoteAuth';
 import { getRemoteSyncState, hydrateRemoteSyncState, runRemoteSync, subscribeRemoteSyncState } from '../../services/remoteSync';
@@ -92,7 +91,6 @@ export default function SettingsScreen() {
   const [authInitialized, setAuthInitialized] = useState(false);
   const [profileComplete, setProfileComplete] = useState(false);
   const [approvalStatus, setApprovalStatus] = useState<'unregistered' | 'pending' | 'approved' | 'rejected'>('unregistered');
-  const [sendingMagic, setSendingMagic] = useState(false);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [syncState, setSyncState] = useState(getRemoteSyncState());
@@ -277,7 +275,7 @@ export default function SettingsScreen() {
               <span>メールアドレス</span>
               <input
                 value={email}
-                onChange={e => setEmail(e.target.value)}
+                readOnly
                 placeholder="例: sample@example.com"
                 type="email"
                 disabled={profileLocked}
@@ -319,37 +317,7 @@ export default function SettingsScreen() {
                     : '登録済みプロフィールは不正利用防止のため、この端末からは変更できません。'}
               </div>
             )}
-            {!authInitialized && (
-              <button
-                className="trip-btn trip-btn--primary"
-                disabled={!email.trim() || sendingMagic}
-                onClick={async () => {
-                  setMessage(null);
-                  setSendingMagic(true);
-                  try {
-                    const validation = validateDriverProfile({ displayName, vehicleLabel, phone, email });
-                    setDisplayName(validation.value.displayName);
-                    setVehicleLabel(validation.value.vehicleLabel);
-                    setPhone(validation.value.phone);
-                    setEmail(validation.value.email);
-                    setFieldErrors(validation.errors);
-                    if (!validation.valid) {
-                      setMessage(validation.firstError);
-                      return;
-                    }
-                    await setDriverProfileLocal(validation.value);
-                    await sendDriverMagicLink(validation.value.email);
-                    setMessage('認証メールを送信しました。メール本文の案内に従ってログインしてください。');
-                  } catch (error: any) {
-                    setMessage(error?.message ?? '認証メール送信に失敗しました');
-                  } finally {
-                    setSendingMagic(false);
-                  }
-                }}
-              >
-                {sendingMagic ? '送信中…' : '認証メールを送信'}
-              </button>
-            )}
+            {!authInitialized && <Link className="pill-link" to="/driver-login">Googleで登録・既存アカウントの復旧</Link>}
             {authInitialized && approvalStatus === 'unregistered' && (
               <button
                 className="trip-btn trip-btn--primary"

@@ -1,3 +1,6 @@
+import { withDriverAuthInteraction } from './driverAuthInteraction';
+import { driverCandidateAuth, hasDriverCandidateAttempt, isDriverCandidateCallback } from './driverCandidateAuth';
+import { withDriverRegistrationMutation } from './driverRegistrationLock';
 import { Capacitor } from '@capacitor/core';
 import type { AuthChangeEvent, Session, SupabaseClient } from '@supabase/supabase-js';
 import { APP_VERSION } from '../app/version';
@@ -6,6 +9,8 @@ import { db } from '../db/db';
 import type { AdminSession, DriverApprovalStatus, DriverIdentity } from '../domain/remoteTypes';
 import { getStableDeviceKey } from './deviceIdentity';
 import {
+  assertDriverCandidateOwner,
+  withDriverExpectedOwner,
   clearPersistedDriverAuthSession,
   clearAuthCodeVerifier,
   adminAccessSupabase,
@@ -591,8 +596,10 @@ async function getProfileIdentity() {
   if (error) throw new DriverAuthSessionRefreshError(error);
   const session = data.session;
   if (!session?.user) return null;
+  const verified = await driverAuthSupabase.auth.getUser(session.access_token);
+  if (verified.error || !verified.data.user || verified.data.user.id !== session.user.id || verified.data.user.is_anonymous) throw new DriverAuthSessionRefreshError();
   return {
-    email: normalizeText(session.user.email),
+    email: normalizeText(verified.data.user.email),
     phone: normalizeText(session.user.phone),
     accessToken: session.access_token,
   };
@@ -604,7 +611,12 @@ export type InitializeDriverIdentityOptions = {
   skipNativeSessionRestore?: boolean;
 };
 
-export async function initializeDriverIdentity(
+export async function initializeDriverIdentity(options?: InitializeDriverIdentityOptions): Promise<DriverIdentity> {
+  // SIGNED_IN and startup must not enroll while explicit confirmation is pending.
+  if (hasDriverCandidateAttempt()) return getDriverIdentity();
+  return withDriverRegistrationMutation(() => hasDriverCandidateAttempt() ? getDriverIdentity() : initializeDriverIdentityLocked(options));
+}
+async function initializeDriverIdentityLocked(
   options?: InitializeDriverIdentityOptions,
 ): Promise<DriverIdentity> {
   if (!SUPABASE_CONFIGURED || !driverAuthSupabase) {
@@ -769,7 +781,15 @@ export async function initializeDriverIdentity(
   };
 }
 
-export async function setDriverProfileLocal(input: {
+type DriverProfileInput = { displayName: string; vehicleLabel?: string; phone?: string; email?: string };
+export async function setDriverProfileLocal(input: DriverProfileInput) {
+  if (hasDriverCandidateAttempt()) throw new Error('Googleログインの確認を完了してください。');
+  return withDriverRegistrationMutation(() => {
+    if (hasDriverCandidateAttempt()) throw new Error('Googleログインの確認を完了してください。');
+    return setDriverProfileLocalLocked(input);
+  });
+}
+async function setDriverProfileLocalLocked(input: {
   displayName: string;
   vehicleLabel?: string;
   phone?: string;
@@ -1258,6 +1278,7 @@ export async function sendDriverMagicLink(
   redirectTo?: string,
   options: NativeAuthStartOptions = {},
 ): Promise<void> {
+  if (hasDriverCandidateAttempt()) throw new Error('仮Googleログインを取消してからメール認証を続けてください。');
   const client = driverAuthSupabase;
   if (!SUPABASE_CONFIGURED || !client) {
     throw new Error('Supabase が未設定です');
@@ -1303,6 +1324,7 @@ export async function sendDriverLoginLink(
   redirectTo?: string,
   options: NativeAuthStartOptions = {},
 ): Promise<void> {
+  if (hasDriverCandidateAttempt()) throw new Error('仮Googleログインを取消してからメール認証を続けてください。');
   const client = driverAuthSupabase;
   if (!SUPABASE_CONFIGURED || !client) {
     throw new Error('Supabase が未設定です');
@@ -1344,6 +1366,10 @@ export async function sendDriverLoginLink(
 }
 
 export async function verifyDriverEmailOtp(email: string, token: string): Promise<DriverIdentity> {
+  return withDriverAuthInteraction(() => verifyDriverEmailOtpLocked(email, token));
+}
+async function verifyDriverEmailOtpLocked(email: string, token: string): Promise<DriverIdentity> {
+  if (hasDriverCandidateAttempt()) throw new Error('仮Googleログインを取消してからメール認証を続けてください。');
   const client = driverAuthSupabase;
   if (!SUPABASE_CONFIGURED || !client) {
     throw new Error('Supabase が未設定です');
@@ -1807,7 +1833,9 @@ async function persistCurrentDriverSessionMetadata() {
   if (!data.session?.user) {
     throw new Error('運転者のログイン状態を確認できませんでした。');
   }
-  const email = normalizeEmail(data.session.user.email);
+  const verified = await driverAuthSupabase.auth.getUser(data.session.access_token);
+  if (verified.error || !verified.data.user || verified.data.user.id !== data.session.user.id || verified.data.user.is_anonymous) throw new DriverAuthSessionRefreshError();
+  const email = normalizeEmail(verified.data.user.email);
   await Promise.all([
     setMeta(META_REMOTE_AUTH_INITIALIZED, 'true'),
     email ? setMeta(META_DRIVER_EMAIL, email) : Promise.resolve(),
@@ -1827,10 +1855,14 @@ export async function handleAdminWebAuthCallbackUrl(url: string): Promise<{
   return { handled: true };
 }
 
-export async function handleDriverWebAuthCallbackUrl(url: string): Promise<{
+export async function handleDriverWebAuthCallbackUrl(url: string): Promise<{ handled: boolean; identity?: DriverIdentity }> {
+  return withDriverAuthInteraction(() => handleDriverWebAuthCallbackUrlLocked(url));
+}
+async function handleDriverWebAuthCallbackUrlLocked(url: string): Promise<{
   handled: boolean;
   identity?: DriverIdentity;
 }> {
+  if (isDriverCandidateCallback(url) || hasDriverCandidateAttempt()) return { handled: false };
   const client = driverAuthSupabase;
   if (!SUPABASE_CONFIGURED || !client) {
     throw new Error('Supabase が未設定です');
@@ -1937,10 +1969,14 @@ export async function handleAdminAuthCallbackUrl(url: string, forceAdmin = false
     nextPath: parsed.callbackRole === 'admin' ? parsed.nextPath : '/admin',
   };
 }
-export async function handleDriverAuthCallbackUrl(url: string, forceDriver = false): Promise<{
+export async function handleDriverAuthCallbackUrl(url: string, forceDriver = false): Promise<{ handled: boolean; nextPath?: string }> {
+  return withDriverAuthInteraction(() => handleDriverAuthCallbackUrlLocked(url, forceDriver));
+}
+async function handleDriverAuthCallbackUrlLocked(url: string, forceDriver = false): Promise<{
   handled: boolean;
   nextPath?: string;
 }> {
+  if (isDriverCandidateCallback(url) || hasDriverCandidateAttempt()) return { handled: false };
   const client = driverAuthSupabase;
   if (!SUPABASE_CONFIGURED || !client) {
     throw new Error('Supabase が未設定です');
@@ -1986,4 +2022,50 @@ export async function handleDriverAuthCallbackUrl(url: string, forceDriver = fal
     handled: true,
     nextPath: parsed.callbackRole === 'driver' ? parsed.nextPath : '/settings',
   };
+}
+
+/** Confirmation is a recoverable sequence, not an atomic cross-native/DB transaction. */
+export async function confirmDriverGoogleRegistration(input: Omit<DriverProfileInput, 'email'>, expectedAttemptId: string) {
+  const client = driverAuthSupabase;
+  if (!client) throw new Error('Supabase が未設定です');
+  await (await import('./remoteSync')).waitForRemoteSyncIdle();
+  await driverCandidateAuth().confirm(async identity => {
+    assertValidDriverProfile({ ...input, email: identity.email });
+    await assertDriverCandidateOwner(identity.id);
+  }, async (handoff, identity, adopted) => withDriverRegistrationMutation(async () => {
+    const generation = beginDriverAuthIntent();
+    invalidateNativeResidentLocationSessionRestore();
+    const current = () => { if (!isCurrentDriverAuthIntent(generation)) throw new Error('認証操作が変更されました。同じアカウントで再試行してください。'); };
+    await withDriverAuthMutation(async () => {
+      current();
+      await assertDriverCandidateOwner(identity.id);
+      const existing = await client.auth.getSession();
+      const verified = existing.data.session ? await client.auth.getUser(existing.data.session.access_token) : null;
+      const user = verified?.data.user;
+      if (user && !verified?.error && user.id !== identity.id) throw new Error('元のアカウントでログインしてください。');
+      if (existing.error || !user || verified?.error || user.is_anonymous) {
+        if (!handoff) throw new Error('同じGoogleアカウントで再認証してください。');
+        current();
+        await withDriverExpectedOwner(identity.id, async () => {
+          const result = await client.auth.setSession({ access_token: handoff.access_token, refresh_token: handoff.refresh_token });
+          if (result.error || result.data.user?.id !== identity.id) throw new Error('認証情報を保存できませんでした。同じアカウントで再試行してください。');
+        });
+      }
+      current();
+      await adopted();
+      await persistCurrentDriverSessionMetadata();
+      current();
+      clearDriverExplicitSignOut();
+      await ensureNativeDriverCredentialInstallation({ required: isAndroidNativePlatform(), install: () => installNativeResidentLocationAuthorization(generation) });
+      current();
+    });
+    await setDriverProfileLocalLocked({ ...input, email: identity.email });
+  }), expectedAttemptId);
+}
+
+export async function getLocalDriverRegistrationFields() {
+  const [displayName, phone, vehicleLabel] = await Promise.all([
+    getMeta(META_DEVICE_DISPLAY_NAME), getMeta(META_DRIVER_PHONE), getMeta(META_DEVICE_VEHICLE_LABEL),
+  ]);
+  return { displayName: displayName ?? '', phone: phone ?? '', vehicleLabel: vehicleLabel ?? '' };
 }

@@ -1,3 +1,4 @@
+import { driverCandidateAuth, isDriverCandidateCallback } from './services/driverCandidateAuth';
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { App as CapacitorApp } from '@capacitor/app';
@@ -29,13 +30,15 @@ async function bootstrap() {
   if (Capacitor.isNativePlatform()) {
     void CapacitorApp.getLaunchUrl().then(launchUrl => {
       if (launchUrl?.url && isTracklogNativeAuthCallbackUrl(launchUrl.url)) {
-        persistNativeAuthCallbackUrl(launchUrl.url);
+        if (isDriverCandidateCallback(launchUrl.url)) void Promise.resolve().then(() => driverCandidateAuth().capture(launchUrl.url!)).catch(() => undefined);
+        else persistNativeAuthCallbackUrl(launchUrl.url);
       }
     }).catch(() => undefined);
 
     void CapacitorApp.addListener('appUrlOpen', ({ url }) => {
       if (isTracklogNativeAuthCallbackUrl(url)) {
-        persistNativeAuthCallbackUrl(url);
+        if (isDriverCandidateCallback(url)) void Promise.resolve().then(() => driverCandidateAuth().capture(url)).catch(() => undefined);
+        else persistNativeAuthCallbackUrl(url);
       }
     }).catch(() => undefined);
   }
