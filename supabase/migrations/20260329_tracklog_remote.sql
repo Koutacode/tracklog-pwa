@@ -6,9 +6,8 @@ create table if not exists public.admin_users (
   created_at timestamptz not null default now()
 );
 
-insert into public.admin_users (email, enabled)
-values ('matumurak0623@gmail.com', true)
-on conflict (email) do nothing;
+-- No default administrator is seeded. For a new environment only, follow
+-- docs/REMOTE_SETUP.md (Initial admin). Existing admin_users rows are unchanged.
 
 create or replace function public.is_tracklog_admin()
 returns boolean
