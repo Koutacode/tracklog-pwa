@@ -23,14 +23,17 @@ Node.js 22、既存Auth SDK、合成アカウント・通信・DB・native bridg
 
 claim試験はTypeScript ASTから実handlerを抽出し、既存migrationと更新日時triggerを適用したPGliteで実行する。変更前に4件の競合不具合を再現し、修正後は8条件が成功した。
 
-最終ローカル回帰では `typecheck`、`test:logic`（上記57条件を含む全81コマンド）、`test:auth-enrollment`（19件）、`test:sync`（36件）、`test:release-apk`、`check:csp`、`build`、`check:offline` が成功した。独立した差分レビューとclaim／応答喪失試験も実施した。
+0.1.73 / versionCode 71のローカル候補では、Node.js 22.23.3で `typecheck`、`test:logic`（上記57条件を含む全81コマンド）、`test:auth-enrollment`（19件）、`test:sync`（36件）、`test:release-apk`（44件）、`check:csp`、`build`、`check:offline` がすべて成功した。検証は追跡ファイル458件が作業ツリーと一致する分離コピーで実施し、生成した `dist/version.json` の版も0.1.73だった。元の作業ツリーが試験で変化していないことを照合した。独立した差分レビューでは版番号の整合、依存関係の不変、既存認証・データ保持・claim試験の範囲を確認した。
 
 ## 検証の限界と配布前の確認
 
 - React描画試験は実ブラウザDOMではない。Web Locksの合成試験は実ブラウザ複数タブを保証しない。実OAuth、callback URLの許可設定、Androidでのログイン・復旧は別途確認が必要。
 - 再構成試験はAuth専用IndexedDBの独立コピーやOSの書込み耐久性を再現しない。profile一部保存は既存値を再保存する条件である。
 - PGliteと最小PostgREST adapterの試験は、実HTTP gateway、JWT検証、本番RLS、実PostgREST競合の検証ではない。409の後は登録再試行が必要で、透過的な成功には変換しない。
-- このPRはソースレビューと既存CIによる検証を対象とする。CIのAndroid単体試験・本体／androidTest APKコンパイル結果はPRのChecksを参照する。CI用APKは正式配布物ではない。
-- 本PRでversion、package ID、配布URL、正式Release workflow、認証・権限設定を変更しない。本番Edge Functionへの再デプロイや正式APK公開は行わない。
+- 今回は0.1.73 / versionCode 71への版整合とローカル検証までで、commit・push・PR更新・マージ・tag・Release・本番デプロイは行っていない。変更は `package.json`、`package-lock.json`、`android/gradle.properties` と本書の4ファイルに限定し、依存関係や登録処理を追加変更していない。
+- ローカルの `bash scripts/setup-tracklog-cloud.sh --check` は完全なJDK 21（javaとjavac）がないため失敗した。ツールの追加導入やAndroidコンパイルは実施していない。これはローカル環境の制約であり、ActionsのAndroidビルド失敗を意味しない。
+- [PR CI run 38263862712](https://github.com/Koutacode/tracklog-pwa/actions/runs/38263862712) はHEAD `d64f919ea9d5cc13184e85e1d768b8043b0cecb5` で3ジョブすべて成功し、Android単体試験・本体／androidTest APKコンパイルも成功している。このCI結果は今回の未commitの版番号変更を含まない。
+- [既存v0.1.72のAndroid Release run 37473444270](https://github.com/Koutacode/tracklog-pwa/actions/runs/37473444270) は、既存署名によるビルド、package ID・版番号・署名の検査、公開後のlatest APK検証まで成功している。既存の配布経路の成功証拠であり、0.1.73のAPK生成・署名・公開を検証したものではない。CI用APKと正式配布APKも区別する。
+- package ID、配布URL、正式Release workflow、認証・権限設定は維持する。本番Edge Functionの再デプロイは行わない。正式公開時は署名・版番号・SHA・固定latest URLを照合する。
 - 正式配布前には既存署名との互換性とversionCodeを確認し、許可された検証端末で上書き更新する。既存認証・運行・日報・未送信queue・profileの保持、管理者／OTP、承認、バックグラウンド位置記録、通知、APK更新を実測する。
-- 外部preview連携は未確認。Google Driveへの作業記録は未反映であり、次回は既存月次文書へ非秘密の検証結果を追記する。
+- 外部preview連携は未確認。外部文書への作業記録の反映は今回の範囲に含めていない。
