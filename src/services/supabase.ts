@@ -1,3 +1,5 @@
+import { db } from '../db/db';
+import { createDriverAccountStorage, readDriverOwnership, verifyInstalledNativeOwner } from './driverAccountStorage';
 import { createClient } from '@supabase/supabase-js';
 import { Capacitor } from '@capacitor/core';
 import {
@@ -384,9 +386,25 @@ export async function clearPersistedDriverAuthSession(): Promise<void> {
 
 // The Android foreground service is the sole refresh-token owner. This avoids
 // native/WebView rotation races while still allowing normal PWA auto-refresh.
+const nativeOwnerVerifier = SUPABASE_CONFIGURED && ANDROID_NATIVE ? createClient(supabaseUrl, supabaseAnonKey, {
+  auth: { storageKey: 'tracklog-native-owner-verifier', persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
+}) : null;
+const guardedDriverStorage = createDriverAccountStorage(driverAuthStorage, () => readDriverOwnership(db),
+  ANDROID_NATIVE ? () => verifyInstalledNativeOwner({
+    read: () => ResidentLocation.getAuthorization(),
+    verify: async token => {
+      if (!nativeOwnerVerifier) return null;
+      const { data, error } = await nativeOwnerVerifier.auth.getUser(token);
+      if (error) return null;
+      return data.user;
+    },
+  }) : undefined);
+export const assertDriverCandidateOwner = guardedDriverStorage.assertOwner;
+export const withDriverExpectedOwner = guardedDriverStorage.withExpectedOwner;
+
 export const driverAuthSupabase = buildClient(
   DRIVER_AUTH_STORAGE_KEY,
-  ANDROID_NATIVE ? createNativeOwnedAuthStorage(driverAuthStorage) : driverAuthStorage,
+  ANDROID_NATIVE ? createNativeOwnedAuthStorage(guardedDriverStorage) : guardedDriverStorage,
   !ANDROID_NATIVE,
 );
 // Android data requests use a token callback backed by the native owner. This

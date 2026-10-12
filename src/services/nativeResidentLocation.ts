@@ -1,3 +1,4 @@
+import { hasDriverCandidateAttempt } from './driverCandidateAuth';
 import { Capacitor } from '@capacitor/core';
 import { getStableDeviceKey } from './deviceIdentity';
 import {
@@ -439,6 +440,7 @@ export async function installNativeResidentLocationAuthorization(
 export async function restoreNativeResidentLocationSession(options?: {
   forceRefresh?: boolean;
 }): Promise<boolean> {
+  if (hasDriverCandidateAttempt()) return false;
   const client = driverAuthSupabase;
   if (!isAndroidNative() || !SUPABASE_CONFIGURED || !client) return false;
   if (isDriverExplicitSignOutRequested()) return false;

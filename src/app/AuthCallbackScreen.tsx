@@ -1,3 +1,4 @@
+import { driverCandidateAuth, isDriverCandidateCallback } from '../services/driverCandidateAuth';
 import { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import {
@@ -103,6 +104,12 @@ function getCallbackTask(role: WebAuthCallbackRole, callbackUrl: string) {
       throw new Error('認証URLの種類が一致しません。');
     }
 
+    if (isDriverCandidateCallback(callbackUrl)) {
+      if (role !== 'driver') throw new Error('認証URLの種類が一致しません。');
+      await driverCandidateAuth().capture(callbackUrl);
+      await driverCandidateAuth().handle(callbackUrl);
+      return { nextPath: '/driver-login?candidate=1' };
+    }
     if (role === 'admin') {
       const result = await handleAdminWebAuthCallbackUrl(callbackUrl);
       if (!result.handled) throw new Error('管理者の認証URLを処理できませんでした。');

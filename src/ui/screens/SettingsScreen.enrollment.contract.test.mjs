@@ -11,8 +11,8 @@ assert.match(
 
 assert.match(
   source,
-  /\{!authInitialized && \([\s\S]*?認証メールを送信[\s\S]*?\)\}/,
-  'email login is offered only when the driver is genuinely unauthenticated',
+  /\{!authInitialized && <Link[^>]*to="\/driver-login"[^>]*>Googleで登録・既存アカウントの復旧/,
+  'Google registration and existing email recovery are offered when unauthenticated',
 );
 
 assert.match(

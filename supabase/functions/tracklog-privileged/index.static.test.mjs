@@ -48,8 +48,8 @@ assert.match(
 );
 assert.match(
   claimHandler,
-  /\.upsert\(row, \{ onConflict: 'device_id' \}\)/,
-  'a first device claim must create the pending profile idempotently',
+  /\.insert\(row\)/,
+  'a first device claim must not overwrite a concurrently created profile',
 );
 
 const migrationHandler = functionSource('migrateDeviceRecords', 'requireAdmin');

@@ -1,3 +1,4 @@
+import { driverCandidateAuth, isDriverCandidateCallback } from '../services/driverCandidateAuth';
 import { App as CapacitorApp } from '@capacitor/app';
 import { Capacitor } from '@capacitor/core';
 import { useEffect } from 'react';
@@ -271,6 +272,16 @@ export default function AdminAuthBridge() {
 
     const handleUrl = async (url?: string | null) => {
       if (!url || !active || !isTracklogNativeAuthCallbackUrl(url)) return;
+      if (isDriverCandidateCallback(url)) {
+        try {
+          await driverCandidateAuth().capture(url);
+          await driverCandidateAuth().handle(url);
+          if (active) navigate('/driver-login?candidate=1', { replace: true });
+        } catch {
+          if (active) navigate('/driver-login?candidate=1', { replace: true, state: { authError: 'Googleログインを完了できませんでした。状態を確認するか取消してください。' } });
+        }
+        return;
+      }
       // The bridge listener can win the race against main.tsx. Persist first so
       // process death or a transient exchange never loses the single-use code.
       persistNativeAuthCallbackUrl(url);
@@ -310,6 +321,8 @@ export default function AdminAuthBridge() {
 
     const processPending = async () => {
       if (!active) return;
+      const candidate = await Promise.resolve().then(() => driverCandidateAuth().pending()).catch(() => null);
+      if (candidate) { await handleUrl(candidate); return; }
       const pending = getNativeAuthCallbackUrl();
       if (!pending) return;
       await handleUrl(pending);

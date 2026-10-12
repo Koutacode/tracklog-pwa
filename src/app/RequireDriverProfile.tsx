@@ -210,6 +210,13 @@ function DriverRegistrationGate(props: {
     }
   };
 
+  if (identity.configured && !identity.authInitialized) return (
+    <div className="screen-shell"><div className="screen-card screen-card--narrow">
+      <h1>運転者登録</h1><p>Googleでログインして、名前・自己申告の電話番号・車番を登録してください。新しい端末は管理者の承認が必要です。</p>
+      <Link className="pill-link" to="/driver-login">Googleで登録・既存アカウントの復旧</Link>
+    </div></div>
+  );
+
   const gateModel = getDriverRegistrationGateModel(identity);
   const statusLabel = gateModel.statusLabel;
   const showOtpPanel = identity.configured
@@ -233,7 +240,7 @@ function DriverRegistrationGate(props: {
         </div>
 
         <div className="settings-note">
-          名前、メールアドレス、電話番号、車両番号を登録し、メール本文の認証コードで認証してください。メール認証と管理者承認が完了するまで運行開始画面は利用できません。
+          名前、自己申告の電話番号、車両番号を確認してください。管理者承認が完了するまで運行開始画面は利用できません。
           {!identity.configured && ' 現在はクラウド設定を読み込めていないため、管理者承認を確認できません。'}
         </div>
 
@@ -260,7 +267,7 @@ function DriverRegistrationGate(props: {
             <span>メールアドレス</span>
             <input
               value={email}
-              onChange={event => setEmail(event.target.value)}
+              readOnly
               placeholder="driver@example.com"
               type="email"
               aria-invalid={fieldErrors.email ? true : undefined}
