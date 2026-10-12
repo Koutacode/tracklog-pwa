@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { Link, useLocation } from 'react-router-dom';
 import { Capacitor } from '@capacitor/core';
 import { App as CapacitorApp } from '@capacitor/app';
 import BigButton from '../components/BigButton';
@@ -127,6 +127,7 @@ function OperationErrorNotice(props: { message: string; onDismiss: () => void })
 }
 
 export default function HomeScreen() {
+  const location = useLocation();
   const {
     tripId,
     events,
@@ -158,7 +159,11 @@ export default function HomeScreen() {
     liveDrive,
   } = useComplianceMetrics(tripId, events);
 
-  const [odoDialog, setOdoDialog] = useState<null | { kind: 'trip_start' | 'rest_start' | 'trip_end' }>(null);
+  const [odoDialog, setOdoDialog] = useState<null | {
+    kind: 'trip_start' | 'rest_start' | 'trip_end';
+    initialValue?: number;
+    voiceRequestId?: number;
+  }>(null);
   const [fuelOpen, setFuelOpen] = useState(false);
   const [routeTrackingMode, setRouteTrackingModeState] = useState<RouteTrackingMode>(DEFAULT_ROUTE_TRACKING_MODE);
   const [routeTrackingError, setRouteTrackingError] = useState<string | null>(null);
@@ -188,6 +193,41 @@ export default function HomeScreen() {
   const setupResumeCheckRunning = useRef(false);
   const isNative = Capacitor.isNativePlatform();
   const isAndroidNative = isNative && Capacitor.getPlatform() === 'android';
+
+  // Native recognition can resolve after navigation or a manual operation.
+  // Only the unchanged, committed screen context may dispatch its result.
+  const voiceRequestState = useRef({ mounted: false, pending: false, sequence: 0, contextRevision: 0 });
+  const voiceEndConfirmationRef = useRef<null | { requestId: number; contextKey: string }>(null);
+  const voiceEventsKey = useMemo(() => JSON.stringify(events), [events]);
+  const voiceOperationContextKey = JSON.stringify([
+    location.key, location.pathname, location.search, location.hash,
+    tripId, voiceEventsKey, loading, operationInProgress, activeOperation,
+    breakToRestModalOpen, expresswayEndConfirmation, expresswayEndBusy,
+    fuelOpen, nativeSettingsOpen,
+  ]);
+  const voiceCommittedContextKey = useRef(voiceOperationContextKey);
+
+  useLayoutEffect(() => {
+    const state = voiceRequestState.current;
+    state.mounted = true;
+    return () => {
+      state.mounted = false;
+      state.sequence += 1;
+      state.pending = false;
+      voiceEndConfirmationRef.current = null;
+    };
+  }, []);
+
+  useLayoutEffect(() => {
+    voiceRequestState.current.contextRevision += 1;
+    voiceCommittedContextKey.current = voiceOperationContextKey;
+    const confirmation = voiceEndConfirmationRef.current;
+    if (confirmation && (confirmation.contextKey !== voiceOperationContextKey
+      || odoDialog?.voiceRequestId !== confirmation.requestId)) {
+      voiceEndConfirmationRef.current = null;
+      setOdoDialog(current => current?.voiceRequestId != null ? null : current);
+    }
+  }, [voiceOperationContextKey, odoDialog]);
 
   useEffect(() => subscribeHomeEventsChanged(refresh), [refresh]);
 
@@ -418,11 +458,14 @@ export default function HomeScreen() {
   };
 
   const runVoiceCommand = async () => {
+    const requestState = voiceRequestState.current;
+    if (!requestState.mounted || requestState.pending) return;
     if (breakToRestModalOpen) {
       setVoiceError('休息への変更確認を完了してください。');
       return;
     }
-    if (operationInProgress || expresswayEndConfirmation) {
+    if (loading || operationInProgress || expresswayEndBusy || expresswayEndConfirmation
+      || odoDialog || fuelOpen || nativeSettingsOpen) {
       setVoiceError('別の操作を完了してから、もう一度お試しください。');
       return;
     }
@@ -434,15 +477,24 @@ export default function HomeScreen() {
       setVoiceError('この端末では音声入力を利用できません。');
       return;
     }
+    requestState.pending = true;
+    const requestId = ++requestState.sequence;
+    const contextRevision = requestState.contextRevision;
     setVoiceListening(true);
     setVoiceError(null);
     setVoiceResult(null);
+    setVoiceLastText(null);
+    let commandAccepted = false;
     try {
       const matches = await listenVoiceCommandJa();
+      if (!requestState.mounted || requestState.sequence !== requestId
+        || requestState.contextRevision !== contextRevision) return;
       if (matches.length === 0) throw new Error('音声を認識できませんでした。');
       setVoiceLastText(matches[0]);
       const parsed = findVoiceCommand(matches);
-      if (!parsed) throw new Error(`コマンドを判別できませんでした: ${matches[0]}`);
+      if (!parsed) throw new Error('音声候補の意味や数値を確定できませんでした。画面から操作するか、一つの操作を言い直してください。');
+      setVoiceLastText(parsed.raw);
+      commandAccepted = true;
 
       let operationAttempted = false;
       let operationSucceeded = false;
@@ -462,13 +514,11 @@ export default function HomeScreen() {
           break;
         case 'trip_end':
           if (tripId) {
-            if (parsed.odoKm != null) {
-              operationAttempted = true;
-              operationSucceeded = (await handleEndTrip(parsed.odoKm)) != null;
-            } else {
-              setOdoDialog({ kind: 'trip_end' });
-              followUpMessage = '終了ODOを入力してください。';
-            }
+            voiceEndConfirmationRef.current = { requestId, contextKey: voiceOperationContextKey };
+            setOdoDialog({ kind: 'trip_end', initialValue: parsed.odoKm, voiceRequestId: requestId });
+            followUpMessage = parsed.odoKm != null
+              ? '終了ODOを確認して、運行終了を押してください。'
+              : '終了ODOを入力してください。';
           } else unavailableReason = '開始中の運行がありません。';
           break;
         case 'rest_start':
@@ -562,6 +612,7 @@ export default function HomeScreen() {
           } else unavailableReason = '開始中の運行がありません。';
           break;
       }
+      if (!requestState.mounted || requestState.sequence !== requestId) return;
       if (followUpMessage) {
         setVoiceResult(followUpMessage);
         return;
@@ -571,9 +622,15 @@ export default function HomeScreen() {
       if (!operationSucceeded) throw new Error('操作を完了できませんでした。画面の案内を確認してください。');
       setVoiceResult(`実行しました: ${parsed.raw}`);
     } catch (e: any) {
-      setVoiceError(e?.message ?? '音声操作に失敗しました。');
+      if (requestState.mounted && requestState.sequence === requestId
+        && (commandAccepted || requestState.contextRevision === contextRevision)) {
+        setVoiceError(e?.message ?? '音声操作に失敗しました。');
+      }
     } finally {
-      setVoiceListening(false);
+      if (requestState.sequence === requestId) {
+        requestState.pending = false;
+        if (requestState.mounted) setVoiceListening(false);
+      }
     }
   };
 
@@ -1120,8 +1177,20 @@ export default function HomeScreen() {
         title="運行終了"
         description="終了ODO（km）を入力してください"
         confirmText="運行終了"
-        onCancel={() => setOdoDialog(null)}
+        initialValue={odoDialog?.kind === 'trip_end' ? odoDialog.initialValue : undefined}
+        onCancel={() => {
+          voiceEndConfirmationRef.current = null;
+          setOdoDialog(null);
+        }}
         onConfirm={async odoEndKm => {
+          if (odoDialog?.voiceRequestId != null) {
+            const confirmation = voiceEndConfirmationRef.current;
+            if (!voiceRequestState.current.mounted
+              || confirmation?.requestId !== odoDialog.voiceRequestId
+              || confirmation.contextKey !== voiceCommittedContextKey.current) return;
+            // Consume before awaiting so repeated or cancelled callbacks cannot write.
+            voiceEndConfirmationRef.current = null;
+          }
           setOdoDialog(null);
           const event = await handleEndTrip(odoEndKm);
           if (event) {

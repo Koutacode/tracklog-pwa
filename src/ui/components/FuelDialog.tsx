@@ -1,4 +1,5 @@
 import { useEffect, useId, useRef, useState } from 'react';
+import { parseFuelInput } from './fuelInput';
 
 interface FuelDialogProps {
   open: boolean;
@@ -8,15 +9,39 @@ interface FuelDialogProps {
 
 export default function FuelDialog({ open, onCancel, onConfirm }: FuelDialogProps) {
   const [value, setValue] = useState('');
+  const [composing, setComposing] = useState(false);
+  const [submitted, setSubmitted] = useState(false);
+  const valueRef = useRef('');
+  const composingRef = useRef(false);
+  const submittedRef = useRef(false);
   const titleId = useId();
   const descriptionId = useId();
+  const errorId = useId();
   const inputRef = useRef<HTMLInputElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
-  const liters = Number(value);
-  const canConfirm = value.trim() !== '' && Number.isFinite(liters) && liters > 0;
+  const parsed = parseFuelInput(value);
+  const errorMessage = value !== '' && !composing && !parsed.ok ? parsed.error : null;
+  const canConfirm = parsed.ok && !composing && !submitted;
+  const updateValue = (raw: string) => {
+    valueRef.current = raw;
+    setValue(raw);
+  };
+  const confirm = () => {
+    if (composingRef.current || submittedRef.current) return;
+    const current = parseFuelInput(valueRef.current);
+    if (!current.ok) return;
+    submittedRef.current = true;
+    setSubmitted(true);
+    onConfirm(current.liters);
+  };
   useEffect(() => {
     if (!open) return;
+    valueRef.current = '';
+    composingRef.current = false;
+    submittedRef.current = false;
     setValue('');
+    setComposing(false);
+    setSubmitted(false);
     const previousFocus = document.activeElement;
     const timer = window.setTimeout(() => inputRef.current?.focus(), 0);
     return () => {
@@ -60,10 +85,21 @@ export default function FuelDialog({ open, onCancel, onConfirm }: FuelDialogProp
           <input
             ref={inputRef}
             aria-label="給油量（L）"
+            aria-describedby={errorMessage ? `${descriptionId} ${errorId}` : descriptionId}
+            aria-invalid={!!errorMessage}
             inputMode="decimal"
             placeholder="給油量（L）"
             value={value}
-            onChange={e => setValue(e.target.value.replace(/[^\d.]/g, ''))}
+            onChange={e => updateValue(e.target.value)}
+            onCompositionStart={() => {
+              composingRef.current = true;
+              setComposing(true);
+            }}
+            onCompositionEnd={e => {
+              updateValue(e.currentTarget.value);
+              composingRef.current = false;
+              setComposing(false);
+            }}
             style={{
               flex: 1,
               minWidth: 0,
@@ -79,6 +115,11 @@ export default function FuelDialog({ open, onCancel, onConfirm }: FuelDialogProp
           />
           <span style={{ opacity: 0.85 }}>L</span>
         </div>
+        {errorMessage && (
+          <div id={errorId} role="alert" style={{ color: '#fecaca', marginTop: 8 }}>
+            {errorMessage}
+          </div>
+        )}
         <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 16 }}>
           <button type="button" onClick={onCancel} style={{ minHeight: 48, padding: '10px 14px', borderRadius: 12 }}>
             戻る
@@ -86,11 +127,7 @@ export default function FuelDialog({ open, onCancel, onConfirm }: FuelDialogProp
           <button
             type="button"
             disabled={!canConfirm}
-            onClick={() => {
-              const n = Number(value);
-              if (!Number.isFinite(n) || n <= 0) return;
-              onConfirm(n);
-            }}
+            onClick={confirm}
             style={{ minHeight: 48, padding: '10px 14px', borderRadius: 12, fontWeight: 800 }}
           >
             記録

@@ -52,6 +52,8 @@ import {
 import { buildTripDetailLocationInfo } from './tripDetailLocationInfo';
 import { TripRecordedTimes } from './TripRecordedTimes';
 import { commitTripDetailOperationalMutation } from './tripDetailOperationalMutation';
+import { toJapanTimeInput, resolveTripDetailTimeEdit } from './tripDetailTimeInput';
+import { parseFuelInput } from '../components/fuelInput';
 import {
   createTripDetailReportSnapshotPersistence,
 } from './tripDetailReportSnapshot';
@@ -65,7 +67,9 @@ import {
 function fmtLocal(ts?: string) {
   if (!ts) return '-';
   const d = new Date(ts);
+  if (!Number.isFinite(d.getTime())) return '-';
   return new Intl.DateTimeFormat('ja-JP', {
+    timeZone: 'Asia/Tokyo',
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
@@ -578,30 +582,24 @@ export default function TripDetail() {
   const [vm, setVm] = useState<TripViewModel | null>(null);
   const [events, setEvents] = useState<AppEvent[]>([]);
   const [err, setErr] = useState<string | null>(null);
-  const [editing, setEditing] = useState<{ id: string; value: string } | null>(null);
+  const [editing, setEditing] = useState<{ id: string; value: string; originalTs: string } | null>(null);
   const [typeEditing, setTypeEditing] = useState<{ id: string; value: EventType } | null>(null);
   const [addressEditing, setAddressEditing] = useState<{ id: string; value: string } | null>(null);
   const [numberEditing, setNumberEditing] = useState<{ id: string; field: NumericEditField; value: string } | null>(null);
   const [icEditing, setIcEditing] = useState<IcEditState | null>(null);
   const icSearchRequestRef = useRef(0);
   const [saving, setSaving] = useState(false);
+  const inputSaveInFlightRef = useRef(false);
+  const numberInputComposingRef = useRef(false);
+  const [numberInputComposing, setNumberInputComposing] = useState(false);
+  const fuelEditResult = numberEditing?.field === 'liters' ? parseFuelInput(numberEditing.value) : null;
+  const fuelEditError = !numberInputComposing && fuelEditResult && !fuelEditResult.ok ? fuelEditResult.error : null;
   const [deleting, setDeleting] = useState(false);
   const [workingId, setWorkingId] = useState<string | null>(null);
   const [openEditorId, setOpenEditorId] = useState<string | null>(null);
   const [selectedDayIndex, setSelectedDayIndex] = useState(0);
   const [reportNow, setReportNow] = useState(() => Date.now());
   const reportSnapshotPersistenceRef = useRef<ReturnType<typeof createTripDetailReportSnapshotPersistence> | null>(null);
-
-  function toLocalInputValue(ts: string) {
-    const d = new Date(ts);
-    const iso = d.toISOString();
-    return iso.slice(0, 16); // YYYY-MM-DDTHH:mm
-  }
-
-  function fromLocalInputValue(v: string) {
-    const d = new Date(v);
-    return isNaN(d.getTime()) ? null : d.toISOString();
-  }
 
   async function load() {
     if (!tripId) return;
@@ -739,12 +737,17 @@ export default function TripDetail() {
   }, [events, tripId, vm]);
 
   async function handleSaveTime() {
-    if (!editing) return;
-    const iso = fromLocalInputValue(editing.value);
-    if (!iso) {
-      alert('日時の形式が不正です');
+    if (!editing || saving || inputSaveInFlightRef.current) return;
+    const result = resolveTripDetailTimeEdit(editing.originalTs, editing.value);
+    if (result.kind === 'invalid') {
+      alert('日本時間で有効な日時を入力してください。');
       return;
     }
+    if (result.kind === 'unchanged') {
+      setEditing(null);
+      return;
+    }
+    const iso = result.iso;
     const sorted = [...events].sort((a, b) => a.ts.localeCompare(b.ts));
     const idx = sorted.findIndex(e => e.id === editing.id);
     const prev = idx > 0 ? sorted[idx - 1] : null;
@@ -761,6 +764,7 @@ export default function TripDetail() {
       );
       if (!ok) return;
     }
+    inputSaveInFlightRef.current = true;
     setSaving(true);
     setWorkingId(editing.id);
     try {
@@ -775,6 +779,7 @@ export default function TripDetail() {
     } finally {
       setSaving(false);
       setWorkingId(null);
+      inputSaveInFlightRef.current = false;
     }
   }
 
@@ -872,13 +877,19 @@ export default function TripDetail() {
   }
 
   async function handleSaveNumber() {
-    if (!numberEditing) return;
+    if (!numberEditing || saving || inputSaveInFlightRef.current) return;
+    if (numberEditing.field === 'liters' && numberInputComposingRef.current) return;
+    const fuel = numberEditing.field === 'liters' ? parseFuelInput(numberEditing.value) : null;
+    if (fuel && !fuel.ok) {
+      alert(fuel.error);
+      return;
+    }
     const raw = numberEditing.value.trim();
     if (!raw) {
       alert('数値を入力してください');
       return;
     }
-    const parsed = Number(raw);
+    const parsed = fuel?.ok ? fuel.liters : Number(raw);
     if (!Number.isFinite(parsed)) {
       alert('数値の形式が不正です');
       return;
@@ -891,6 +902,7 @@ export default function TripDetail() {
       alert('給油量が不正です');
       return;
     }
+    inputSaveInFlightRef.current = true;
     setSaving(true);
     setWorkingId(numberEditing.id);
     try {
@@ -906,6 +918,7 @@ export default function TripDetail() {
     } finally {
       setSaving(false);
       setWorkingId(null);
+      inputSaveInFlightRef.current = false;
     }
   }
 
@@ -1310,13 +1323,14 @@ export default function TripDetail() {
                             </div>
 
                             <div className="trip-edit__section">
-                              <div className="trip-edit__label">時間</div>
+                              <label className="trip-edit__label" htmlFor={`trip-time-${ev.id}`}>日時（日本時間）</label>
                               {timeEditing ? (
                                 <div className="trip-edit__stack">
                                   <input
+                                    id={`trip-time-${ev.id}`}
                                     type="datetime-local"
                                     value={editing.value}
-                                    onChange={e => setEditing({ id: ev.id, value: e.target.value })}
+                                    onChange={e => setEditing({ ...editing, value: e.target.value })}
                                     disabled={saving}
                                     className="trip-input"
                                   />
@@ -1330,7 +1344,7 @@ export default function TripDetail() {
                                   <div>{fmtLocal(ev.ts)}</div>
                                   <div className="trip-edit__inline-actions">
                                     <button
-                                      onClick={() => setEditing({ id: ev.id, value: toLocalInputValue(ev.ts) })}
+                                      onClick={() => setEditing({ id: ev.id, value: toJapanTimeInput(ev.ts), originalTs: ev.ts })}
                                       disabled={saving}
                                       className="trip-btn"
                                     >
@@ -1343,21 +1357,43 @@ export default function TripDetail() {
 
                             {numDef && (
                               <div className="trip-edit__section">
-                                <div className="trip-edit__label">{numDef.label}</div>
+                                <label className="trip-edit__label" htmlFor={`trip-number-${ev.id}`}>{numDef.label}</label>
                                 {numberEditingActive ? (
                                   <div className="trip-edit__stack">
                                     <input
-                                      type="number"
+                                      id={`trip-number-${ev.id}`}
+                                      type={numDef.field === 'liters' ? 'text' : 'number'}
+                                      inputMode={numDef.field === 'liters' ? 'decimal' : undefined}
                                       value={numberEditing?.value ?? ''}
-                                      min={numDef.min}
-                                      step={numDef.step}
+                                      min={numDef.field === 'liters' ? undefined : numDef.min}
+                                      step={numDef.field === 'liters' ? undefined : numDef.step}
+                                      aria-invalid={numDef.field === 'liters' && !!fuelEditError}
+                                      aria-describedby={numDef.field === 'liters' && fuelEditError ? `trip-fuel-error-${ev.id}` : undefined}
                                       onChange={e => setNumberEditing({ id: ev.id, field: numDef.field, value: e.target.value })}
+                                      onCompositionStart={() => {
+                                        if (numDef.field !== 'liters') return;
+                                        numberInputComposingRef.current = true;
+                                        setNumberInputComposing(true);
+                                      }}
+                                      onCompositionEnd={e => {
+                                        if (numDef.field !== 'liters') return;
+                                        numberInputComposingRef.current = false;
+                                        setNumberInputComposing(false);
+                                        setNumberEditing({ id: ev.id, field: numDef.field, value: e.currentTarget.value });
+                                      }}
                                       disabled={saving}
                                       className="trip-input"
                                     />
+                                    {numDef.field === 'liters' && fuelEditError && (
+                                      <div id={`trip-fuel-error-${ev.id}`} role="alert">{fuelEditError}</div>
+                                    )}
                                     <div className="trip-edit__inline-actions">
-                                      <button onClick={handleSaveNumber} disabled={saving} className="trip-btn">保存</button>
-                                      <button onClick={() => setNumberEditing(null)} disabled={saving} className="trip-btn trip-btn--ghost">取消</button>
+                                      <button onClick={handleSaveNumber} disabled={saving || (numDef.field === 'liters' && (numberInputComposing || !!fuelEditError))} className="trip-btn">保存</button>
+                                      <button onClick={() => {
+                                        setNumberEditing(null);
+                                        numberInputComposingRef.current = false;
+                                        setNumberInputComposing(false);
+                                      }} disabled={saving} className="trip-btn trip-btn--ghost">取消</button>
                                     </div>
                                   </div>
                                 ) : (
@@ -1365,13 +1401,15 @@ export default function TripDetail() {
                                     <div>{numDef.value ?? '-'}</div>
                                     <div className="trip-edit__inline-actions">
                                       <button
-                                        onClick={() =>
+                                        onClick={() => {
+                                          numberInputComposingRef.current = false;
+                                          setNumberInputComposing(false);
                                           setNumberEditing({
                                             id: ev.id,
                                             field: numDef.field,
                                             value: numDef.value != null ? String(numDef.value) : '',
-                                          })
-                                        }
+                                          });
+                                        }}
                                         disabled={saving}
                                         className="trip-btn"
                                       >

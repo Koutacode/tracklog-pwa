@@ -67,158 +67,103 @@ function katakanaToHiragana(text: string): string {
   return text.replace(/[ァ-ヶ]/g, ch => String.fromCharCode(ch.charCodeAt(0) - 0x60));
 }
 
-function normalizeVoiceText(raw: string): string {
-  const converted = toHalfWidthDigits(raw)
+// Only explicitly supported affirmative sentences are commands. Keep separators
+// intact so distinct numbers, decimal points and later clauses cannot be joined.
+function normalizeVoiceText(raw: string): string | null {
+  if (/[\r\n\u2028\u2029]/u.test(raw)) return null;
+  const text = toHalfWidthDigits(raw).trim().toLowerCase();
+  if (!text) return null;
+  return text
+    .replace(/[。！!]$/u, '')
     .trim()
-    .replace(/[。．\.、,！!？?\s　:：]/g, '');
-  return converted.toLowerCase();
+    .replace(/(?:してください|して下さい|お願いします|します|です)$/u, '')
+    .trim();
 }
 
-function parseOdoKm(digits: string | undefined): number | undefined {
-  if (!digits) return undefined;
-  const n = Number(digits);
-  if (!Number.isFinite(n) || n <= 0) return undefined;
-  return Math.round(n);
-}
+const COMMAND_ALIASES: ReadonlyArray<{
+  kind: VoiceCommandKind;
+  aliases: readonly string[];
+  acceptsOdo?: boolean;
+}> = [
+  { kind: 'geo_refresh', aliases: ['現在地更新', '位置情報更新', '現在地', '位置更新'] },
+  { kind: 'expressway_keep', aliases: ['高速継続', '高速道路継続', 'まだ高速中', '継続'] },
+  { kind: 'expressway_end', aliases: ['高速道路終了', '高速終了'] },
+  { kind: 'expressway_start', aliases: ['高速道路開始', '高速開始'] },
+  { kind: 'load_start', aliases: ['積込開始', '積み込み開始', 'つみこみ開始'] },
+  { kind: 'load_end', aliases: ['積込終了', '積み込み終了', 'つみこみ終了'] },
+  { kind: 'unload_start', aliases: ['荷卸開始', '荷卸し開始', '荷降ろし開始', '荷下ろし開始', '荷おろし開始', 'におろし開始'] },
+  { kind: 'unload_end', aliases: ['荷卸終了', '荷卸し終了', '荷降ろし終了', '荷下ろし終了', '荷おろし終了', 'におろし終了'] },
+  { kind: 'break_start', aliases: ['休憩開始'] },
+  { kind: 'break_end', aliases: ['休憩終了'] },
+  { kind: 'rest_end', aliases: ['休息終了'] },
+  { kind: 'rest_start', aliases: ['休息開始'], acceptsOdo: true },
+  { kind: 'trip_end', aliases: ['運行終了'], acceptsOdo: true },
+  { kind: 'trip_start', aliases: ['運行開始', '出発'], acceptsOdo: true },
+  { kind: 'disembark', aliases: ['フェリー下船', '下船'] },
+  { kind: 'boarding', aliases: ['乗船', 'フェリー乗船'] },
+  { kind: 'point_mark', aliases: ['地点マーク', '地点記録', 'ポイントマーク'] },
+];
 
-function pickLongest(matches: string[] | null): string | undefined {
-  if (!matches || matches.length === 0) return undefined;
-  return matches.reduce((best, cur) => (cur.length > best.length ? cur : best), matches[0]);
-}
-
-function extractAsciiDigits(text: string): string | undefined {
-  const match = text.match(/(\d{1,7}(?:\.\d+)?)/);
-  if (!match) return undefined;
-  return match[1];
-}
-
-function extractKanjiDigits(text: string): string | undefined {
-  const longest = pickLongest(text.match(/[〇零一二三四五六七八九]{2,7}/g));
-  if (!longest) return undefined;
-  return longest
-    .split('')
-    .map(ch => KANJI_DIGIT_MAP[ch] ?? '')
-    .join('');
-}
-
-function extractSpokenDigits(text: string): string | undefined {
-  const hira = katakanaToHiragana(text).replace(/[^ぁ-ん]/g, '');
-  if (!hira) return undefined;
-  let best = '';
-  for (let start = 0; start < hira.length; start++) {
-    let cursor = start;
-    let digits = '';
-    while (cursor < hira.length && digits.length < 7) {
-      let matched = false;
-      for (const [pattern, digit] of SPOKEN_DIGIT_PATTERNS) {
-        if (!hira.startsWith(pattern, cursor)) continue;
-        digits += digit;
-        cursor += pattern.length;
-        matched = true;
-        break;
-      }
-      if (!matched) break;
-      if (digits.length > best.length) {
-        best = digits;
-      }
-    }
+function parseSpokenDigitSequence(text: string): string | null {
+  const hiragana = katakanaToHiragana(text);
+  let cursor = 0;
+  let digits = '';
+  while (cursor < hiragana.length) {
+    const token = SPOKEN_DIGIT_PATTERNS.find(([word]) => hiragana.startsWith(word, cursor));
+    if (!token) return null;
+    digits += token[1];
+    if (digits.length > 7) return null;
+    cursor += token[0].length;
+    while (hiragana[cursor] === ' ' || hiragana[cursor] === '　') cursor++;
   }
-  return best.length >= 2 ? best : undefined;
+  return digits.length >= 2 ? digits : null;
 }
 
-function extractOdoKm(text: string): number | undefined {
-  const normalized = toHalfWidthDigits(text);
-  const asciiDigits = extractAsciiDigits(normalized);
-  if (asciiDigits) return parseOdoKm(asciiDigits);
-  const kanjiDigits = extractKanjiDigits(normalized);
-  if (kanjiDigits) return parseOdoKm(kanjiDigits);
-  const spokenDigits = extractSpokenDigits(normalized);
-  if (spokenDigits) return parseOdoKm(spokenDigits);
-  return undefined;
-}
-
-function extractOdoKmAfterKeywords(text: string, keywords: string[]): number | undefined {
-  for (const keyword of keywords) {
-    const idx = text.indexOf(keyword);
-    if (idx < 0) continue;
-    const tail = text.slice(idx + keyword.length);
-    const parsed = extractOdoKm(tail);
-    if (parsed != null) return parsed;
+function parseWholeOdo(text: string): number | null {
+  const value = text
+    .replace(/^(?:オドメーター|オド|odo|メーター)[ 　]*(?:は|[:：])?[ 　]*/u, '')
+    .replace(/[ 　]*(?:km|キロメートル|キロ)$/u, '')
+    .trim();
+  let digits: string | null = null;
+  if (/^[0-9]{1,7}$/u.test(value)) {
+    digits = value;
+  } else if (/^[〇零一二三四五六七八九]{2,7}$/u.test(value)) {
+    digits = [...value].map(character => KANJI_DIGIT_MAP[character]).join('');
+  } else {
+    digits = parseSpokenDigitSequence(value);
   }
-  return extractOdoKm(text);
-}
-
-function includesAny(text: string, patterns: string[]) {
-  return patterns.some(p => text.includes(p));
+  if (digits == null) return null;
+  const odoKm = Number(digits);
+  return Number.isSafeInteger(odoKm) && odoKm > 0 ? odoKm : null;
 }
 
 export function parseVoiceCommand(raw: string): VoiceCommand | null {
   const text = normalizeVoiceText(raw);
   if (!text) return null;
-
-  if (includesAny(text, ['現在地更新', '位置情報更新', '現在地', '位置更新'])) {
-    return { kind: 'geo_refresh', raw };
-  }
-  if (includesAny(text, ['高速継続', '高速道路継続', 'まだ高速中', '継続'])) {
-    return { kind: 'expressway_keep', raw };
-  }
-  if (includesAny(text, ['高速道路終了', '高速終了'])) {
-    return { kind: 'expressway_end', raw };
-  }
-  if (includesAny(text, ['高速道路開始', '高速開始'])) {
-    return { kind: 'expressway_start', raw };
-  }
-  if (includesAny(text, ['積込開始', '積み込み開始', 'つみこみ開始'])) {
-    return { kind: 'load_start', raw };
-  }
-  if (includesAny(text, ['積込終了', '積み込み終了', 'つみこみ終了'])) {
-    return { kind: 'load_end', raw };
-  }
-  if (includesAny(text, ['荷卸開始', '荷下ろし開始', 'におろし開始'])) {
-    return { kind: 'unload_start', raw };
-  }
-  if (includesAny(text, ['荷卸終了', '荷下ろし終了', 'におろし終了'])) {
-    return { kind: 'unload_end', raw };
-  }
-  if (includesAny(text, ['休憩開始'])) {
-    return { kind: 'break_start', raw };
-  }
-  if (includesAny(text, ['休憩終了'])) {
-    return { kind: 'break_end', raw };
-  }
-  if (includesAny(text, ['休息終了'])) {
-    return { kind: 'rest_end', raw };
-  }
-  if (includesAny(text, ['休息開始'])) {
-    const odoKm = extractOdoKmAfterKeywords(text, ['休息開始']);
-    return { kind: 'rest_start', raw, odoKm };
-  }
-  if (includesAny(text, ['運行終了'])) {
-    const odoKm = extractOdoKmAfterKeywords(text, ['運行終了']);
-    return { kind: 'trip_end', raw, odoKm };
-  }
-  if (includesAny(text, ['運行開始', '出発'])) {
-    const odoKm = extractOdoKmAfterKeywords(text, ['運行開始', '出発']);
-    return { kind: 'trip_start', raw, odoKm };
-  }
-  if (includesAny(text, ['フェリー下船', '下船'])) {
-    return { kind: 'disembark', raw };
-  }
-  if (includesAny(text, ['乗船'])) {
-    return { kind: 'boarding', raw };
-  }
-  if (includesAny(text, ['地点マーク', '地点記録', 'ポイントマーク'])) {
-    return { kind: 'point_mark', raw };
+  for (const command of COMMAND_ALIASES) {
+    for (const alias of command.aliases) {
+      if (text === alias) return { kind: command.kind, raw };
+      if (!command.acceptsOdo) continue;
+      // A command must be at the beginning, with the entire remainder being one
+      // valid ODO expression. An invalid ODO must never become a missing ODO.
+      const match = text.match(new RegExp(`^${alias}([\\s\\S]+)$`, 'u'));
+      if (!match) continue;
+      const odoKm = parseWholeOdo(match[1].trim());
+      if (odoKm != null) return { kind: command.kind, raw, odoKm };
+    }
   }
   return null;
 }
 
 export function findVoiceCommand(matches: string[]): VoiceCommand | null {
-  for (const candidate of matches) {
+  if (matches.length === 0) return null;
+  const first = parseVoiceCommand(matches[0]);
+  if (!first) return null;
+  for (const candidate of matches.slice(1)) {
     const parsed = parseVoiceCommand(candidate);
-    if (parsed) return parsed;
+    if (!parsed || parsed.kind !== first.kind || parsed.odoKm !== first.odoKm) return null;
   }
-  return null;
+  return first;
 }
 
 export async function checkVoiceRecognitionAvailable(): Promise<boolean> {
