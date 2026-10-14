@@ -266,10 +266,14 @@ export function DayReportSummary({
               <div key={item.key} className={`trip-day-location${item.expressway ? ' trip-day-location--expressway' : ''}`}>
                 <div className="trip-day-location__head">
                   <strong>{item.label}</strong>
-                  <time>{item.time}</time>
+                  <time dateTime={item.recordedTs}>{item.time}</time>
                 </div>
                 {item.icDisplay && <div className="trip-day-location__ic">IC: {item.icDisplay.label}</div>}
-                {item.address && <div className="trip-day-location__address">住所: {item.address}</div>}
+                {item.address ? (
+                  <div className="trip-day-location__address">住所: {item.address}</div>
+                ) : item.recordedTs && (
+                  <div className="trip-day-location__address">住所未取得</div>
+                )}
               </div>
             ))}
           </div>
