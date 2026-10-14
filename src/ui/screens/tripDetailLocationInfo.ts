@@ -5,6 +5,7 @@ export type TripDetailLocationInfo = {
   key: string;
   label: string;
   time: string;
+  recordedTs?: string;
   icName?: string;
   icDisplay?: ExpresswayIcDisplay;
   address?: string;
@@ -33,6 +34,10 @@ const LOCATION_EVENT_LABELS: Record<string, string> = {
   expressway: '高速道路',
 };
 
+const recordedTimeFormatter = new Intl.DateTimeFormat('ja-JP', {
+  timeZone: 'Asia/Tokyo', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+});
+
 function getExtraString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
 }
@@ -41,18 +46,24 @@ export function buildTripDetailLocationInfo(
   timeline: ProjectedReportTimelineEvent[],
 ): TripDetailLocationInfo[] {
   return timeline.flatMap(({ event, effectiveMinute }, index) => {
+    const recordedBoundary = event.type === 'trip_start' || event.type === 'trip_end';
+    if (recordedBoundary && !Number.isFinite(Date.parse(event.ts))) return [];
+    const recordedTs = recordedBoundary ? event.ts : undefined;
+    const address = recordedBoundary ? getExtraString(event.address) : event.address;
     const expressway = event.type === 'expressway_start'
       || event.type === 'expressway_end'
       || event.type === 'expressway';
     const icName = expressway ? getExtraString(event.extras?.icName) : undefined;
-    if (!expressway && !event.address) return [];
+    if (!recordedBoundary && !expressway && !address) return [];
     return [{
       key: `${event.type}-${event.ts}-${index}`,
       label: LOCATION_EVENT_LABELS[event.type] ?? '記録地点',
-      time: formatReportMinute(effectiveMinute),
+      // Trip boundaries show saved occurrence times, independent of report rounding.
+      time: recordedTs ? recordedTimeFormatter.format(new Date(recordedTs)) : formatReportMinute(effectiveMinute),
+      recordedTs,
       icName,
       icDisplay: expressway ? getExpresswayIcDisplay(event.extras) : undefined,
-      address: event.address,
+      address,
       expressway,
     }];
   });
