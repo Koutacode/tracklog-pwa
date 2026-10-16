@@ -21,7 +21,7 @@
 
 利用できる正式ツールには、この別Cloud workspaceのファイルを直接ダウンロードする機能がなく、成果物リンクにも取得用HTTPS URLは付いていなかった。不完全な実行ログからコードを再構築しない。
 
-利用者から「許可する」と明示回答を受け、完成差分を作業ブランチへcommit/pushする依頼を相手チャットへ送信し、受け渡しが完了した。APK公開承認も有効であり、追加の公開確認は不要。
+承認を得て、完成差分を作業ブランチへcommit/pushする依頼を相手チャットへ送信し、受け渡しが完了した。APK公開承認も有効であり、追加の公開確認は不要。
 
 ローカルのDisk IO側20ファイルは `cb8510257dd39feda6fdeeba0eac643759bf37e2` に保存済み。公開環境の再確認でNode 22.19.0、JDK 21.0.10、PowerShell 7、Android Build Tools 34.0.0/35.0.0を確認した。公開latestはv0.1.63、code61、次版候補v0.1.64/code62。統合後SHAのCIとRelease全体の成功を別途確認する。
 
@@ -61,7 +61,7 @@ PR #12の初回CI（run 36791477150 / HEAD 575d596）はAndroid・temporary-work
 
 ## 利用者から追加された作業範囲
 
-今回の公開APKは接続携帯へinstall -rで導入する。更新前はSCG34 / v0.1.63 / code61、nativeとWebViewのactive tripなし、初回install日時を確認し、既定output/device-backupへ退避した。退避は稼働中取得で復元試験は未実施。
+今回の公開APKは接続携帯へinstall -rで導入する。更新前はAndroid端末 / v0.1.63 / code61、nativeとWebViewのactive tripなし、初回install日時を確認し、既定output/device-backupへ退避した。退避は稼働中取得で復元試験は未実施。
 
 公開・実機更新後に、Cloudでの編集からpush・正式workflow公開・照合・Drive保存までを再現可能にする環境と共有専用スキルを整備すること、今後のTrackLog改善のpush/公開を任せること、正式APKとSHAをGoogle Driveにも保存することが利用者から明示された。署名鍵や端末退避データはDrive保存対象に含めない。
 
@@ -73,9 +73,9 @@ PR #12の初回CI（run 36791477150 / HEAD 575d596）はAndroid・temporary-work
 
 Windows `npm run release:verify:apk -- -Tag v0.1.64`が成功し、同じ公開APKでoutputを更新。公開SHA sidecarも独立取得して一致した。package `com.tracklog.assist`、version 0.1.64、code62、7,422,451 bytes、APK SHA-256 `f3a90bb274e4cfef76909104cf30e50f515cfcf0b13eccd6f662e1f6997787c1`、従来署名 `14121cbf70043af3bd2fe17dd57833ed51b7f5dbf326459dde6b830f07cbb99c`。会社配布URLは既定latest URLのみ。
 
-SCG34は更新直前にnative/WebView/ホームで運行なしを再確認し、08:57:56 JSTに `adb install -r` 成功。端末APK SHA・署名・version/code一致、firstInstallTime不変。既存events1,747、routePoints265,822、reports16、削除tombstone69/11/16を保持し、ログイン・承認・native readiness正常。位置/背景位置/通知/Exact Alarmと電池最適化除外を維持。バックグラウンドでもprocess/foreground serviceを維持し、運行外のGPS listener0、位置点・最終受理/書き込み時刻不変、queue0、保存失敗0。取得ログのFATAL/crash/ANR0。ホームに戻し、ADB forwardと検証用一時領域は片付けた。
+更新直前に非運行を確認し、検証済み公開APKでデータ保持更新を実施した。既存データ・ログイン・権限の保持、背景待機と運行外の位置取得停止、対象ログでクラッシュ・ANRがないことを確認した。診断用の一時領域は片付けた。
 
-端末退避 `output/device-backup/pre-v0.1.64-20261001.tar`（200,221,184 bytes / SHA-256 `3cb08892f43801cd1f76a23383f0b8ee0ede59b21b4523752bb2f65ecb3990e4`）はローカルのみ保持。稼働中退避・復元未試験。実走、実通知受信、複数端末の実E2E、通信断/OS強制終了からの復旧は未検証であり、単体試験やidle確認で代用したとは扱わない。
+端末バックアップは非公開のローカルに保持。稼働中退避・復元未試験。実走、実通知受信、複数端末の実E2E、通信断/OS強制終了からの復旧は未検証であり、単体試験やidle確認で代用したとは扱わない。
 
 ## Cloud公開手順の整備
 
@@ -87,7 +87,7 @@ Cloud手順PR [#13](https://github.com/Koutacode/tracklog-pwa/pull/13) / `ee0ccf
 
 既存非公開Cloud環境「TrackLog-修復」を公式UIで編集し、Install scriptにrepoセットアップ、Start skillに共有skillと承認範囲・検証/公開/Drive手順を保存。`TRACKLOG_CLOUD_DEV_ROOT=/workspace/tracklog-tools/cloud-dev` とその `taskdev-env.sh` を使う。再公開は画面で `Environment published` / `Published` を確認した。ただしセットアップ会話は再公開前後とも実行開始前に `Unable to determine project root for task` となり、Cloudの実JDK/SDK導入・同環境でのAndroidコンパイル・Linux公開APK実検証は未確認。CIの成功と区別する。設定UIにrepository mount_path編集欄は見つからず、内部API探索や別cloneで迂回していない。
 
-新しい通常Cloudチャットの受入試験について利用者から「Cloudチャットを作成して検証する」と明示回答を受けた。再公開済み「TrackLog-修復」で通常タスク開始を試したが、同じroot特定エラーで実行前に失敗し、通常タスクのIDは作成されなかった。元の入力下書きは復元し、空白を正規化した内容一致を確認した。
+新しい通常Cloudチャットの受入試験について通常タスク作成による検証の承認を得た。再公開済み「TrackLog-修復」で通常タスク開始を試したが、同じroot特定エラーで実行前に失敗し、通常タスクのIDは作成されなかった。元の入力下書きは復元し、空白を正規化した内容一致を確認した。
 
 既存環境を残し、公式作成UIで同じ `Koutacode/tracklog-pwa` / mainを選んで新規セットアップを開始した。セットアップチャット `01a0f4d2-29e2-7420-9e82-b832e6ae208b` は09:16 JSTにコマンド実行まで進んだ。既存環境固有の問題かを比較する試験であり、まだ通常タスクの受入成功とは扱わない。新環境名は「TrackLog-APK」、非公開を維持し、アプリ変更・新Releaseを作らないよう依頼した。Cloudは基本的に高速モードが使えないという利用者の補足も共有skillとガイドへ反映した。
 
@@ -101,11 +101,11 @@ Node公式配布先403はnpm integrity付き配布、JDKは署名/パッケー�
 
 実際の推論量の設定は変更済みとは報告しない。単純setup/検証は軽でも実行可能、複雑な同期/SQL/認証設計・公開前レビューは利用可能な高を基本とする方針を共有skillとStart skillに保存した。携帯は更新/QA完了後に利用者が接続解除すると連絡したため、以後実機接続を前提とした追加作業はしない。
 
-正式APKとSHA sidecarを [Drive v0.1.64保管フォルダー](https://drive.google.com/drive/folders/1EBCMfIoQ0E3hR7AS_1BcSuGQuvm1by8X) へ保存した（TrackLog/30_リリース・検証/2026/10/v0.1.64）。両ファイル非公開、ownerのみ。DriveからAPKを再取得し7,422,451 bytes / SHA-256が公開・ローカル・端末と完全一致、sidecarも読み戻し一致。既存[10月月次ログ](https://docs.google.com/document/d/1NdOdWZS8nmvOArd8anaCr7qcPP1v3vS_rtWGXp_d8bk/edit)へ公開・端末保持・Drive保存を追記し、既存全文保持/重複なしを確認した。
+正式APKとSHA sidecarを Drive v0.1.64保管フォルダー（非公開記録） へ保存した（TrackLog/30_リリース・検証/2026/10/v0.1.64）。両ファイル非公開、ownerのみ。DriveからAPKを再取得し7,422,451 bytes / SHA-256が公開・ローカル・端末と完全一致、sidecarも読み戻し一致。既存10月月次ログ（非公開記録）へ公開・端末保持・Drive保存を追記し、既存全文保持/重複なしを確認した。
 
 ### サポート送信の後続記録
 
-2026-10-01 09:51前後の追記: 利用者の「許可」により、公式Help Centerへ非秘密の再現資料を送信した。仮想アシスタントの案内で環境画面からの開始を1回比較したが、ホーム画面と同じroot特定エラーを確認。両環境／両経路の結果を返し、人間の担当者へのエスカレーションを操作して `Escalation requested` / `Escalated to a support specialist` を確認した。受付番号は未表示、数日以内の返信とメール通知が案内され、通常Cloud受入はまだ未完了。[送信と追加試験の詳細](CLOUD_START_BLOCKER_2026-10-01.md#公式サポートへの送信と追加試験)に記録した。アプリの正式v0.1.64公開・実機更新・Drive保存は完了済み。利用者の追加指示「最終的に公開まで」と、今後の改善依頼を正式公開まで進める共有skillの承認範囲を維持する。サポート資料の追記で新APKを作らない。
+2026-10-01 09:51前後の追記: 承認を得て、公式Help Centerへ非秘密の再現資料を送信した。仮想アシスタントの案内で環境画面からの開始を1回比較したが、ホーム画面と同じroot特定エラーを確認。両環境／両経路の結果を返し、人間の担当者へのエスカレーションを操作して `Escalation requested` / `Escalated to a support specialist` を確認した。受付番号は未表示、数日以内の返信とメール通知が案内され、通常Cloud受入はまだ未完了。[送信と追加試験の詳細](CLOUD_START_BLOCKER_2026-10-01.md#公式サポートへの送信と追加試験)に記録した。アプリの正式v0.1.64公開・実機更新・Drive保存は完了済み。正式公開まで進める方針と、今後の改善依頼を正式公開まで進める共有skillの承認範囲を維持する。サポート資料の追記で新APKを作らない。
 
 ### Cloud環境の保存構成を再公開
 

@@ -4,13 +4,13 @@
 
 ## 結果と反映状態
 
-**後続の反映状況（2026-10-01 09時台）**: 以下の初期調査・適用直後の数値は01:42〜01:54 JSTの記録。別チャットのIC名・時刻修正と統合し、v0.1.64/code62を正式公開、公開APK照合、SCG34へデータ保持更新、DriveへAPK/sha保存まで完了した。最終の証拠・全変更ファイル・Cloud整備は [INTEGRATED_APK_RELEASE_2026-10-01.md](INTEGRATED_APK_RELEASE_2026-10-01.md) を参照。下記の「未反映」「未操作」は初期調査時点の状態を示す。
+**後続の反映状況（2026-10-01 09時台）**: 以下の初期調査・適用直後の数値は01:42〜01:54 JSTの記録。別チャットのIC名・時刻修正と統合し、v0.1.64/code62を正式公開、公開APK照合、Android端末へデータ保持更新、DriveへAPK/sha保存まで完了した。最終の証拠・全変更ファイル・Cloud整備は [INTEGRATED_APK_RELEASE_2026-10-01.md](INTEGRATED_APK_RELEASE_2026-10-01.md) を参照。下記の「未反映」「未操作」は初期調査時点の状態を示す。
 
 - 2026-10-01 01:53 JST、非破壊の関数差し替えを本番へ適用。migration: `20260930165335_tracklog_sync_v2_reduce_disk_io.sql`。DB側のfeed件数制限と60秒heartbeat抑制が反映済み。
 - 停車中の重複位置点抑制、30秒/100通知単位の同期、終端空RPC省略、offline復帰不具合の修正はローカルソースに実装・検証済み。公開APK・端末には未反映。
 - 課金プラン変更、索引削除、既存データ削除、retention導入、テーブルDROP、RLS変更、Edge/MCPの設定変更は実施していない。
 - Androidの公開APK、端末のログイン・運行データは操作していない。既存の未追跡 docs/CLOUD_RESEND_2026-10-01.md と error.log も変更していない。
-- Google Driveの既存構造 TrackLog / 10_作業ログ / 2026 / 10 の[月次作業ログ](https://docs.google.com/document/d/1NdOdWZS8nmvOArd8anaCr7qcPP1v3vS_rtWGXp_d8bk/edit)へ全文反映済み。変更19ファイル・計測・検証・復旧・未完了事項を読み戻して確認。非公開を維持。
+- Google Driveの既存構造 TrackLog / 10_作業ログ / 2026 / 10 の月次作業ログ（非公開記録）へ全文反映済み。変更19ファイル・計測・検証・復旧・未完了事項を読み戻して確認。非公開を維持。
 
 ## 本番基準値
 
