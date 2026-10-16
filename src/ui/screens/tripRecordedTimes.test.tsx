@@ -35,9 +35,9 @@ function renderLocations(source: AppEvent[]) {
 }
 
 const locationHtml = renderLocations([...events].reverse());
-assert.ok(locationHtml.includes(`<strong>運行終了地点</strong><time dateTime="${endTs}">00:37</time>`),
-  'the location section itself shows the saved addressless end, not just the separate recorded-times summary');
-assert.ok(locationHtml.includes(`<strong>運行開始地点</strong><time dateTime="${startTs}">23:02</time>`));
+assert.ok(locationHtml.includes(`<strong>運行終了地点</strong><time dateTime="${endTs}">00:30</time>`),
+  'the addressless end uses the report projection while retaining its saved timestamp');
+assert.ok(locationHtml.includes(`<strong>運行開始地点</strong><time dateTime="${startTs}">23:00</time>`));
 assert.equal((locationHtml.match(/住所未取得/g) ?? []).length, 2);
 assert.ok(locationHtml.indexOf('運行開始地点') < locationHtml.indexOf('運行終了地点'),
   'report projection orders start before end even if loaded events arrive in reverse order');
@@ -51,6 +51,25 @@ const withIc = renderLocations([...events, {
 }]);
 assert.ok(withIc.includes('IC: 合成IC'), 'existing IC presentation remains intact');
 assert.equal((withIc.match(/住所未取得/g) ?? []).length, 2, 'the boundary fallback does not change IC address presentation');
+
+const unroundedStartTs = '2026-09-30T02:57:00.000Z';
+const unroundedStart: AppEvent[] = [{ ...events[0]!, ts: unroundedStartTs, address: '合成開始地点' }];
+assert.ok(renderLocations(unroundedStart).includes(
+  `<strong>運行開始地点</strong><time dateTime="${unroundedStartTs}">12:00</time>`),
+  'the standard location section rounds the reported 11:57 start to 12:00');
+assert.ok(renderToStaticMarkup(<TripRecordedTimes events={unroundedStart} />).includes('2026/09/30 11:57'),
+  'the separate recorded-times summary still displays the original 11:57');
+
+const minimumEndTs = '2026-09-30T15:02:00.000Z';
+assert.ok(renderLocations([
+  { ...events[0]!, ts: '2026-09-30T14:45:00.000Z' },
+  { id: 'load-start', tripId, type: 'load_start', ts: '2026-09-30T14:58:00.000Z', syncStatus: 'synced',
+    extras: { reportMinDurationMinutes: 15, loadSessionId: 'midnight-minimum' } },
+  { id: 'load-end', tripId, type: 'load_end', ts: '2026-09-30T15:01:00.000Z', syncStatus: 'synced',
+    extras: { loadSessionId: 'midnight-minimum' } },
+  { ...events[1]!, ts: minimumEndTs },
+]).includes(`<strong>運行終了地点</strong><time dateTime="${minimumEndTs}">00:15</time>`),
+  'the rendered end location follows the minimum load duration across midnight');
 
 const trip = buildReportTripFromAppEvents({ tripId, events, dayRuns: [] });
 const metrics = computeTripDayMetrics(trip);
@@ -91,8 +110,8 @@ await withRemoteSyncSignalsSuppressed(async () => {
   const reloaded = await db.events.where('tripId').equals(started.tripId).toArray();
   assert.deepEqual(reloaded, saved, 'saved synthetic data survives database reopen unchanged');
   const reloadedHtml = renderLocations(reloaded);
-  assert.ok(reloadedHtml.includes(`<time dateTime="${correctedTs}">00:43</time>`),
-    'a saved manual correction is displayed exactly after reopening');
+  assert.ok(reloadedHtml.includes(`<time dateTime="${correctedTs}">00:45</time>`),
+    'a saved manual correction uses report rounding after reopening');
   assert.deepEqual(await db.events.where('tripId').equals(started.tripId).toArray(), saved,
     'rendering cannot write rounded times back to saved events');
   await deleteEvent(ended.event.id);
@@ -116,8 +135,8 @@ await withRemoteSyncSignalsSuppressed(async () => {
   });
   assert.equal(calls, 1, 'sync uses only the supplied in-memory transport');
   const synced = await db.events.where('tripId').equals(tripId).toArray();
-  assert.ok(renderLocations(synced).includes(`<time dateTime="${endTs}">00:37</time>`),
-    'the actual sync apply path retains and displays an addressless recorded end');
+  assert.ok(renderLocations(synced).includes(`<time dateTime="${endTs}">00:30</time>`),
+    'the actual sync apply path retains an addressless end and displays its report projection');
   assert.deepEqual(await db.events.where('tripId').equals(tripId).toArray(), synced);
 });
 db.close();

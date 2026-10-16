@@ -1,5 +1,10 @@
 import assert from 'node:assert/strict';
-import type { ProjectedReportTimelineEvent } from '../../domain/reportLogic';
+import {
+  buildReportTripFromAppEvents,
+  projectTripReportTimelines,
+  type ProjectedReportTimelineEvent,
+} from '../../domain/reportLogic';
+import type { AppEvent } from '../../domain/types';
 import { buildTripDetailLocationInfo } from './tripDetailLocationInfo';
 
 function assertEqual<T>(actual: T, expected: T, message: string) {
@@ -63,8 +68,8 @@ const original = structuredClone(boundaries);
 const locations = buildTripDetailLocationInfo(boundaries);
 assert.deepEqual(locations.map(row => row.label), ['運行開始地点', '運行終了地点'],
   'recorded start and end stay visible and ordered without addresses');
-assert.deepEqual(locations.map(row => row.time), ['23:02', '00:37'],
-  'boundary times use exact saved JST minutes across midnight, not rounded report minutes');
+assert.deepEqual(locations.map(row => row.time), ['23:00', '00:45'],
+  'boundary times use the supplied daily report projection across midnight');
 assert.deepEqual(locations.map(row => row.recordedTs), boundaries.map(row => row.event.ts),
   'the full original timestamps remain available to the rendered time elements');
 assert.ok(locations.every(row => row.address === undefined));
@@ -72,12 +77,12 @@ assert.deepEqual(boundaries, original, 'location presentation never changes reco
 
 const corrected = projected('trip_end', '2026-10-01T01:07:59.000Z', 675, '合成終了地点');
 const correctedRow = buildTripDetailLocationInfo([corrected])[0]!;
-assert.equal(correctedRow.time, '10:07', 'a saved manual correction wins over projected time');
+assert.equal(correctedRow.time, '11:15', 'boundary display follows the effective minute, including report adjustments');
 assert.equal(correctedRow.address, '合成終了地点', 'a recorded address remains visible');
 assert.equal(corrected.event.ts, '2026-10-01T01:07:59.000Z');
 assert.equal(buildTripDetailLocationInfo([
   projected('trip_end', '2026-09-30T15:00:00.000Z', 1440, '   '),
-])[0]?.time, '00:00', 'JST midnight is 00:00, not a projected 24:00');
+])[0]?.time, '24:00', 'the end of a report day retains its projected 24:00 boundary');
 assert.equal(buildTripDetailLocationInfo([
   projected('trip_end', '2026-09-30T15:00:00.000Z', 0, '   '),
 ])[0]?.address, undefined, 'blank boundary addresses are treated as unavailable');
@@ -104,4 +109,41 @@ assert.equal(ic.time, '10:00', 'IC times retain report rounding');
 assert.equal(ic.icDisplay?.label, '合成IC', 'an IC remains visible without an address');
 assert.equal(ic.recordedTs, undefined, 'ordinary IC rows do not acquire a trip-boundary timestamp');
 
-console.log('tripDetailLocationInfo: boundaries, exact JST, missing addresses and existing location regressions passed');
+function projectLocations(events: AppEvent[]) {
+  const trip = buildReportTripFromAppEvents({ tripId: 'rounded-locations', events, dayRuns: [] });
+  const projections = projectTripReportTimelines(trip.days);
+  return trip.days.flatMap(day => buildTripDetailLocationInfo(projections.get(day.dayIndex)?.events ?? []));
+}
+
+function recorded(
+  type: AppEvent['type'], ts: string, extras?: AppEvent['extras'],
+): AppEvent {
+  return { id: `${type}-${ts}`, tripId: 'rounded-locations', type, ts, extras, syncStatus: 'synced' };
+}
+
+const reportedStart = [
+  recorded('trip_start', '2026-10-16T02:57:00.000Z'),
+  recorded('trip_end', '2026-10-16T04:00:00.000Z'),
+];
+const originalStart = structuredClone(reportedStart);
+assert.equal(projectLocations(reportedStart)[0]?.time, '12:00',
+  'the reported 11:57 start displays 12:00 using the actual report projection');
+assert.deepEqual(reportedStart, originalStart, 'rounding never rewrites the original event timestamps');
+
+const midnightMinimum = [
+  recorded('trip_start', '2026-09-30T14:45:00.000Z'),
+  recorded('load_start', '2026-09-30T14:58:00.000Z', {
+    reportMinDurationMinutes: 15, loadSessionId: 'midnight-minimum',
+  }),
+  recorded('load_end', '2026-09-30T15:01:00.000Z', { loadSessionId: 'midnight-minimum' }),
+  recorded('trip_end', '2026-09-30T15:02:00.000Z'),
+];
+assert.equal(projectLocations(midnightMinimum).find(row => row.label === '運行終了地点')?.time, '00:15',
+  'the minimum load duration carries across midnight into the trip end location');
+assert.equal(projectLocations([
+  recorded('trip_start', '2026-09-30T13:00:00.000Z'),
+  recorded('trip_end', '2026-09-30T14:57:00.000Z'),
+]).find(row => row.label === '運行終了地点')?.time, '24:00',
+  'a real 23:57 end projects to the report day boundary at 24:00');
+
+console.log('tripDetailLocationInfo: report rounding, midnight minimums, recorded data and existing locations passed');
