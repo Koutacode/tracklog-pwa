@@ -34,10 +34,6 @@ const LOCATION_EVENT_LABELS: Record<string, string> = {
   expressway: '高速道路',
 };
 
-const recordedTimeFormatter = new Intl.DateTimeFormat('ja-JP', {
-  timeZone: 'Asia/Tokyo', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
-});
-
 function getExtraString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
 }
@@ -58,8 +54,8 @@ export function buildTripDetailLocationInfo(
     return [{
       key: `${event.type}-${event.ts}-${index}`,
       label: LOCATION_EVENT_LABELS[event.type] ?? '記録地点',
-      // Trip boundaries show saved occurrence times, independent of report rounding.
-      time: recordedTs ? recordedTimeFormatter.format(new Date(recordedTs)) : formatReportMinute(effectiveMinute),
+      // All location rows follow the daily report's rounding and minimum-duration projection.
+      time: formatReportMinute(effectiveMinute),
       recordedTs,
       icName,
       icDisplay: expressway ? getExpresswayIcDisplay(event.extras) : undefined,
