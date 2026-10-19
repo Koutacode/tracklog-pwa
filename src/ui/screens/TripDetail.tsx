@@ -271,7 +271,7 @@ export function DayReportSummary({
                 {item.icDisplay && <div className="trip-day-location__ic">IC: {item.icDisplay.label}</div>}
                 {item.address ? (
                   <div className="trip-day-location__address">住所: {item.address}</div>
-                ) : item.recordedTs && (
+                ) : item.addressUnavailable && (
                   <div className="trip-day-location__address">住所未取得</div>
                 )}
               </div>

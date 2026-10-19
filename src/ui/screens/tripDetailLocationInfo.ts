@@ -9,6 +9,7 @@ export type TripDetailLocationInfo = {
   icName?: string;
   icDisplay?: ExpresswayIcDisplay;
   address?: string;
+  addressUnavailable: boolean;
   expressway: boolean;
 };
 
@@ -45,12 +46,14 @@ export function buildTripDetailLocationInfo(
     const recordedBoundary = event.type === 'trip_start' || event.type === 'trip_end';
     if (recordedBoundary && !Number.isFinite(Date.parse(event.ts))) return [];
     const recordedTs = recordedBoundary ? event.ts : undefined;
-    const address = recordedBoundary ? getExtraString(event.address) : event.address;
+    const restOrFerryBoundary = event.type === 'rest_start' || event.type === 'rest_end'
+      || event.type === 'boarding' || event.type === 'disembark';
+    const address = recordedBoundary || restOrFerryBoundary ? getExtraString(event.address) : event.address;
     const expressway = event.type === 'expressway_start'
       || event.type === 'expressway_end'
       || event.type === 'expressway';
     const icName = expressway ? getExtraString(event.extras?.icName) : undefined;
-    if (!recordedBoundary && !expressway && !address) return [];
+    if (!recordedBoundary && !restOrFerryBoundary && !expressway && !address) return [];
     return [{
       key: `${event.type}-${event.ts}-${index}`,
       label: LOCATION_EVENT_LABELS[event.type] ?? '記録地点',
@@ -60,6 +63,7 @@ export function buildTripDetailLocationInfo(
       icName,
       icDisplay: expressway ? getExpresswayIcDisplay(event.extras) : undefined,
       address,
+      addressUnavailable: (recordedBoundary || restOrFerryBoundary) && !address,
       expressway,
     }];
   });

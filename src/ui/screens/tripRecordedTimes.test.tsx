@@ -52,6 +52,24 @@ const withIc = renderLocations([...events, {
 assert.ok(withIc.includes('IC: 合成IC'), 'existing IC presentation remains intact');
 assert.equal((withIc.match(/住所未取得/g) ?? []).length, 2, 'the boundary fallback does not change IC address presentation');
 
+const restFerryEvents: AppEvent[] = [
+  events[0]!,
+  ...(['rest_start', 'boarding', 'rest_end', 'disembark'] as const).map((type, index) => ({
+    id: `synthetic-${type}`, tripId, type,
+    ts: index < 2 ? '2026-09-30T14:10:00.000Z' : '2026-09-30T14:33:27.001Z',
+    syncStatus: 'synced' as const,
+    extras: { restSessionId: 'synthetic-rest', ferrySessionId: 'synthetic-ferry' },
+  })),
+  events[1]!,
+];
+const restFerrySnapshot = structuredClone(restFerryEvents);
+const restFerryHtml = renderLocations(restFerryEvents);
+for (const label of ['休息開始地点', 'フェリー乗船地点', '休息終了地点', 'フェリー下船地点']) {
+  assert.ok(restFerryHtml.includes(`<strong>${label}</strong>`), `${label} renders without a location`);
+}
+assert.equal((restFerryHtml.match(/住所未取得/g) ?? []).length, 6);
+assert.deepEqual(restFerryEvents, restFerrySnapshot, 'rendering preserves saved events');
+
 const unroundedStartTs = '2026-09-30T02:57:00.000Z';
 const unroundedStart: AppEvent[] = [{ ...events[0]!, ts: unroundedStartTs, address: '合成開始地点' }];
 assert.ok(renderLocations(unroundedStart).includes(
