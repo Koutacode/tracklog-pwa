@@ -125,7 +125,7 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v4
         with:
-          packages: platform-tools
+          packages: 'platform-tools build-tools;36.0.0'
 
       - name: Restore Firebase Android config
         env:
@@ -175,7 +175,7 @@ jobs:
         run: |
           set -euo pipefail
           cp android/app/build/outputs/apk/debug/app-debug.apk tracklog-assist-debug.apk
-          AAPT="$(find "$ANDROID_HOME/build-tools" -type f -name aapt | sort -V | tail -n 1)"
+          AAPT="$ANDROID_HOME/build-tools/36.0.0/aapt"
           BADGING="$($AAPT dump badging tracklog-assist-debug.apk | head -n 1)"
           EXPECTED_CODE="$(sed -n 's/^tracklogVersionCode=//p' android/gradle.properties | tr -d '\r')"
           echo "$BADGING"
@@ -189,7 +189,7 @@ jobs:
         run: |
           set -euo pipefail
           readonly EXPECTED_SIGNER_SHA256="14121cbf70043af3bd2fe17dd57833ed51b7f5dbf326459dde6b830f07cbb99c"
-          APKSIGNER="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -n 1)"
+          APKSIGNER="$ANDROID_HOME/build-tools/36.0.0/apksigner"
           if [ -z "$APKSIGNER" ] || [ ! -x "$APKSIGNER" ]; then
             echo "::error::Android apksigner was not found."
             exit 1
