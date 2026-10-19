@@ -147,3 +147,23 @@ assert.equal(projectLocations([
   'a real 23:57 end projects to the report day boundary at 24:00');
 
 console.log('tripDetailLocationInfo: report rounding, midnight minimums, recorded data and existing locations passed');
+
+const restFerryTypes = ['rest_start', 'boarding', 'rest_end', 'disembark'] as const;
+for (const address of [undefined, null, '', '   ', '合成港']) {
+  const source = restFerryTypes.map(type => ({
+    ...projected(type, '2026-10-18T09:03:27.001Z', 1080),
+    event: { type, ts: '2026-10-18T09:03:27.001Z', address, geo: null,
+      extras: { restSessionId: 'synthetic-rest', ferrySessionId: 'synthetic-ferry' } },
+  })) as ProjectedReportTimelineEvent[];
+  const snapshot = structuredClone(source);
+  const rows = buildTripDetailLocationInfo(source);
+  assert.deepEqual(rows.map(row => row.label), ['休息開始地点', 'フェリー乗船地点', '休息終了地点', 'フェリー下船地点']);
+  assert.equal(new Set(rows.map(row => row.key)).size, 4, 'simultaneous boundaries remain distinct');
+  assert.ok(rows.every(row => row.addressUnavailable === (address !== '合成港')));
+  assert.ok(rows.every(row => row.time === '18:00' && row.recordedTs === undefined));
+  assert.deepEqual(source, snapshot, 'presentation preserves timestamps, session IDs and null location data');
+}
+assert.deepEqual(buildTripDetailLocationInfo([
+  projected('drive_start', '2026-10-18T09:03:27.001Z', 1080),
+  projected('break_end', '2026-10-18T09:03:27.001Z', 1080),
+]), [], 'other addressless event types are not added');
