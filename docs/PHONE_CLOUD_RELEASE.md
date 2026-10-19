@@ -108,3 +108,9 @@ Cloud の CLI 認証が利用できない場合も、新しい資格情報・権
 Release の APK 準備・署名照合・draft 検証・公開後検証は Android Build Tools **36.0.0** を使用する。Linux の検証器は `ANDROID_HOME`（未指定なら `ANDROID_SDK_ROOT`）配下の同版を必須とし、PATH や最新インストール版へフォールバックしない。既存の Cloud セットアップも同版を準備する。
 
 2026-10-19 の Release run 39287532567 は、runner に追加された 37.0.0 の署名出力が `Signer #1` から `V2 Signer:` へ変わり、厳格な parser が 0 件と判定してタグ・draft 作成前に停止した。正式証明書で署名された既存実 APK でも同じ差を再現した。36.0.0 では同 APK の署名検証と固定証明書照合が成功する。parser の許容範囲は拡大せず、単一署名・既存証明書一致・検証コマンド成功を引き続き必須とする。
+
+### draft と公開 URL の検証
+
+Release #66 の draft asset は GitHub の `untagged-*` URL を返すため、公開前に正式タグ URL を要求すると停止する。draft の browser URL はダウンロードに使用しない。各アップロード成功応答の asset ID・名前・サイズ・SHA-256 digest をその run の状態へ保存し、同じ Release の asset 一覧と完全一致させ、固定の GitHub API asset ID 経路で実バイトを再取得する。サイズ・digest・ビルド時 SHA・sidecar・署名・package/version を検証してから公開する。公開後は従来通り正式タグ URL と latest URL を厳密に検証する。
+
+失敗した v0.1.77 のタグ・draft (Release 417534681) と APK は保持する。次候補 v0.1.78 / versionCode 76 は本人の追加承認に基づく新規配信とし、旧資産を再利用・削除・上書きしない。
