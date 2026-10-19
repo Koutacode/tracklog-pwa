@@ -1,9 +1,9 @@
 import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { createReadStream } from 'node:fs';
-import { access, copyFile, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, stat } from 'node:fs/promises';
+import { access, copyFile, lstat, mkdir, mkdtemp, readFile, rename, rm, stat } from 'node:fs/promises';
 import { constants } from 'node:fs';
-import { delimiter, join, resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
@@ -105,22 +105,18 @@ export async function runCommand(command, args) {
   }
 }
 
-async function locateAndroidTool(name, env) {
-  for (const directory of (env.PATH ?? '').split(delimiter).filter(Boolean)) {
-    const candidate = join(directory, name);
-    try { await access(candidate, constants.X_OK); return candidate; } catch { /* Try SDK paths. */ }
+// Keep the inspector output contract stable across runner image updates. Never
+// fall back to PATH or a newer SDK (Build Tools 37 changes signer labels).
+export const ANDROID_BUILD_TOOLS_VERSION = '36.0.0';
+export async function locateAndroidTool(name, env) {
+  if (!['aapt', 'apksigner'].includes(name)) throw new Error('Unsupported Android inspector');
+  const root = env.ANDROID_HOME || env.ANDROID_SDK_ROOT;
+  if (!root) throw new Error('Set ANDROID_HOME or ANDROID_SDK_ROOT for APK verification');
+  const candidate = join(root, 'build-tools', ANDROID_BUILD_TOOLS_VERSION, name);
+  try { await access(candidate, constants.X_OK); } catch {
+    throw new Error(`${name} requires Android SDK Build-Tools ${ANDROID_BUILD_TOOLS_VERSION}; no fallback is allowed`);
   }
-  const sdkRoots = [...new Set([env.ANDROID_HOME, env.ANDROID_SDK_ROOT].filter(Boolean))];
-  for (const root of sdkRoots) {
-    let versions;
-    try { versions = await readdir(join(root, 'build-tools')); } catch { continue; }
-    versions.sort((a, b) => b.localeCompare(a, 'en', { numeric: true }));
-    for (const version of versions) {
-      const candidate = join(root, 'build-tools', version, name);
-      try { await access(candidate, constants.X_OK); return candidate; } catch { /* Try next version. */ }
-    }
-  }
-  throw new Error(`${name} was not found; install Android SDK Build-Tools and set ANDROID_HOME or ANDROID_SDK_ROOT`);
+  return candidate;
 }
 
 async function defaultTools() {

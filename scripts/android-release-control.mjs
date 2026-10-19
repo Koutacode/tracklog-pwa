@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { appendFile, readFile, writeFile, readdir, mkdtemp, rm } from 'node:fs/promises';
+import { appendFile, readFile, writeFile, mkdtemp, rm } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { readExpectedRelease, parseManifest, parseSigner, runCommand } from './verify-latest-release-apk.mjs';
+import { readExpectedRelease, parseManifest, parseSigner, runCommand, locateAndroidTool } from './verify-latest-release-apk.mjs';
 
 export const REPOSITORY = 'Koutacode/tracklog-pwa';
 const CI_JOBS = ['android-validation', 'temporary-workspaces', 'validate'];
@@ -172,14 +172,12 @@ async function inspectApk(apk, sidecar, context, env) {
   const bytes = await readFile(apk);
   const sha256 = hash(bytes);
   same(await readFile(sidecar, 'utf8'), `${sha256}  ${context.assetName}\n`, 'APK checksum sidecar mismatch');
-  const toolsRoot = join(env.ANDROID_HOME || env.ANDROID_SDK_ROOT, 'build-tools');
-  const versions = (await readdir(toolsRoot)).sort((a, b) => b.localeCompare(a, 'en', { numeric: true }));
-  assert.ok(versions.length, 'Android Build Tools missing');
-  const tool = name => join(toolsRoot, versions[0], name);
-  same(parseManifest(await runCommand(tool('aapt'), ['dump', 'badging', apk])), {
+  const aapt = await locateAndroidTool('aapt', env);
+  const apksigner = await locateAndroidTool('apksigner', env);
+  same(parseManifest(await runCommand(aapt, ['dump', 'badging', apk])), {
     packageName: context.packageName, versionName: context.version, versionCode: context.versionCode,
   }, 'APK manifest mismatch');
-  parseSigner(await runCommand(tool('apksigner'), ['verify', '--print-certs', apk]));
+  parseSigner(await runCommand(apksigner, ['verify', '--print-certs', apk]));
   const embedded = JSON.parse(await runCommand('unzip', ['-p', apk, 'assets/public/version.json']));
   same(embedded.version, context.version, 'Embedded update version mismatch');
   same(env.VITE_TRACKLOG_NATIVE_PUSH_ENABLED, 'true', 'Official build must retain native push');

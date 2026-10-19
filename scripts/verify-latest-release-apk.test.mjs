@@ -1,12 +1,14 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { copyFile, mkdtemp, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, copyFile, mkdtemp, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import test from 'node:test';
 import {
   OFFICIAL_SIGNER_SHA256,
+  locateAndroidTool,
+  ANDROID_BUILD_TOOLS_VERSION,
   parseManifest,
   parseSidecar,
   parseSigner,
@@ -341,4 +343,42 @@ test('--save retains the original bytes for manual recovery if rollback itself f
   assert.equal(await readFile(join(recovery, 'tracklog-assist-debug.apk.sha256.previous'), 'utf8'), 'previous verified sidecar');
   assert.equal(await readFile(outputs.sidecar, 'utf8'), 'previous verified sidecar');
   await assertTemporaryFilesRemoved(state);
+});
+
+// Captured from the same officially signed APK with real Build Tools 36 / 37.
+// Only public certificate fingerprints are retained; no APK/user data is stored.
+test('Build Tools 37 format reproduces the failure without broadening signer acceptance', () => {
+  const v36 = `Signer #1 certificate SHA-256 digest: ${OFFICIAL_SIGNER_SHA256}\n`;
+  const v37 = `V2 Signer: certificate SHA-256 digest: ${OFFICIAL_SIGNER_SHA256}\n`;
+  assert.equal(parseSigner(v36), OFFICIAL_SIGNER_SHA256);
+  assert.throws(() => parseSigner(v37), /received 0/);
+  assert.throws(() => parseSigner(v36 + v36.replace('#1', '#2')), /received 2/);
+  assert.throws(() => parseSigner(v36.replace(OFFICIAL_SIGNER_SHA256, '0'.repeat(64))), /Official APK signer/);
+  assert.throws(() => parseSigner(v37 + v37), /received 0/);
+});
+
+test('APK inspectors use only 36.0.0 even when newer tools and PATH alternatives exist', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'tracklog-sdk-test-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  for (const version of ['36.0.0', '37.0.0']) {
+    const dir = join(root, 'build-tools', version);
+    await mkdir(dir, { recursive: true });
+    for (const name of ['aapt', 'apksigner']) {
+      await writeFile(join(dir, name), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    }
+  }
+  assert.equal(ANDROID_BUILD_TOOLS_VERSION, '36.0.0');
+  const env = { ANDROID_HOME: root, PATH: join(root, 'build-tools/37.0.0') };
+  for (const name of ['aapt', 'apksigner']) {
+    assert.equal(await locateAndroidTool(name, env), join(root, 'build-tools/36.0.0', name));
+    assert.equal(await locateAndroidTool(name, { ANDROID_SDK_ROOT: root }), join(root, 'build-tools/36.0.0', name));
+    await chmod(join(root, 'build-tools/36.0.0', name), 0o644);
+    await assert.rejects(locateAndroidTool(name, env), /no fallback/);
+  }
+  await assert.rejects(locateAndroidTool('apksigner', { PATH: env.PATH }), /Set ANDROID_HOME/);
+});
+
+test('signature subprocess failure is fatal even with the pinned certificate in stdout', async () => {
+  await assert.rejects(runCommand(process.execPath, ['-e',
+    `console.log('Signer #1 certificate SHA-256 digest: ${OFFICIAL_SIGNER_SHA256}'); process.exit(1);`]), /failed \(1\)/);
 });

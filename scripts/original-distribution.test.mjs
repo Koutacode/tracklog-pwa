@@ -309,3 +309,15 @@ test('failure report handles absent state and accepted-but-timed-out creations w
   assert.equal(unavailable.remoteReleases, 'unknown');
   assert.ok(unavailable.tagReadError && unavailable.releaseReadError);
 });
+
+test('all release APK inspection phases use pinned Build Tools 36.0.0', () => {
+  const workflow = read('.github/workflows/android-release.yml');
+  assert.ok(workflow.includes("packages: 'platform-tools build-tools;36.0.0'"));
+  assert.ok(workflow.includes('AAPT="$ANDROID_HOME/build-tools/36.0.0/aapt"'));
+  assert.ok(workflow.includes('APKSIGNER="$ANDROID_HOME/build-tools/36.0.0/apksigner"'));
+  assert.ok(!workflow.includes('sort -V'));
+  const control = read('scripts/android-release-control.mjs');
+  assert.ok(control.includes("locateAndroidTool('apksigner', env)"));
+  assert.ok(control.includes("locateAndroidTool('aapt', env)"));
+  assert.ok(!control.includes('readdir'));
+});
