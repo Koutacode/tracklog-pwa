@@ -4,6 +4,16 @@ on:
   push:
     tags:
       - 'v*' # v1.0.0 のようなタグがプッシュされたら実行
+  workflow_dispatch:
+    inputs:
+      expected_tag:
+        description: 'Confirm the package version tag (for example v0.1.77)'
+        required: true
+        type: string
+      expected_sha:
+        description: 'Confirm the full main SHA whose CI succeeded'
+        required: true
+        type: string
 
 concurrency:
   group: tracklog-android-release
@@ -11,10 +21,16 @@ concurrency:
 
 jobs:
   build-and-release:
+    if: >-
+      github.repository == 'Koutacode/tracklog-pwa' &&
+      ((github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+       (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')))
     runs-on: ubuntu-latest
     permissions:
       contents: write # リリース作成に必要
     env:
+      EXPECTED_TAG: ${{ inputs.expected_tag }}
+      EXPECTED_SHA: ${{ inputs.expected_sha }}
       VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
       VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
       VITE_FIREBASE_API_KEY: ${{ secrets.VITE_FIREBASE_API_KEY }}
@@ -28,6 +44,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v7
         with:
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -44,6 +61,11 @@ jobs:
           node-version: 22
           cache: 'npm'
 
+      - name: Validate release target and main CI
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/android-release-control.mjs preflight
+
       - name: Install dependencies
         run: npm ci
 
@@ -54,42 +76,6 @@ jobs:
           supabase/functions/tracklog-sync/index.ts
           supabase/functions/tracklog-ic-resolver/index.ts
           supabase/functions/tracklog-location/index.ts
-
-      - name: Validate release version
-        shell: bash
-        run: |
-          node <<'NODE'
-          const fs = require('node:fs');
-          const { execFileSync } = require('node:child_process');
-          const pkg = require('./package.json');
-          const expectedTag = `v${pkg.version}`;
-          const actualTag = process.env.GITHUB_REF_NAME;
-          if (actualTag !== expectedTag) {
-            throw new Error(`Tag ${actualTag} does not match package.json version ${pkg.version}`);
-          }
-          const gradleProps = fs.readFileSync('android/gradle.properties', 'utf8');
-          const versionName = gradleProps.match(/^tracklogVersionName=(.+)$/m)?.[1]?.trim();
-          const versionCode = Number(gradleProps.match(/^tracklogVersionCode=(.+)$/m)?.[1]?.trim());
-          if (versionName !== pkg.version) {
-            throw new Error(`Android versionName ${versionName} does not match package.json version ${pkg.version}`);
-          }
-          if (!Number.isSafeInteger(versionCode) || versionCode <= 0) {
-            throw new Error(`Android versionCode is invalid: ${versionCode}`);
-          }
-          const tags = execFileSync('git', ['tag', '--sort=-v:refname'], { encoding: 'utf8' })
-            .split(/\r?\n/)
-            .map(value => value.trim())
-            .filter(Boolean);
-          const previousTag = tags.find(value => value !== actualTag);
-          if (previousTag) {
-            const previousProps = execFileSync('git', ['show', `${previousTag}:android/gradle.properties`], { encoding: 'utf8' });
-            const previousCode = Number(previousProps.match(/^tracklogVersionCode=(.+)$/m)?.[1]?.trim());
-            if (Number.isSafeInteger(previousCode) && versionCode <= previousCode) {
-              throw new Error(`Android versionCode ${versionCode} must be greater than ${previousTag} (${previousCode})`);
-            }
-          }
-          console.log(`Release version OK: ${actualTag}`);
-          NODE
 
       - name: Validate Supabase build config
         shell: bash
@@ -195,7 +181,7 @@ jobs:
           echo "$BADGING"
           echo "$BADGING" | grep "name='com.tracklog.assist'"
           echo "$BADGING" | grep "versionCode='$EXPECTED_CODE'"
-          echo "$BADGING" | grep "versionName='${GITHUB_REF_NAME#v}'"
+          echo "$BADGING" | grep "versionName='${TRACKLOG_RELEASE_TAG#v}'"
           sha256sum tracklog-assist-debug.apk | tee tracklog-assist-debug.apk.sha256
 
       - name: Verify release APK signer
@@ -233,61 +219,14 @@ jobs:
           echo "Release APK signer verified: $actual_signer_sha256"
 
       - name: Create draft GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            tracklog-assist-debug.apk
-            tracklog-assist-debug.apk.sha256
-          name: Release ${{ github.ref_name }}
-          tag_name: ${{ github.ref_name }}
-          draft: true
-          prerelease: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Verify draft release APK
-        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          if ! release_id="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
-            --jq ".[] | select(.tag_name == \"${GITHUB_REF_NAME}\") | .id")"; then
-            echo "::error::Could not resolve the draft release ID."
-            exit 1
-          fi
-          if [[ ! "$release_id" =~ ^[0-9]+$ ]]; then
-            echo "::error::Expected exactly one numeric release ID for ${GITHUB_REF_NAME}; got: ${release_id:-none}"
-            exit 1
-          fi
-          release_state="$(gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}" --jq '[.tag_name, .draft] | @tsv')"
-          IFS=$'\t' read -r release_tag release_draft <<< "$release_state"
-          if [ "$release_tag" != "$GITHUB_REF_NAME" ] || [ "$release_draft" != "true" ]; then
-            echo "::error::Release ${release_id} is not the expected ${GITHUB_REF_NAME} draft."
-            exit 1
-          fi
-          echo "TRACKLOG_RELEASE_ID=${release_id}" >> "$GITHUB_ENV"
+        run: node scripts/android-release-control.mjs create-draft
 
-          mkdir -p verified-draft-release
-          gh release download "$GITHUB_REF_NAME" \
-            --repo "$GITHUB_REPOSITORY" \
-            --pattern tracklog-assist-debug.apk \
-            --pattern tracklog-assist-debug.apk.sha256 \
-            --dir verified-draft-release \
-            --clobber
-          expected_sha="$(sha256sum tracklog-assist-debug.apk | awk '{print $1}')"
-          draft_sha="$(sha256sum verified-draft-release/tracklog-assist-debug.apk | awk '{print $1}')"
-          if [ "$draft_sha" != "$expected_sha" ]; then
-            echo "::error::Draft release APK does not match the verified build."
-            exit 1
-          fi
-          printf '%s  tracklog-assist-debug.apk\n' "$expected_sha" > verified-draft-release/expected-tracklog-assist-debug.apk.sha256
-          if ! cmp --silent \
-            verified-draft-release/expected-tracklog-assist-debug.apk.sha256 \
-            verified-draft-release/tracklog-assist-debug.apk.sha256; then
-            echo "::error::Draft release checksum sidecar is not the exact lowercase SHA-256, two spaces, fixed APK name format."
-            exit 1
-          fi
+      - name: Verify draft release APK
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/android-release-control.mjs verify-draft
 
       - name: Publish verified GitHub Release
         shell: bash
@@ -295,6 +234,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          node scripts/android-release-control.mjs publication-check
           rollback_release_to_draft() {
             local rollback_attempt verify_attempt draft_state
             for rollback_attempt in $(seq 1 6); do
@@ -305,7 +245,7 @@ jobs:
                 for verify_attempt in $(seq 1 3); do
                   if draft_state="$(gh api "repos/${GITHUB_REPOSITORY}/releases/${TRACKLOG_RELEASE_ID}" --jq '.draft' 2>/dev/null)" && \
                     [ "$draft_state" = "true" ]; then
-                    echo "Rollback verified by release ID: ${GITHUB_REF_NAME} is draft=true."
+                    echo "Rollback verified by release ID: ${TRACKLOG_RELEASE_TAG} is draft=true."
                     return 0
                   fi
                   sleep 2
@@ -313,17 +253,16 @@ jobs:
               fi
               sleep $((rollback_attempt * 2))
             done
-            echo "::error title=CRITICAL RELEASE ROLLBACK FAILED::Release ${TRACKLOG_RELEASE_ID} (${GITHUB_REF_NAME}) could not be returned to a verified draft state after publication failed and may still be public. Immediate manual intervention is required."
+            echo "::error title=CRITICAL RELEASE ROLLBACK FAILED::Release ${TRACKLOG_RELEASE_ID} (${TRACKLOG_RELEASE_TAG}) could not be returned to a verified draft state after publication failed and may still be public. Immediate manual intervention is required."
             return 1
           }
 
-          if ! gh release edit "$GITHUB_REF_NAME" \
-            --repo "$GITHUB_REPOSITORY" \
-            --draft=false \
-            --latest; then
+          if ! gh api --method PATCH \
+            "repos/${GITHUB_REPOSITORY}/releases/${TRACKLOG_RELEASE_ID}" \
+            -F draft=false -f make_latest=true >/dev/null; then
             echo "::error::Release publication did not complete cleanly; starting verified rollback in case GitHub accepted the publication."
             if rollback_release_to_draft; then
-              echo "::error::Publication failed. ${GITHUB_REF_NAME} was confirmed as draft and was not left public."
+              echo "::error::Publication failed. ${TRACKLOG_RELEASE_TAG} was confirmed as draft and was not left public."
               exit 1
             fi
             exit 2
@@ -345,7 +284,7 @@ jobs:
                 for verify_attempt in $(seq 1 3); do
                   if draft_state="$(gh api "repos/${GITHUB_REPOSITORY}/releases/${TRACKLOG_RELEASE_ID}" --jq '.draft' 2>/dev/null)" && \
                     [ "$draft_state" = "true" ]; then
-                    echo "Rollback verified by release ID: ${GITHUB_REF_NAME} is draft=true."
+                    echo "Rollback verified by release ID: ${TRACKLOG_RELEASE_TAG} is draft=true."
                     return 0
                   fi
                   sleep 2
@@ -353,7 +292,7 @@ jobs:
               fi
               sleep $((rollback_attempt * 2))
             done
-            echo "::error title=CRITICAL RELEASE ROLLBACK FAILED::Release ${TRACKLOG_RELEASE_ID} (${GITHUB_REF_NAME}) could not be returned to a verified draft state and may still be public. Immediate manual intervention is required."
+            echo "::error title=CRITICAL RELEASE ROLLBACK FAILED::Release ${TRACKLOG_RELEASE_ID} (${TRACKLOG_RELEASE_TAG}) could not be returned to a verified draft state and may still be public. Immediate manual intervention is required."
             return 1
           }
 
@@ -364,14 +303,16 @@ jobs:
           verified=false
           for attempt in $(seq 1 12); do
             if latest_tag="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq '.tag_name' 2>/dev/null)"; then
-              if [ "$latest_tag" = "$GITHUB_REF_NAME" ]; then
+              if [ "$latest_tag" = "$TRACKLOG_RELEASE_TAG" ]; then
                 if curl --fail --location --retry 3 --output latest-tracklog-assist-debug.apk "$latest_url"; then
                   if curl --fail --location --retry 3 --output latest-tracklog-assist-debug.apk.sha256 "$latest_sidecar_url"; then
                     actual_sha="$(sha256sum latest-tracklog-assist-debug.apk | awk '{print $1}')"
                     if [ "$actual_sha" = "$expected_sha" ] && \
                       cmp --silent expected-latest-tracklog-assist-debug.apk.sha256 latest-tracklog-assist-debug.apk.sha256; then
-                      verified=true
-                      break
+                      if node scripts/verify-latest-release-apk.mjs; then
+                        verified=true
+                        break
+                      fi
                     fi
                   fi
                 fi
@@ -380,9 +321,9 @@ jobs:
             sleep 5
           done
           if [ "$verified" != true ]; then
-            echo "::error::GitHub latest APK or checksum sidecar does not match ${GITHUB_REF_NAME}; starting verified rollback."
+            echo "::error::GitHub latest APK or checksum sidecar does not match ${TRACKLOG_RELEASE_TAG}; starting verified rollback."
             if rollback_release_to_draft; then
-              echo "::error::Latest APK verification failed. ${GITHUB_REF_NAME} was returned to draft and was not left public."
+              echo "::error::Latest APK verification failed. ${TRACKLOG_RELEASE_TAG} was returned to draft and was not left public."
               exit 1
             fi
             exit 2
@@ -392,3 +333,9 @@ jobs:
         run: |
           echo "Previously published APK and checksum assets are retained."
           echo "The latest download URL remains the official update path."
+
+      - name: Report retained release state on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/android-release-control.mjs report

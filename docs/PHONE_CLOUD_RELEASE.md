@@ -88,3 +88,17 @@ Androidアプリは起動時・5分周期・画面復帰時に最新の通常Rel
 Cloud準備、対象SHAのCI、正式Release、公開APK照合、Drive保存、実機確認を区別して報告する。Cloud/CI成功は携帯の起動・認証・GPS・IC・通知・バックグラウンド・実走・電池最適化・更新成功を証明しない。架空運行を実機へ作らず、実動作は別工程で検証する。
 
 復旧は旧APKの再配布ではなく、必要なコードを戻した修正版をより大きいversionCodeで新Releaseとし、同じ公開照合・Drive記録を行う。
+
+## Web から既存 Android Release を手動起動する
+
+Cloud の CLI 認証が利用できない場合も、新しい資格情報・権限・配布先は追加しない。既存 Android Release の `workflow_dispatch` を利用する。
+
+1. 配信手順の変更も PR でレビュー・検証し main に統合する。変更後の main SHA に対する CI の validate / android-validation / temporary-workspaces 全成功を確認する。変更前の SHA の成功では代用しない。
+2. GitHub Actions の Android Release → Run workflow で main を選択し、`expected_tag` に package と一致する版タグ、`expected_sha` に成功した main の完全な40桁 SHA を入力する。入力は確認値であり checkout 先を変更しない。今回の履歴修正は v0.1.77 / versionCode 75。
+3. workflow は固定 checkout・現在 main・同じ SHA の最新 main CI を照合する。公開 CI の読取は無認証の公開 API を使い、権限を追加しない。通信失敗・rate limit・未完了・失敗・main移動は停止する。
+4. 従来の全試験・ビルド・署名検証後、未使用タグだけを固定 SHA に作成する。GITHUB_TOKEN で作るタグから別の workflow 起動は期待せず、同じ run が続行する。
+5. 既存 Release（draft / prerelease を含む）があれば停止する。作成専用 API で新しい draft と assets を作り、同じ run の Release ID を記録する。再取得した APK の署名・package・version/code・version.json・SHA・取得 URL を確認してから、その ID のみを公開する。公開 latest の再取得検証と失敗時の draft 復帰も維持する。
+
+従来の tag push も同じガードと検証を通る。push 経路は起動タグが対象 SHA に一致する場合だけ利用する。手動経路ではタグが既にあれば停止し、タグの移動・削除、既存 Release の再利用、asset の上書きはしない。空の正式 Release や prerelease を先行作成してはならない。
+
+途中失敗では run のログに残るタグ、SHA、phase、Release ID と実際の GitHub 状態を確認する。作成要求の応答が不明なら再実行前に状態を確認する。残ったタグ・draft・asset を自動削除しない。再実行で停止した場合も勝手に上書きせず、復旧方法を報告する。新しい versionCode を必要とする復旧版は別途通常の検証を通す。
