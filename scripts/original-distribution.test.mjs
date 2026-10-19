@@ -51,7 +51,7 @@ import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  REPOSITORY, validateContext, validateCi, validateNewVersion, githubClient,
+  RECOVERY, validateRecoveryDraft, guardMainAndCi, REPOSITORY, validateContext, validateCi, validateNewVersion, githubClient,
   guardCandidate, createCandidate, validateDraft, validateAssets, validateUploadedAsset, verifyDraft, reportRetainedState,
 } from './android-release-control.mjs';
 
@@ -343,4 +343,84 @@ test('upload receipts require the exact asset identity, bytes and GitHub API end
     { digest: null }, { digest: `sha256:${'0'.repeat(64)}` }, { url: 'https://example.com/asset' }]) {
     assert.throws(() => validateUploadedAsset({ ...asset, ...change }, name, bytes));
   }
+});
+
+function recoveryFixture() {
+  const controlSha = 'c'.repeat(40);
+  const env = { GITHUB_REPOSITORY: REPOSITORY, GITHUB_EVENT_NAME: 'workflow_dispatch',
+    GITHUB_REF: 'refs/heads/main', GITHUB_SHA: controlSha, EXPECTED_SHA: controlSha,
+    EXPECTED_TAG: RECOVERY.tag, EXPECTED_RECOVERY_RELEASE_ID: String(RECOVERY.releaseId),
+    GITHUB_RUN_ID: '123', GITHUB_RUN_ATTEMPT: '1' };
+  const expected = { ...context, tag: RECOVERY.tag, version: '0.1.78', versionCode: '76' };
+  const target = validateContext(env, expected, RECOVERY.sha);
+  const release = { id: RECOVERY.releaseId, tag_name: RECOVERY.tag, target_commitish: RECOVERY.sha,
+    author: { login: RECOVERY.author }, draft: true, prerelease: false, assets: [] };
+  const data = { release, main: controlSha, ciFailure: null, calls: [] };
+  const api = async (path, request = {}) => {
+    data.calls.push(path);
+    assert.equal(request.method, undefined, 'recovery adoption must never create or mutate a release/tag');
+    if (path === '/git/ref/heads/main') return { object: { type: 'commit', sha: data.main } };
+    if (path === `/git/ref/tags/${RECOVERY.tag}`) return { object: { type: 'commit', sha: RECOVERY.sha } };
+    if (path.startsWith('/actions/workflows/ci.yml/runs?')) {
+      const head = new URL(`https://example.test${path}`).searchParams.get('head_sha');
+      return { workflow_runs: [{ ...run, id: head === controlSha ? 33 : 22, head_sha: head,
+        conclusion: data.ciFailure === head ? 'failure' : 'success' }] };
+    }
+    if (path.startsWith('/actions/runs/')) {
+      const head = path.includes('/33/') ? controlSha : RECOVERY.sha;
+      return { jobs: jobs.map(j => ({ ...j, head_sha: head })) };
+    }
+    if (path === `/releases/${RECOVERY.releaseId}`) return structuredClone(data.release);
+    if (path.startsWith('/releases?')) return [oldRelease, structuredClone(data.release)];
+    if (path.startsWith('/contents/android/gradle.properties')) return { encoding: 'base64', content: Buffer.from('tracklogVersionCode=74\n').toString('base64') };
+    throw new Error(`Unexpected recovery read ${path}`);
+  };
+  return { target, expected, env, data, api };
+}
+
+test('recovery requires exact confirmed ID, source, tag, code and manual main control SHA', () => {
+  const { env, expected } = recoveryFixture();
+  for (const change of [{ EXPECTED_RECOVERY_RELEASE_ID: '1' }, { GITHUB_EVENT_NAME: 'push' },
+    { GITHUB_REF: 'refs/heads/other' }, { EXPECTED_SHA: 'b'.repeat(40) }, { EXPECTED_TAG: 'v0.1.79' }]) {
+    assert.throws(() => validateContext({ ...env, ...change }, expected, RECOVERY.sha));
+  }
+  assert.throws(() => validateContext(env, expected, 'b'.repeat(40)));
+  assert.throws(() => validateContext(env, { ...expected, versionCode: '77' }, RECOVERY.sha));
+});
+
+test('recovery adopts only the explicitly approved empty draft without any POST', async () => {
+  const { api, target, data } = recoveryFixture();
+  const states = [];
+  const state = await createCandidate(api, target, async s => states.push(s));
+  assert.equal(state.releaseId, RECOVERY.releaseId);
+  assert.equal(state.controlSha, target.controlSha);
+  assert.equal(states.length, 1);
+  assert.ok(data.calls.some(p => p.includes(`head_sha=${RECOVERY.sha}`)));
+  assert.ok(data.calls.some(p => p.includes(`head_sha=${target.controlSha}`)));
+  for (const change of [{ id: 1 }, { draft: false }, { prerelease: true }, { tag_name: 'v0.1.77' },
+    { target_commitish: 'b'.repeat(40) }, { author: { login: 'other' } }, { assets: [{ id: 1 }] }]) {
+    assert.throws(() => validateRecoveryDraft({ ...data.release, ...change }, target));
+  }
+});
+
+test('recovery stops on either CI failure, moved control main or populated draft', async () => {
+  for (const failure of ['source', 'control', 'main', 'assets']) {
+    const { api, target, data } = recoveryFixture();
+    if (failure === 'source') data.ciFailure = RECOVERY.sha;
+    if (failure === 'control') data.ciFailure = target.controlSha;
+    if (failure === 'main') data.main = 'd'.repeat(40);
+    if (failure === 'assets') data.release.assets = [{ id: 1 }];
+    let saved = false;
+    await assert.rejects(createCandidate(api, target, async () => { saved = true; }));
+    assert.equal(saved, false);
+  }
+});
+
+test('recovery workflow preserves reviewed controls before checking out the fixed build source', () => {
+  const w = read('.github/workflows/android-release.yml');
+  assert.ok(w.indexOf('Preserve reviewed release controls') < w.indexOf('Checkout exact approved recovery source'));
+  assert.ok(w.includes(`git checkout --detach ${RECOVERY.sha}`));
+  assert.ok(w.includes('node "$RUNNER_TEMP/tracklog-release-controls/android-release-control.mjs" preflight'));
+  assert.ok(w.indexOf('Preserve signed APK and checksum') < w.indexOf('Create draft GitHub Release'));
+  assert.ok(w.includes('actions/upload-artifact@v4'));
 });

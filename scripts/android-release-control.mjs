@@ -6,6 +6,7 @@ import { pathToFileURL } from 'node:url';
 import { readExpectedRelease, parseManifest, parseSigner, runCommand, locateAndroidTool } from './verify-latest-release-apk.mjs';
 
 export const REPOSITORY = 'Koutacode/tracklog-pwa';
+export const RECOVERY = Object.freeze({ releaseId: 417573465, tag: 'v0.1.78', sha: '0e12a03b898f12d1c3cbdb8c234ce0173fd5b4e6', author: 'github-actions[bot]' });
 const CI_JOBS = ['android-validation', 'temporary-workspaces', 'validate'];
 const SHA = /^[0-9a-f]{40}$/;
 const TAG = /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
@@ -15,18 +16,26 @@ const same = (actual, expected, message) => assert.deepEqual(actual, expected, m
 export function validateContext(env, expected, checkoutSha) {
   same(env.GITHUB_REPOSITORY, REPOSITORY, 'Unexpected repository');
   assert.ok(SHA.test(env.GITHUB_SHA ?? ''), 'Invalid workflow SHA');
-  same(checkoutSha, env.GITHUB_SHA, 'Checkout must be the workflow SHA');
+  const recovery = Boolean(env.EXPECTED_RECOVERY_RELEASE_ID);
+  if (recovery) {
+    same(env.EXPECTED_RECOVERY_RELEASE_ID, String(RECOVERY.releaseId), 'Recovery ID is not authorized');
+    same(env.GITHUB_EVENT_NAME, 'workflow_dispatch', 'Recovery must be manual');
+    same(checkoutSha, RECOVERY.sha, 'Recovery source SHA mismatch');
+    same(expected.tag, RECOVERY.tag, 'Recovery tag mismatch');
+    same(expected.versionCode, '76', 'Recovery versionCode mismatch');
+  } else same(checkoutSha, env.GITHUB_SHA, 'Checkout must be the workflow SHA');
   assert.ok(TAG.test(expected.tag), 'Only stable version tags are supported');
   if (env.GITHUB_EVENT_NAME === 'workflow_dispatch') {
     same(env.GITHUB_REF, 'refs/heads/main', 'Manual releases require main');
     assert.ok(SHA.test(env.EXPECTED_SHA ?? ''), 'Expected SHA must be a full lowercase SHA');
-    same(env.EXPECTED_SHA, checkoutSha, 'Manual SHA confirmation mismatch');
+    same(env.EXPECTED_SHA, env.GITHUB_SHA, 'Manual SHA confirmation mismatch');
     same(env.EXPECTED_TAG, expected.tag, 'Manual tag confirmation mismatch');
   } else {
     same(env.GITHUB_EVENT_NAME, 'push', 'Unsupported release event');
     same(env.GITHUB_REF, `refs/tags/${expected.tag}`, 'Push must be the exact version tag');
   }
   return { ...expected, sha: checkoutSha, event: env.GITHUB_EVENT_NAME,
+    ...(recovery ? { recoveryReleaseId: RECOVERY.releaseId, controlSha: env.GITHUB_SHA } : {}),
     runId: env.GITHUB_RUN_ID, attempt: env.GITHUB_RUN_ATTEMPT };
 }
 
@@ -101,12 +110,23 @@ async function pages(api, path, key) {
 export async function guardMainAndCi(api, context) {
   const main = await api('/git/ref/heads/main');
   same(main.object?.type, 'commit', 'main must resolve to a commit');
-  same(main.object.sha, context.sha, 'main moved; stop and revalidate');
-  const runs = await api(`/actions/workflows/ci.yml/runs?head_sha=${context.sha}&branch=main&event=push&per_page=1`, { publicRead: true });
-  const run = runs.workflow_runs?.[0];
-  assert.ok(Number.isSafeInteger(run?.id) && run.id > 0, 'No valid CI run');
-  const jobs = await pages(api, `/actions/runs/${run.id}/jobs?filter=latest`, 'jobs');
-  validateCi(runs.workflow_runs, jobs, context);
+  same(main.object.sha, context.controlSha ?? context.sha, 'main moved; stop and revalidate');
+  for (const sha of [...new Set([context.sha, context.controlSha].filter(Boolean))]) {
+    const runs = await api(`/actions/workflows/ci.yml/runs?head_sha=${sha}&branch=main&event=push&per_page=1`, { publicRead: true });
+    const run = runs.workflow_runs?.[0];
+    assert.ok(Number.isSafeInteger(run?.id) && run.id > 0, 'No valid CI run');
+    const jobs = await pages(api, `/actions/runs/${run.id}/jobs?filter=latest`, 'jobs');
+    validateCi(runs.workflow_runs, jobs, { ...context, sha });
+  }
+}
+
+export function validateRecoveryDraft(release, context, empty = true) {
+  same(context.recoveryReleaseId, RECOVERY.releaseId, 'Recovery ID mismatch');
+  same(context.sha, RECOVERY.sha, 'Recovery source mismatch');
+  same(context.tag, RECOVERY.tag, 'Recovery tag mismatch');
+  validateDraft(release, { ...context, releaseId: RECOVERY.releaseId });
+  same(release.author?.login, RECOVERY.author, 'Recovery author mismatch');
+  if (empty) same(release.assets, [], 'Recovery draft must be empty');
 }
 
 async function tagCommit(api, tag) {
@@ -124,6 +144,12 @@ async function tagCommit(api, tag) {
 
 export async function guardCandidate(api, context, { tagCreated = false, ownedReleaseId } = {}) {
   await guardMainAndCi(api, context);
+  if (context.recoveryReleaseId) {
+    if (ownedReleaseId != null) same(ownedReleaseId, RECOVERY.releaseId, 'Unexpected recovery release');
+    validateRecoveryDraft(await api(`/releases/${RECOVERY.releaseId}`), context, ownedReleaseId == null);
+    ownedReleaseId = RECOVERY.releaseId;
+    tagCreated = true;
+  }
   const tagSha = await tagCommit(api, context.tag);
   if (context.event === 'workflow_dispatch' && !tagCreated) same(tagSha, null, 'Manual release tag already exists');
   else same(tagSha, context.sha, 'Release tag SHA mismatch');
@@ -143,6 +169,11 @@ export async function guardCandidate(api, context, { tagCreated = false, ownedRe
 
 export async function createCandidate(api, context, saveState) {
   await guardCandidate(api, context);
+  if (context.recoveryReleaseId) {
+    const state = { ...context, releaseId: RECOVERY.releaseId, phase: 'draft-created' };
+    await saveState(state);
+    return state;
+  }
   if (context.event === 'workflow_dispatch') {
     await api('/git/refs', { method: 'POST', body: { ref: `refs/tags/${context.tag}`, sha: context.sha } });
     await saveState({ ...context, phase: 'tag-created' });
@@ -262,7 +293,7 @@ export async function main(command, env = process.env) {
       if (state.runId !== env.GITHUB_RUN_ID || state.attempt !== env.GITHUB_RUN_ATTEMPT) state = undefined;
     } catch { /* Preflight can fail before a state file exists. Report remote state independently. */ }
     console.log(JSON.stringify(await reportRetainedState(githubClient(env.GH_TOKEN),
-      { ...expected, sha: env.GITHUB_SHA }, state)));
+      { ...expected, sha: env.EXPECTED_RECOVERY_RELEASE_ID === String(RECOVERY.releaseId) ? RECOVERY.sha : env.GITHUB_SHA }, state)));
     console.log('No tag, draft or asset was deleted. Unknown ownership is not permission to reuse an ID; inspect before recovery.');
     return;
   }
