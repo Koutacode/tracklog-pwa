@@ -52,7 +52,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   REPOSITORY, validateContext, validateCi, validateNewVersion, githubClient,
-  guardCandidate, createCandidate, validateDraft, validateAssets, verifyDraft, reportRetainedState,
+  guardCandidate, createCandidate, validateDraft, validateAssets, validateUploadedAsset, verifyDraft, reportRetainedState,
 } from './android-release-control.mjs';
 
 const sha = 'a'.repeat(40);
@@ -245,9 +245,11 @@ test('draft APK bytes must be re-inspected and equal the build before publicatio
     release.assets = [apk, sidecar].map((bytes, index) => {
       const name = index ? `${state.assetName}.sha256` : state.assetName;
       return { id: 100 + index, name, size: bytes.length, state: 'uploaded',
+        url: `https://api.github.com/repos/${REPOSITORY}/releases/assets/${100 + index}`,
         digest: `sha256:${createHash('sha256').update(bytes).digest('hex')}`,
-        browser_download_url: `https://github.com/${REPOSITORY}/releases/download/${state.tag}/${name}` };
+        browser_download_url: `https://github.com/${REPOSITORY}/releases/download/untagged-ef7b8222da7b24f07097/${name}` };
     });
+    state.uploadedAssets = release.assets.map((asset, i) => validateUploadedAsset(asset, asset.name, [apk, sidecar][i]));
     let inspections = 0;
     const inspect = async (apkPath, sidecarPath) => {
       inspections++;
@@ -261,6 +263,14 @@ test('draft APK bytes must be re-inspected and equal the build before publicatio
       throw new Error('signer mismatch');
     }), /signer mismatch/);
     await assert.rejects(verifyDraft(api, context, state, { RUNNER_TEMP: dir }, async () => ({ ...state.built, sha256: 'bad' })), /differs/);
+    for (const change of [{ id: 999 }, { size: apk.length + 1 }, { digest: null }, { digest: `sha256:${'0'.repeat(64)}` }, { state: 'new' }, { url: 'https://example.com/asset' }]) {
+      const original = release.assets[0];
+      release.assets[0] = { ...original, ...change };
+      await assert.rejects(verifyDraft(api, context, state, { RUNNER_TEMP: dir }, inspect));
+      release.assets[0] = original;
+    }
+    data.bytes[100] = Buffer.alloc(apk.length, 0);
+    await assert.rejects(verifyDraft(api, context, state, { RUNNER_TEMP: dir }, inspect), /checksum mismatch/);
     data.bytes[100] = Buffer.from('tampered');
     await assert.rejects(verifyDraft(api, context, state, { RUNNER_TEMP: dir }, inspect), /size mismatch/);
     assert.deepEqual(data.mutations.map(m => m.path), ['/git/refs', '/releases'], 'verification cannot publish or mutate');
@@ -320,4 +330,17 @@ test('all release APK inspection phases use pinned Build Tools 36.0.0', () => {
   assert.ok(control.includes("locateAndroidTool('apksigner', env)"));
   assert.ok(control.includes("locateAndroidTool('aapt', env)"));
   assert.ok(!control.includes('readdir'));
+});
+
+test('upload receipts require the exact asset identity, bytes and GitHub API endpoint', () => {
+  const bytes = Buffer.from('synthetic uploaded content');
+  const name = 'tracklog-assist-debug.apk';
+  const asset = { id: 100, name, state: 'uploaded', size: bytes.length,
+    digest: `sha256:${createHash('sha256').update(bytes).digest('hex')}`,
+    url: `https://api.github.com/repos/${REPOSITORY}/releases/assets/100` };
+  assert.equal(validateUploadedAsset(asset, name, bytes).id, 100);
+  for (const change of [{ id: -1 }, { name: 'other.apk' }, { state: 'new' }, { size: 0 },
+    { digest: null }, { digest: `sha256:${'0'.repeat(64)}` }, { url: 'https://example.com/asset' }]) {
+    assert.throws(() => validateUploadedAsset({ ...asset, ...change }, name, bytes));
+  }
 });

@@ -184,15 +184,29 @@ async function inspectApk(apk, sidecar, context, env) {
   return { sha256, size: bytes.length };
 }
 
+export function validateUploadedAsset(asset, name, bytes) {
+  assert.ok(Number.isSafeInteger(asset.id) && asset.id > 0, 'Invalid asset ID');
+  same(asset.name, name, 'Uploaded asset name mismatch');
+  same(asset.state, 'uploaded', 'Incomplete asset');
+  same(asset.url, `https://api.github.com/repos/${REPOSITORY}/releases/assets/${asset.id}`, 'Asset API URL mismatch');
+  same(asset.size, bytes.length, 'Uploaded asset size mismatch');
+  same(asset.digest, `sha256:${hash(bytes)}`, 'Uploaded asset digest mismatch');
+  return { id: asset.id, name, size: asset.size, digest: asset.digest };
+}
+
 export function validateAssets(release, state) {
   const names = [state.assetName, `${state.assetName}.sha256`].sort();
   same(release.assets.map(asset => asset.name).sort(), names, 'Draft must have exactly APK and checksum');
+  same(state.uploadedAssets?.map(asset => asset.name).sort(), names, 'Upload receipts missing');
+  assert.equal(new Set(state.uploadedAssets.map(asset => asset.id)).size, 2, 'Duplicate uploaded asset ID');
   for (const asset of release.assets) {
-    assert.ok(Number.isSafeInteger(asset.id) && asset.id > 0, 'Invalid asset ID');
     same(asset.state, 'uploaded', 'Incomplete asset');
-    assert.ok(Number.isSafeInteger(asset.size) && asset.size > 0, 'Invalid asset size');
-    same(asset.browser_download_url,
-      `https://github.com/${REPOSITORY}/releases/download/${state.tag}/${asset.name}`, 'Update download URL mismatch');
+    same(asset.url, `https://api.github.com/repos/${REPOSITORY}/releases/assets/${asset.id}`, 'Asset API URL mismatch');
+    // Draft browser URLs may contain GitHub's temporary untagged-* identifier.
+    // They are never followed. Download only the API ID recorded on upload;
+    // the existing public verifier enforces the final tagged and latest URLs.
+    const receipt = state.uploadedAssets.find(item => item.name === asset.name);
+    same({ id: asset.id, name: asset.name, size: asset.size, digest: asset.digest }, receipt, 'Draft asset differs from upload receipt');
   }
   return release.assets.map(({ id, name, size, digest }) => ({ id, name, size, digest })).sort((a, b) => a.name.localeCompare(b.name));
 }
@@ -208,7 +222,7 @@ export async function verifyDraft(api, context, state, env, inspect = inspectApk
     for (const asset of assets) {
       const bytes = await api(`/releases/assets/${asset.id}`, { binary: true });
       same(bytes.length, asset.size, 'Downloaded asset size mismatch');
-      if (asset.digest != null) same(asset.digest, `sha256:${hash(bytes)}`, 'GitHub asset checksum mismatch');
+      same(asset.digest, `sha256:${hash(bytes)}`, 'GitHub asset checksum mismatch');
       await writeFile(join(dir, asset.name), bytes, { flag: 'wx' });
     }
     const verified = await inspect(join(dir, state.assetName), join(dir, `${state.assetName}.sha256`), context, env);
@@ -273,16 +287,20 @@ export async function main(command, env = process.env) {
     same(state.phase, 'preflight', 'Release creation is not repeatable');
     const built = await inspectApk(context.assetName, `${context.assetName}.sha256`, context, env);
     const created = await createCandidate(api, context, saveState);
-    await saveState({ ...created, built });
+    const uploadedAssets = [];
+    await saveState({ ...created, built, uploadedAssets });
     await appendFile(env.GITHUB_ENV, `TRACKLOG_RELEASE_ID=${created.releaseId}\n`);
     // Upload to the newly created ID only. No lookup-by-tag, replacement or deletion.
     for (const name of [context.assetName, `${context.assetName}.sha256`]) {
+      const bytes = await readFile(name);
       const response = await fetch(`https://uploads.github.com/repos/${REPOSITORY}/releases/${created.releaseId}/assets?name=${encodeURIComponent(name)}`, {
         method: 'POST', redirect: 'error', signal: AbortSignal.timeout(120_000),
         headers: { Authorization: `Bearer ${env.GH_TOKEN}`, 'Content-Type': 'application/octet-stream' },
-        body: await readFile(name),
+        body: bytes,
       });
       same(response.status, 201, 'New asset upload failed; draft retained');
+      uploadedAssets.push(validateUploadedAsset(await response.json(), name, bytes));
+      await saveState({ ...created, built, uploadedAssets });
     }
   } else if (command === 'verify-draft') {
     same(state.phase, 'draft-created', 'Draft not created by this run');
