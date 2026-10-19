@@ -114,3 +114,11 @@ Release の APK 準備・署名照合・draft 検証・公開後検証は Androi
 Release #66 の draft asset は GitHub の `untagged-*` URL を返すため、公開前に正式タグ URL を要求すると停止する。draft の browser URL はダウンロードに使用しない。各アップロード成功応答の asset ID・名前・サイズ・SHA-256 digest をその run の状態へ保存し、同じ Release の asset 一覧と完全一致させ、固定の GitHub API asset ID 経路で実バイトを再取得する。サイズ・digest・ビルド時 SHA・sidecar・署名・package/version を検証してから公開する。公開後は従来通り正式タグ URL と latest URL を厳密に検証する。
 
 失敗した v0.1.77 のタグ・draft (Release 417534681) と APK は保持する。次候補 v0.1.78 / versionCode 76 は本人の追加承認に基づく新規配信とし、旧資産を再利用・削除・上書きしない。
+
+### v0.1.78 の限定復旧
+
+通常配信では `recovery_release_id` を空欄にする。HTTP 500 で作成だけ成立した空 draft 417573465 の復旧に限り同 ID を明示する。対象 tag v0.1.78、source SHA `0e12a03b898f12d1c3cbdb8c234ce0173fd5b4e6`、code76、作者 github-actions[bot]、非公開かつ asset 0 件を必須とする。他の draft を検索して採用しない。
+
+workflow の main SHA と source SHA の双方の CI 成功を検証する。レビュー済み制御スクリプトを runner temp に保持した後、固定 source SHA へ checkout して既存署名で再ビルドする。生成物は新しいバイト列として検証し、元の失敗 run の APK と同一とは扱わない。既存タグ・Releaseを新規作成せず、指定 ID に asset の新規アップロードだけを行う。空でなければ停止する。
+
+署名検証後の APK と sidecar を同 repository の Actions artifact に14日間保存してから配信する。draft の実バイト再検証、公開直前検証、公開後の正式 URL/latest 再取得検証は従来どおり必須。起動は担当者が main と入力 expected_sha を照合し、一度だけ行う。
