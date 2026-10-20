@@ -98,9 +98,9 @@ assert.deepEqual(buildTripDetailLocationInfo([
 assert.equal(buildTripDetailLocationInfo([
   projected('load_start', '2026-10-01T01:07:00.000Z', 600, '合成倉庫'),
 ])[0]?.time, '10:00', 'ordinary addressed events retain report rounding');
-assert.deepEqual(buildTripDetailLocationInfo([
+assert.equal(buildTripDetailLocationInfo([
   projected('load_start', '2026-10-01T01:07:00.000Z', 600),
-]), [], 'ordinary addressless events remain excluded');
+])[0]?.addressUnavailable, true, 'addressless loading boundaries are explicitly unavailable');
 const ic = buildTripDetailLocationInfo([{
   ...projected('expressway_end', '2026-10-01T01:07:00.000Z', 600),
   event: { type: 'expressway_end', ts: '2026-10-01T01:07:00.000Z', extras: { icName: '合成IC' } },
@@ -148,22 +148,44 @@ assert.equal(projectLocations([
 
 console.log('tripDetailLocationInfo: report rounding, midnight minimums, recorded data and existing locations passed');
 
-const restFerryTypes = ['rest_start', 'boarding', 'rest_end', 'disembark'] as const;
-for (const address of [undefined, null, '', '   ', '合成港']) {
-  const source = restFerryTypes.map(type => ({
-    ...projected(type, '2026-10-18T09:03:27.001Z', 1080),
-    event: { type, ts: '2026-10-18T09:03:27.001Z', address, geo: null,
-      extras: { restSessionId: 'synthetic-rest', ferrySessionId: 'synthetic-ferry' } },
-  })) as ProjectedReportTimelineEvent[];
-  const snapshot = structuredClone(source);
-  const rows = buildTripDetailLocationInfo(source);
-  assert.deepEqual(rows.map(row => row.label), ['休息開始地点', 'フェリー乗船地点', '休息終了地点', 'フェリー下船地点']);
-  assert.equal(new Set(rows.map(row => row.key)).size, 4, 'simultaneous boundaries remain distinct');
-  assert.ok(rows.every(row => row.addressUnavailable === (address !== '合成港')));
-  assert.ok(rows.every(row => row.time === '18:00' && row.recordedTs === undefined));
-  assert.deepEqual(source, snapshot, 'presentation preserves timestamps, session IDs and null location data');
+const operationPairs = [
+  ['load_start', 'load_end', '積込開始地点', '積込終了地点'],
+  ['unload_start', 'unload_end', '荷卸開始地点', '荷卸終了地点'],
+  ['break_start', 'break_end', '休憩開始地点', '休憩終了地点'],
+  ['wait_start', 'wait_end', '待機開始地点', '待機終了地点'],
+  ['work_start', 'work_end', 'その他開始地点', 'その他終了地点'],
+  ['rest_start', 'rest_end', '休息開始地点', '休息終了地点'],
+  ['boarding', 'disembark', 'フェリー乗船地点', 'フェリー下船地点'],
+] as const;
+for (const [start, end, startLabel, endLabel] of operationPairs) {
+  for (const address of [undefined, null, '', '  \t ', ' 合成住所 ']) {
+    const source = [start, end].map((type, index) => ({
+      ...projected(type, `2026-10-19T00:30:0${index}.001Z`, 570),
+      event: { type, ts: `2026-10-19T00:30:0${index}.001Z`, address, geo: null,
+        extras: { syntheticSessionId: 'same-session' } },
+    })) as ProjectedReportTimelineEvent[];
+    const snapshot = structuredClone(source);
+    const rows = buildTripDetailLocationInfo(source);
+    assert.deepEqual(rows.map(row => row.label), [startLabel, endLabel]);
+    assert.equal(new Set(rows.map(row => row.key)).size, 2, 'same rounded time never hides the end');
+    assert.ok(rows.every(row => row.time === '09:30' && row.recordedTs === undefined));
+    assert.ok(rows.every(row => row.addressUnavailable === (address !== ' 合成住所 ')));
+    assert.ok(rows.every(row => row.address === (address === ' 合成住所 ' ? '合成住所' : undefined)));
+    assert.deepEqual(buildTripDetailLocationInfo(source.slice(0, 1)).map(row => row.label), [startLabel],
+      'unfinished work cannot acquire an invented end');
+    assert.deepEqual(source, snapshot, 'presentation preserves timestamps, extras and null location data');
+  }
 }
 assert.deepEqual(buildTripDetailLocationInfo([
   projected('drive_start', '2026-10-18T09:03:27.001Z', 1080),
-  projected('break_end', '2026-10-18T09:03:27.001Z', 1080),
-]), [], 'other addressless event types are not added');
+]), [], 'addressless drive_start remains excluded');
+assert.equal(buildTripDetailLocationInfo([
+  projected('drive_start', '2026-10-18T09:03:27.001Z', 1080, '従来の住所'),
+])[0]?.address, '従来の住所', 'addressed drive_start retains existing behavior');
+console.log('tripDetailLocationInfo: all 14 operation boundaries, address variants and unfinished work passed');
+
+const simultaneous = operationPairs.flatMap(([start, end]) => [start, end]).map(type =>
+  projected(type, '2026-10-19T09:03:27.001Z', 1080));
+const simultaneousRows = buildTripDetailLocationInfo(simultaneous);
+assert.equal(simultaneousRows.length, 14, 'simultaneous rest/ferry and other boundaries remain present');
+assert.equal(new Set(simultaneousRows.map(row => row.key)).size, 14, 'same saved timestamps still have distinct rows');

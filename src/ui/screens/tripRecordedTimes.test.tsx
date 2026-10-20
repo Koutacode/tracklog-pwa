@@ -70,6 +70,31 @@ for (const label of ['休息開始地点', 'フェリー乗船地点', '休息�
 assert.equal((restFerryHtml.match(/住所未取得/g) ?? []).length, 6);
 assert.deepEqual(restFerryEvents, restFerrySnapshot, 'rendering preserves saved events');
 
+const operationRenderingPairs = [
+  ['load_start', 'load_end', '積込開始地点', '積込終了地点'],
+  ['unload_start', 'unload_end', '荷卸開始地点', '荷卸終了地点'],
+  ['break_start', 'break_end', '休憩開始地点', '休憩終了地点'],
+  ['wait_start', 'wait_end', '待機開始地点', '待機終了地点'],
+  ['work_start', 'work_end', 'その他開始地点', 'その他終了地点'],
+] as const;
+for (const [start, end, startLabel, endLabel] of operationRenderingPairs) {
+  for (const address of [undefined, null, '', '   ', '合成住所']) {
+    const operationEvents = [start, end].map((type, index) => ({
+      id: `operation-${type}`, tripId, type,
+      ts: index ? '2026-09-30T14:11:00.000Z' : '2026-09-30T14:10:00.000Z',
+      syncStatus: 'synced', address,
+    })) as AppEvent[];
+    const source = [events[0]!, ...operationEvents, events[1]!];
+    const snapshot = structuredClone(source);
+    const markup = renderLocations(source);
+    for (const label of [startLabel, endLabel]) assert.ok(markup.includes(`<strong>${label}</strong>`), label);
+    assert.equal((markup.match(/住所未取得/g) ?? []).length, address === '合成住所' ? 2 : 4);
+    assert.ok(!renderLocations([events[0]!, operationEvents[0]!]).includes(`<strong>${endLabel}</strong>`),
+      'rendering an unfinished operation creates no end row');
+    assert.deepEqual(source, snapshot, 'rendering never changes operation events');
+  }
+}
+
 const unroundedStartTs = '2026-09-30T02:57:00.000Z';
 const unroundedStart: AppEvent[] = [{ ...events[0]!, ts: unroundedStartTs, address: '合成開始地点' }];
 assert.ok(renderLocations(unroundedStart).includes(

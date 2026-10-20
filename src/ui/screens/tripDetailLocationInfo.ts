@@ -35,6 +35,13 @@ const LOCATION_EVENT_LABELS: Record<string, string> = {
   expressway: '高速道路',
 };
 
+// Explicit user-operation boundaries remain visible even when location lookup failed.
+const OPERATION_BOUNDARY_TYPES: ReadonlySet<ProjectedReportTimelineEvent['event']['type']> = new Set([
+  'load_start', 'load_end', 'unload_start', 'unload_end',
+  'break_start', 'break_end', 'wait_start', 'wait_end', 'work_start', 'work_end',
+  'rest_start', 'rest_end', 'boarding', 'disembark',
+]);
+
 function getExtraString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
 }
@@ -46,14 +53,13 @@ export function buildTripDetailLocationInfo(
     const recordedBoundary = event.type === 'trip_start' || event.type === 'trip_end';
     if (recordedBoundary && !Number.isFinite(Date.parse(event.ts))) return [];
     const recordedTs = recordedBoundary ? event.ts : undefined;
-    const restOrFerryBoundary = event.type === 'rest_start' || event.type === 'rest_end'
-      || event.type === 'boarding' || event.type === 'disembark';
-    const address = recordedBoundary || restOrFerryBoundary ? getExtraString(event.address) : event.address;
+    const operationBoundary = OPERATION_BOUNDARY_TYPES.has(event.type);
+    const address = recordedBoundary || operationBoundary ? getExtraString(event.address) : event.address;
     const expressway = event.type === 'expressway_start'
       || event.type === 'expressway_end'
       || event.type === 'expressway';
     const icName = expressway ? getExtraString(event.extras?.icName) : undefined;
-    if (!recordedBoundary && !restOrFerryBoundary && !expressway && !address) return [];
+    if (!recordedBoundary && !operationBoundary && !expressway && !address) return [];
     return [{
       key: `${event.type}-${event.ts}-${index}`,
       label: LOCATION_EVENT_LABELS[event.type] ?? '記録地点',
@@ -63,7 +69,7 @@ export function buildTripDetailLocationInfo(
       icName,
       icDisplay: expressway ? getExpresswayIcDisplay(event.extras) : undefined,
       address,
-      addressUnavailable: (recordedBoundary || restOrFerryBoundary) && !address,
+      addressUnavailable: (recordedBoundary || operationBoundary) && !address,
       expressway,
     }];
   });
