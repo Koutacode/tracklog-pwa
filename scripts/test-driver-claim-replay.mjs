@@ -123,10 +123,10 @@ function createAdapter(db, afterRead) {
  * changeApproval(deviceId, status, adminUser=ADMIN), pauseNextRead(), close().
  * profiles can be passed back to a new server to restore accepted server state.
  */
-export async function createClaimTestServer({ root = process.cwd(), profiles = [] } = {}) {
+export async function createClaimTestServer({ root = process.cwd(), profiles = [], sourceOverride, clock } = {}) {
   const read = relative => readFile(path.join(root, relative), 'utf8');
   const [source, syncTestSource, syncMigration, baseMigration, lockdownMigration, stableMigration] = await Promise.all([
-    read('supabase/functions/tracklog-privileged/index.ts'),
+    sourceOverride ?? read('supabase/functions/tracklog-privileged/index.ts'),
     read('scripts/test-tracklog-sync-v2.mjs'),
     read('supabase/migrations/20260710043340_tracklog_sync_v2.sql'),
     read('supabase/migrations/20260329_tracklog_remote.sql'),
@@ -149,6 +149,11 @@ export async function createClaimTestServer({ root = process.cwd(), profiles = [
     await db.exec(`begin;\n${syncMigration}\ncommit;`);
     await db.exec('delete from public.device_profiles;');
 
+    await db.exec(`create table claim_test_updates (id integer);
+      create function count_claim_test_update() returns trigger language plpgsql as $$
+      begin insert into claim_test_updates values (1); return new; end $$;
+      create trigger count_claim_test_update after update on device_profiles
+      for each row execute function count_claim_test_update();`);
     let nextPause = null;
     const adminClient = createAdapter(db, async () => {
       if (!nextPause) return;
@@ -157,7 +162,7 @@ export async function createClaimTestServer({ root = process.cwd(), profiles = [
       pause.reached();
       await pause.released;
     });
-    const handlers = extractExports(source, ['claimDeviceProfile', 'setDeviceApproval'], { adminClient });
+    const handlers = extractExports(source, ['claimDeviceProfile', 'setDeviceApproval'], { adminClient, ...(clock ? { Date: class extends Date { static now() { return clock.now; } } } : {}) });
     async function ensureUser(user) {
       if (user?.id) await db.query('insert into auth.users (id, email) values ($1, $2) on conflict (id) do nothing', [user.id, `${user.id}@example.test`]);
     }
@@ -171,6 +176,9 @@ export async function createClaimTestServer({ root = process.cwd(), profiles = [
       async claim(payload, user, admin = false) {
         await ensureUser(user);
         return handlers.claimDeviceProfile(payload, user, admin);
+      },
+      async updateCount() {
+        return (await db.query('select count(*)::integer as count from claim_test_updates')).rows[0].count;
       },
       async getProfile(deviceId) {
         const result = await db.query('select row_to_json(profile) as row from public.device_profiles profile where device_id = $1', [deviceId]);

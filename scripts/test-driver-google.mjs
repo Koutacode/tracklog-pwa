@@ -27,6 +27,10 @@ process.stdout.write(candidate.stdout ?? '');
 if (candidate.status !== 0) { process.stderr.write(candidate.stderr ?? ''); throw new Error('Candidate regression failed'); }
 }
 if (!process.env.TRACKLOG_GOOGLE_SCENARIOS) {
+  const throttle = spawnSync(process.execPath, ['scripts/test-device-claim-throttle.mjs'], { encoding:'utf8', timeout:45000 });
+  process.stdout.write(throttle.stdout ?? '');
+  process.stderr.write(throttle.stderr ?? '');
+  assert.equal(throttle.status, 0, 'claim throttle tests');
   const claim = spawnSync(process.execPath, ['scripts/test-driver-claim-replay.mjs'], { encoding:'utf8', timeout:45000 });
   process.stdout.write(claim.stdout ?? '');
   if (claim.status !== 0) { process.stderr.write(claim.stderr ?? ''); throw Error('Claim replay regression failed'); }

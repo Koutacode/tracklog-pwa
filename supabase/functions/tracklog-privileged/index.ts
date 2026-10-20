@@ -681,6 +681,18 @@ function ensureDeviceOwner(profile: JsonRecord | null, user: TracklogUser, admin
   }
 }
 
+// Only coalesce a heartbeat within the existing 60-second freshness window.
+// Compare normalized persisted fields conservatively: any difference writes.
+function canSkipDeviceClaimWrite(existing: JsonRecord, row: JsonRecord, now: number) {
+  const seen = Date.parse(textValue(existing.last_seen_at));
+  const requested = Date.parse(textValue(row.last_seen_at));
+  return Number.isFinite(seen) && Number.isFinite(requested) &&
+    new Date(requested).toISOString() === row.last_seen_at &&
+    now >= seen && now - seen < 60_000 &&
+    requested >= seen && requested - seen < 60_000 &&
+    Object.entries(row).every(([key, value]) => key === 'last_seen_at' || existing[key] === value);
+}
+
 async function claimDeviceProfile(payload: JsonRecord, user: TracklogUser, admin: boolean) {
   const deviceId = requiredText(payload, 'deviceId');
   const existing = await getDeviceProfile(deviceId);
@@ -735,7 +747,12 @@ async function claimDeviceProfile(payload: JsonRecord, user: TracklogUser, admin
   if (existing) {
     const revision = textValue(existing.updated_at);
     if (!revision) throw new HttpError(409, 'Device profile changed; retry registration');
-    mutation = adminClient.from('device_profiles').update(row)
+    // Re-read under the same compare-and-swap predicates even for a no-op.
+    // Never return the earlier snapshot after approval/ownership changed.
+    const profileQuery = adminClient.from('device_profiles');
+    mutation = (canSkipDeviceClaimWrite(existing, row, Date.now())
+      ? profileQuery.select('*')
+      : profileQuery.update(row))
       .eq('device_id', deviceId).eq('updated_at', revision);
     for (const column of ['auth_user_id', 'approval_status', 'approval_requested_at', 'approval_decided_at', 'approval_decided_by']) {
       mutation = existing[column] == null
