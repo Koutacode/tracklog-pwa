@@ -59,8 +59,20 @@ async function main() {
     assert.deepEqual(request, { action: 'resolve-name', lat: 35, lon: 139, radiusM: 8000, eventType: 'expressway_end' });
     return { icName: '合成補助出口（推定）', distanceM: 90, confidence: 'estimated', estimateSource: 'overpass_nearby' };
   });
-  assert.equal((await remoteResolver(35, 139, undefined, { eventType: 'expressway_end' }))?.icName, '合成補助出口（推定）');
+  const remoteResult = await remoteResolver(35, 139, undefined, { eventType: 'expressway_end' });
+  assert.equal(remoteResult?.icName, '合成補助出口（推定）');
+  assert.equal(remoteResult?.upstreamResponseObserved, true);
   assert.equal(upstreamCalls, 1, 'a catalog miss uses the IC-name action only once');
+  assert.equal(catalogCandidate.upstreamResponseObserved, undefined, 'local data cannot prove upstream recovery');
+  for (const raw of [null, { icName: '旧応答', distanceM: 80 },
+    { icName: 'サーバー公的候補', distanceM: 80, estimateSource: 'mlit_n06_2025' }]) {
+    const lookup = createNearestIcResolver(() => null, async () => raw);
+    assert.equal((await lookup(35, 139))?.upstreamResponseObserved, undefined,
+      'HTTP success, absent provenance and server catalogue do not prove Overpass data reception');
+  }
+  await assert.rejects(createNearestIcResolver(() => null, async () => ({
+    icName: '', distanceM: 80, estimateSource: 'overpass_nearby',
+  }))(35, 139), /応答が不正/, 'malformed responses never produce a receipt');
   Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { onLine: false } });
   try {
     assert.deepEqual(await localResolver(35, 139, undefined, { eventType: 'expressway_start' }), catalogCandidate);

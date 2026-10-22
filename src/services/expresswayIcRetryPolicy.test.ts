@@ -4,11 +4,15 @@ import {
   IC_RESOLVE_TEMPORARY_BACKOFF_CAP_MS,
   canApplyIcResolutionResult,
   canRetryIcResolve,
+  canRecoverExhaustedIcResolve,
   captureIcResolutionEventVersion,
   computeIcResolveBackoffMs,
   computeIcResolveDeferredBackoffMs,
   getNextIcResolveDeferredRetryCount,
 } from './expresswayIcRetryPolicy';
+import {
+  canUseIcUpstreamRecovery, IC_UPSTREAM_SUCCESS_TTL_MS, parseIcUpstreamRecoveryState,
+} from './expresswayIcRecovery';
 import {
   acceptIcCandidate,
   classifyIcResolverHttpStatus,
@@ -31,6 +35,39 @@ function assertJsonEqual(actual: unknown, expected: unknown, message: string) {
 }
 
 const nowMs = Date.parse('2026-07-17T08:00:00.000Z');
+
+const exhausted = { icResolveStatus: 'failed', icResolveRetryCount: 6,
+  icResolveAlgorithmVersion: IC_RESOLVE_ALGORITHM_VERSION,
+  icResolveLastAttemptAt: new Date(nowMs - 1_000).toISOString() };
+assertEqual(canRecoverExhaustedIcResolve(exhausted, nowMs, nowMs), true,
+  'a later observed map response permits only the exhausted sixth attempt to recover');
+for (const changed of [
+  { icResolveRetryCount: 5 }, { icResolveRetryCount: 7 }, { icResolveRetryCount: 6.5 },
+  { icResolveStatus: 'pending' }, { icResolveStatus: 'resolved' }, { icName: '既存IC' },
+  { icResolvedManually: true }, { icResolveLastAttemptAt: '' },
+  { icResolveLastAttemptAt: new Date(nowMs + 1).toISOString() },
+  { icResolveAlgorithmVersion: IC_RESOLVE_ALGORITHM_VERSION - 1 },
+  { icResolveAlgorithmVersion: IC_RESOLVE_ALGORITHM_VERSION + 1 },
+  { icResolveNextRetryAt: new Date(nowMs + 1).toISOString() },
+]) assertEqual(canRecoverExhaustedIcResolve({ ...exhausted, ...changed }, nowMs, nowMs), false,
+  `unsafe recovery state stays terminal: ${JSON.stringify(changed)}`);
+for (const proofAt of [0, nowMs - 1_000, nowMs + 1, NaN]) {
+  assertEqual(canRecoverExhaustedIcResolve(exhausted, nowMs, proofAt), false,
+    'missing, old, future or invalid proof does not bypass the budget');
+}
+assertEqual(canRetryIcResolve({ ...exhausted, icResolveRetryCount: 7 }, nowMs, true), false,
+  'a consumed recovery cannot be restarted by online/auth/resume');
+assertEqual(canUseIcUpstreamRecovery({ observedAt: nowMs, nextAttemptAt: 0 }, nowMs), true,
+  'a current receipt may open the shared recovery gate');
+assertEqual(canUseIcUpstreamRecovery({ observedAt: nowMs, nextAttemptAt: 0 }, nowMs + IC_UPSTREAM_SUCCESS_TTL_MS), true,
+  'receipt expires only after its bounded lifetime');
+for (const [state, at] of [
+  [{ observedAt: nowMs, nextAttemptAt: nowMs + 1 }, nowMs],
+  [{ observedAt: nowMs, nextAttemptAt: 0 }, nowMs - 1],
+  [{ observedAt: nowMs, nextAttemptAt: 0 }, nowMs + IC_UPSTREAM_SUCCESS_TTL_MS + 1],
+  [parseIcUpstreamRecoveryState('invalid'), nowMs],
+] as const) assertEqual(canUseIcUpstreamRecovery(state, at), false,
+  'cooldown, clock rollback, stale or corrupt receipt fails closed');
 
 assertEqual(
   canRetryIcResolve({ icName: '札幌IC', icResolveAlgorithmVersion: 1 }, nowMs),
