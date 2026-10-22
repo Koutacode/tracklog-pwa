@@ -147,6 +147,129 @@ public class ResidentExpresswayDetectionPolicyTest {
     }
 
     @Test
+    public void unavailableEndRequiresNinetySecondsAndProbeInsideTheContinuousWindow() {
+        ResidentExpresswayDetectionPolicy.State almost = continuousLowUntil(90_999L);
+        assertFalse(unavailableEnd(almost, 35_000L));
+        ResidentExpresswayDetectionPolicy.State ready = advance(almost, point(91_000L, 10d), true).state;
+        assertEquals(1_000L, ready.continuousLowSpeedSinceMs);
+        assertTrue(unavailableEnd(ready, 1_000L));
+        assertTrue(unavailableEnd(ready, 35_000L));
+        assertTrue(unavailableEnd(ready, 91_000L));
+        assertFalse(unavailableEnd(ready, 999L));
+        assertFalse(unavailableEnd(ready, 91_001L));
+        assertEquals(90_999L, almost.lastMotionAtMs);
+        assertFalse(unavailableEnd(almost, 35_000L));
+    }
+
+    @Test
+    public void unavailableEndRestartsAfterMissingOrInvalidAccuracyWithoutChangingLegacyLowWindow() {
+        double[] accuracyValues = {10d, 101d, -1d, Double.NaN, Double.POSITIVE_INFINITY};
+        for (int index = 0; index < accuracyValues.length; index++) {
+            ResidentExpresswayDetectionPolicy.State before = continuousLowUntil(91_000L);
+            ResidentExpresswayDetectionPolicy.State interrupted = advance(before,
+                    sample(101_000L, index != 0, accuracyValues[index], true, 10d), true).state;
+            assertEquals(-1L, interrupted.continuousLowSpeedSinceMs);
+            assertEquals(1_000L, interrupted.speedBelowSinceMs);
+            assertFalse(unavailableEnd(interrupted, 35_000L));
+            ResidentExpresswayDetectionPolicy.State resumed = advance(interrupted,
+                    point(111_000L, 10d), true).state;
+            assertEquals(111_000L, resumed.continuousLowSpeedSinceMs);
+            assertFalse(unavailableEnd(resumed, 35_000L));
+            assertTrue(unavailableEnd(before, 35_000L));
+        }
+    }
+
+    @Test
+    public void unavailableEndRestartsAfterMissingOrInvalidSpeed() {
+        double[] speedValues = {10d, Double.NaN, -1d, 221d};
+        for (int index = 0; index < speedValues.length; index++) {
+            ResidentExpresswayDetectionPolicy.State interrupted = advance(continuousLowUntil(91_000L),
+                    sample(101_000L, true, 10d, index != 0, speedValues[index]), true).state;
+            assertEquals(-1L, interrupted.continuousLowSpeedSinceMs);
+            assertFalse(unavailableEnd(interrupted, 35_000L));
+            ResidentExpresswayDetectionPolicy.State resumed = advance(interrupted,
+                    point(111_000L, 10d), true).state;
+            assertEquals(111_000L, resumed.continuousLowSpeedSinceMs);
+        }
+    }
+
+    @Test
+    public void unavailableEndAllowsThirtySecondSamplingGapButRejectsLongerGap() {
+        ResidentExpresswayDetectionPolicy.State before = continuousLowUntil(61_000L);
+        ResidentExpresswayDetectionPolicy.State atLimit = advance(before, point(91_000L, 10d), true).state;
+        assertTrue(unavailableEnd(atLimit, 35_000L));
+        ResidentExpresswayDetectionPolicy.State afterGap = advance(before, point(91_001L, 10d), true).state;
+        assertEquals(91_001L, afterGap.continuousLowSpeedSinceMs);
+        assertEquals(1_000L, afterGap.speedBelowSinceMs);
+        assertFalse(unavailableEnd(afterGap, 35_000L));
+    }
+
+    @Test
+    public void unavailableEndFixFreshnessRejectsMissingFutureAndOlderThanThirtySeconds() {
+        assertTrue(ResidentExpresswayDetectionPolicy.isUnavailableEndFixFresh(1_000L, 1_000L));
+        assertTrue(ResidentExpresswayDetectionPolicy.isUnavailableEndFixFresh(1_000L, 31_000L));
+        assertFalse(ResidentExpresswayDetectionPolicy.isUnavailableEndFixFresh(1_000L, 31_001L));
+        assertFalse(ResidentExpresswayDetectionPolicy.isUnavailableEndFixFresh(1_000L, 999L));
+        assertFalse(ResidentExpresswayDetectionPolicy.isUnavailableEndFixFresh(0L, 1_000L));
+        assertFalse(ResidentExpresswayDetectionPolicy.isUnavailableEndFixFresh(-1L, 1_000L));
+    }
+
+    @Test
+    public void unavailableEndDoesNotJoinLowSpeedEpisodesAcrossReacceleration() {
+        ResidentExpresswayDetectionPolicy.State state = advance(continuousLowUntil(91_000L),
+                point(101_000L, CONFIG.endSpeedKmh), true).state;
+        assertEquals(-1L, state.continuousLowSpeedSinceMs);
+        for (long at = 111_000L; at <= 201_000L; at += 10_000L) {
+            state = advance(state, point(at, 10d), true).state;
+        }
+        assertFalse(unavailableEnd(state, 35_000L));
+        assertTrue(unavailableEnd(state, 135_000L));
+    }
+
+    @Test
+    public void unavailableEndClearsWhenSectionIsClosedKeptOrAlreadyPrompting() {
+        ResidentExpresswayDetectionPolicy.State ready = continuousLowUntil(91_000L);
+        ResidentExpresswayDetectionPolicy.State closed = advance(ready, point(101_000L, 10d), false).state;
+        assertEquals(-1L, closed.continuousLowSpeedSinceMs);
+        ResidentExpresswayDetectionPolicy.State kept = new ResidentExpresswayDetectionPolicy.State(ready);
+        kept.keepSuppressed = true;
+        kept = advance(kept, point(101_000L, 10d), true).state;
+        assertEquals(-1L, kept.continuousLowSpeedSinceMs);
+        ResidentExpresswayDetectionPolicy.State prompting = ResidentExpresswayDetectionPolicy.advance(
+                ready, point(101_000L, 10d), CONFIG, true, true).state;
+        assertEquals(-1L, prompting.continuousLowSpeedSinceMs);
+        assertEquals(-1L, ResidentExpresswayDetectionPolicy.afterTransition(ready, false)
+                .continuousLowSpeedSinceMs);
+    }
+
+    @Test
+    public void unavailableEndRequiresMatchingMonotonicSessionAndRestartsAcrossSessionChange() {
+        ResidentExpresswayDetectionPolicy.State ready = continuousLowUntil(91_000L);
+        assertFalse(ResidentExpresswayDetectionPolicy.canPromptForUnavailableEnd(ready, "", 35_000L));
+        assertFalse(ResidentExpresswayDetectionPolicy.canPromptForUnavailableEnd(ready, "other", 35_000L));
+        ResidentExpresswayDetectionPolicy.State changed = advance(ready,
+                new ResidentExpresswayDetectionPolicy.Point("trip", 1L, "next-boot", 101_000L,
+                        true, 10d, true, 10d / 3.6d), true).state;
+        assertEquals(101_000L, changed.continuousLowSpeedSinceMs);
+        assertFalse(unavailableEnd(changed, 35_000L));
+        assertFalse(ResidentExpresswayDetectionPolicy.canPromptForUnavailableEnd(changed,
+                "next-boot", 101_000L));
+    }
+
+    @Test
+    public void unavailableEndIgnoresWallClockReversalWhileMonotonicSamplesStayContinuous() {
+        ResidentExpresswayDetectionPolicy.State before = continuousLowUntil(81_000L);
+        ResidentExpresswayDetectionPolicy.State ready = advance(before,
+                new ResidentExpresswayDetectionPolicy.Point("trip", 1L, "boot", 91_000L,
+                        true, 10d, true, 10d / 3.6d), true).state;
+        assertTrue(unavailableEnd(ready, 35_000L));
+        ResidentExpresswayDetectionPolicy.State wallOnly = advance(ready,
+                new ResidentExpresswayDetectionPolicy.Point("trip", 101_000L, "", -1L,
+                        true, 10d, true, 10d / 3.6d), true).state;
+        assertFalse(unavailableEnd(wallOnly, 35_000L));
+    }
+
+    @Test
     public void keepSuppressesNewPromptUntilTwentySecondsOfRecovery() {
         ResidentExpresswayDetectionPolicy.State state = state("trip");
         state.keepSuppressed = true;
@@ -283,16 +406,34 @@ public class ResidentExpresswayDetectionPolicyTest {
     }
 
     private static ResidentExpresswayDetectionPolicy.Point point(long elapsedMs, double speedKmh) {
+        return sample(elapsedMs, true, 10d, true, speedKmh);
+    }
+
+    private static ResidentExpresswayDetectionPolicy.Point sample(long elapsedMs,
+            boolean hasAccuracy, double accuracyM, boolean hasSpeed, double speedKmh) {
         return new ResidentExpresswayDetectionPolicy.Point(
                 "trip",
                 1_700_000_000_000L + elapsedMs,
                 "boot",
                 elapsedMs,
-                true,
-                10d,
-                true,
+                hasAccuracy,
+                accuracyM,
+                hasSpeed,
                 speedKmh / 3.6d
         );
+    }
+
+    private static ResidentExpresswayDetectionPolicy.State continuousLowUntil(long lastMs) {
+        ResidentExpresswayDetectionPolicy.State state = state("trip");
+        for (long at = 1_000L; at <= lastMs; at += 10_000L) {
+            state = advance(state, point(at, 10d), true).state;
+        }
+        if (state.lastMotionAtMs != lastMs) state = advance(state, point(lastMs, 10d), true).state;
+        return state;
+    }
+
+    private static boolean unavailableEnd(ResidentExpresswayDetectionPolicy.State state, long probeMs) {
+        return ResidentExpresswayDetectionPolicy.canPromptForUnavailableEnd(state, "boot", probeMs);
     }
 
     private static ResidentExpresswayDetectionPolicy.Signal strongSignal() {

@@ -2,6 +2,7 @@ import { db } from '../db/db';
 import { IC_CATALOG_MAX_CANDIDATES, IC_CATALOG_MAX_DISTANCE_M } from '../../shared/ic-catalog/index';
 import {
   getPendingExpresswayEvents,
+  claimExpresswayIcUpstreamRecovery,
   updateExpresswayResolved,
 } from '../db/repositories';
 import type { BaseEvent, EventType, Geo, RoutePoint } from '../domain/types';
@@ -16,14 +17,18 @@ import {
   computeIcResolveBackoffMs,
   canRetryIcResolve,
   IC_RESOLVE_RETRY_LIMIT,
+  IC_RESOLVE_RECOVERY_RETRY_COUNT,
+  canApplyIcResolutionResult,
   captureIcResolutionEventVersion,
   getNextIcResolveDeferredRetryCount,
 } from './expresswayIcRetryPolicy';
+import { getIcUpstreamRecoveryCandidates, recordIcUpstreamSuccess } from './expresswayIcRecovery';
 
 export type ExpresswayIcResolutionSource =
   | 'immediate'
   | 'retry'
   | 'manual'
+  | 'upstream-recovery'
   | 'notification-end';
 
 export type ExpresswayIcResolutionOutcome =
@@ -233,7 +238,7 @@ async function loadEventGeo(eventId: string) {
   }
   const expectedVersion = captureIcResolutionEventVersion(event);
   const referenceTs = getIcResolutionReferenceTs(event);
-  const context = { expectedVersion, referenceTs, tripId: event.tripId, eventType: event.type, extras: event.extras };
+  const context = { event, expectedVersion, referenceTs, tripId: event.tripId, eventType: event.type, extras: event.extras };
   // Reload the authoritative fix with the version guard. A queued request can
   // still carry the old geo after a driver corrects the event's location.
   if (isUsableIcResolutionGeo(event.geo)) {
@@ -338,26 +343,34 @@ async function performResolution(
 ): Promise<ExpresswayIcResolutionOutcome> {
   const eventId = request.eventId.trim();
   if (!eventId) throw new Error('eventId is required');
-  const context = await loadEventGeo(eventId);
-  const { geo, expectedVersion } = context;
-  const guard = { expectedVersion };
-  if (expectedVersion.resolvedManually) {
-    return { status: 'deferred', source: request.source, reason: 'superseded',
-      error: '手動修正済みのIC名は保持されます。変更する場合はIC名を編集してください' };
-  }
-  if (request.source !== 'manual' && !canRetryIcResolve(context.extras, Date.now())) {
-    return { status: 'deferred', source: request.source, reason: 'temporary',
-      error: '保存済みの再試行待ち時間と上限を維持しています' };
-  }
+  let context = await loadEventGeo(eventId);
   const offlineOutcome = (): ExpresswayIcResolutionOutcome => ({
     status: 'deferred', source: request.source, reason: 'offline',
   });
+  if (context.expectedVersion.resolvedManually) {
+    return { status: 'deferred', source: request.source, reason: 'superseded',
+      error: '手動修正済みのIC名は保持されます。変更する場合はIC名を編集してください' };
+  }
+  if (request.source === 'upstream-recovery') {
+    if (!isOnline()) return offlineOutcome();
+    if (!context.geo) return { status: 'deferred', source: request.source, reason: 'temporary' };
+    const claimedVersion = await claimExpresswayIcUpstreamRecovery(eventId, context.expectedVersion);
+    if (!claimedVersion) return { status: 'deferred', source: request.source, reason: 'temporary' };
+    context = await loadEventGeo(eventId);
+    if (!canApplyIcResolutionResult(claimedVersion, context.event)) return supersededOutcome(request.source);
+  } else if (request.source !== 'manual' && !canRetryIcResolve(context.extras, Date.now())) {
+    return { status: 'deferred', source: request.source, reason: 'temporary',
+      error: '保存済みの再試行待ち時間と上限を維持しています' };
+  }
+  const { geo, expectedVersion } = context;
+  const guard = { expectedVersion };
   if (!isOnline() && !resolveOfflineIc) return offlineOutcome();
 
   const saveFailure = async (
     message: string, category: ReturnType<typeof getRetryableIcResolverErrorCategory>,
   ): Promise<ExpresswayIcResolutionOutcome> => {
-    const retryCount = getNextIcResolveDeferredRetryCount(context.extras, request.source === 'manual');
+    const retryCount = request.source === 'upstream-recovery' ? IC_RESOLVE_RECOVERY_RETRY_COUNT
+      : getNextIcResolveDeferredRetryCount(context.extras, request.source === 'manual');
     const exhausted = retryCount >= IC_RESOLVE_RETRY_LIMIT;
     const delayMs = category
       ? computeIcResolveDeferredBackoffMs(category, retryCount)
@@ -415,6 +428,11 @@ async function performResolution(
       guard,
     });
     if (!applied) return supersededOutcome(request.source);
+    // A recovery attempt cannot renew its own permission to trigger more requests.
+    // This receipt may come from the server's cache; it is not a health guarantee.
+    if (!localResolved && result.upstreamResponseObserved && request.source !== 'upstream-recovery') {
+      await recordIcUpstreamSuccess().catch(() => undefined);
+    }
     return { status: 'resolved', source: request.source, result };
   } catch (error) {
     // Offline catalog misses/failures are not network attempts. Preserve the
@@ -496,6 +514,17 @@ export function createExpresswayIcRetryBatchRunner(
         }
       };
       await Promise.all(Array.from({ length: Math.min(2, pending.length) }, worker));
+      if (isOnline() && pending.length < boundedLimit) {
+        const candidates = await getIcUpstreamRecoveryCandidates(isUsableIcResolutionGeo, boundedLimit - pending.length);
+        for (const event of candidates) {
+          try {
+            const outcome = await resolve({ eventId: event.id, source: 'upstream-recovery' });
+            if (outcome.status !== 'deferred') { updatedAny = true; break; }
+          } catch {
+            // Claim rechecks current data and consumes the single attempt before I/O.
+          }
+        }
+      }
       return updatedAny;
     })();
     try {
