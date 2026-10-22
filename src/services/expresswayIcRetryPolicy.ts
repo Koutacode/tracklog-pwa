@@ -1,6 +1,8 @@
 import type { BaseEvent } from '../domain/types';
 
 export const IC_RESOLVE_RETRY_LIMIT = 6;
+// One additional attempt needs independently observed map data, never just an online/auth event.
+export const IC_RESOLVE_RECOVERY_RETRY_COUNT = IC_RESOLVE_RETRY_LIMIT + 1;
 // Bump this when resolver behavior changes so previously exhausted failures retry.
 export const IC_RESOLVE_ALGORITHM_VERSION = 16;
 
@@ -112,6 +114,25 @@ function getIcResolveNextRetryAtMs(extras: IcResolveExtras): number | null {
   if (typeof nextRetryAt !== 'string' || !nextRetryAt.trim()) return null;
   const ms = Date.parse(nextRetryAt);
   return Number.isFinite(ms) ? ms : null;
+}
+
+export function canRecoverExhaustedIcResolve(
+  extras: IcResolveExtras,
+  nowMs: number,
+  observedMapSuccessAt: number,
+): boolean {
+  if (extras?.icResolvedManually === true
+    || (typeof extras?.icName === 'string' && extras.icName.trim())
+    || extras?.icResolveStatus !== 'failed'
+    || getIcResolveAlgorithmVersion(extras) !== IC_RESOLVE_ALGORITHM_VERSION
+    || Number(extras?.icResolveRetryCount) !== IC_RESOLVE_RETRY_LIMIT) return false;
+  const attemptedAt = typeof extras?.icResolveLastAttemptAt === 'string'
+    ? Date.parse(extras.icResolveLastAttemptAt) : NaN;
+  const nextRetryAt = getIcResolveNextRetryAtMs(extras);
+  return Number.isFinite(nowMs) && Number.isFinite(attemptedAt) && attemptedAt > 0
+    && (nextRetryAt == null || nextRetryAt <= nowMs)
+    && Number.isFinite(observedMapSuccessAt) && observedMapSuccessAt > attemptedAt
+    && observedMapSuccessAt <= nowMs;
 }
 
 export function computeIcResolveBackoffMs(retryCount: number): number {

@@ -838,6 +838,34 @@ final class ResidentExpresswayStore {
         }
     }
 
+    /**
+     * A transport failure must not hide the existing long-low-speed confirmation.
+     * Only fresh, continuous GPS evidence from this probe's clock/low-speed episode
+     * can release it. Keep the original detection time and position, and explicitly
+     * retain unknown road evidence; the driver still decides whether to end.
+     */
+    static String tryCommitUnavailableEndPrompt(Context context, long expectedRevision,
+            ResidentExpresswayDetectionPolicy.State motion) {
+        synchronized (LOCK) {
+            Snapshot current = read(context);
+            Probe probe = current.pendingProbe;
+            if (motion == null || probe == null || current.revision != expectedRevision
+                    || !motion.tripId.equals(current.tripId)
+                    || !matchesCurrentProbe(current, probe.id)
+                    || !current.open || current.keepSuppressed || !current.promptId.isEmpty()
+                    || probe.kind != ProbeKind.END
+                    || !ResidentExpresswayExitWatch.LEGACY.equals(probe.endMode)
+                    || !("network".equals(probe.lastFailureCategory)
+                        || "server".equals(probe.lastFailureCategory))
+                    || !ResidentExpresswayDetectionPolicy.canPromptForUnavailableEnd(
+                            motion, probe.monotonicSessionId, probe.elapsedRealtimeMs)) {
+                return "";
+            }
+            return commitEndPrompt(context, probe.id,
+                    new SignalDetails(false, false, false, false, "", null));
+        }
+    }
+
     static String commitEndPrompt(Context context, String probeId, SignalDetails signal) {
         synchronized (LOCK) {
             Snapshot current = read(context);

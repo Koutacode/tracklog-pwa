@@ -15,6 +15,8 @@ export type IcResult = {
   sourceDatasetDate?: string;
   sourceUrls?: string[];
   note?: string;
+  /** Runtime-only receipt; never inferred from a defaulted or local source. */
+  upstreamResponseObserved?: true;
 };
 
 export type IcLookupContext = {
@@ -408,11 +410,16 @@ export function createNearestIcResolver(
     if (typeof navigator !== 'undefined' && !navigator.onLine) return null;
     // The IC-name path is independent from the native road detection probe.
     // Only a catalog miss needs authenticated, bounded upstream map requests.
-    const result = parseIcResult(await invoke({
+    const raw = await invoke({
       action: 'resolve-name', lat, lon, radiusM: normalizeRadius(radiusM),
       ...(context?.eventType ? { eventType: context.eventType } : {}),
       ...(Number.isFinite(context?.travelBearing) ? { travelBearing: context!.travelBearing } : {}),
-    }));
+    });
+    const result = parseIcResult(raw);
+    if (result && raw && typeof raw === 'object'
+      && (raw as Record<string, unknown>).estimateSource === 'overpass_nearby') {
+      result.upstreamResponseObserved = true;
+    }
     return result && result.distanceM <= MAX_CORROBORATED_IC_DISTANCE_M ? result : null;
   };
 }

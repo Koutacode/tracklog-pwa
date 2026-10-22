@@ -380,6 +380,13 @@ public final class ResidentLocationService extends Service {
                         nowElapsedRealtimeNanos
                 );
         if (!quality.accepted) {
+            // Rejected noise must not bridge the fallback's continuous low-speed
+            // evidence. Duplicate/older/provider alternatives add no new evidence.
+            if (quality.rejection != ResidentLocationQualityPolicy.Rejection.NEAR_DUPLICATE
+                    && quality.rejection != ResidentLocationQualityPolicy.Rejection.NON_MONOTONIC_TIMESTAMP
+                    && quality.rejection != ResidentLocationQualityPolicy.Rejection.LOWER_PRIORITY_PROVIDER) {
+                invalidateUnavailableEndEvidence();
+            }
             ResidentLocationState.markLocationRejected(this, quality.rejection);
             return;
         }
@@ -416,8 +423,16 @@ public final class ResidentLocationService extends Service {
             // Actual append failures retain the existing retry/detection behavior.
             ResidentLocationState.cacheLatestRecordedLocation(this, tripId, location);
             advanceExpresswayDetection(location, tripId);
+        } else {
+            invalidateUnavailableEndEvidence();
         }
         uploadLatestLocation(location, tripId);
+    }
+
+    private void invalidateUnavailableEndEvidence() {
+        if (expresswayDetectionState != null) {
+            expresswayDetectionState.continuousLowSpeedSinceMs = -1L;
+        }
     }
 
     private void advanceExpresswayDetection(Location location, String tripId) {
@@ -462,6 +477,21 @@ public final class ResidentLocationService extends Service {
                         !nativeState.promptId.isEmpty()
                 );
         expresswayDetectionState = result.state;
+        // Normal recording accepts older buffered fixes. An unavailable-road
+        // prompt additionally needs a current fix from the monotonic clock.
+        if (!ResidentExpresswayDetectionPolicy.isUnavailableEndFixFresh(
+                elapsedRealtimeMs, SystemClock.elapsedRealtime())) {
+            invalidateUnavailableEndEvidence();
+        }
+        if (result.ignoredReason == ResidentExpresswayDetectionPolicy.IgnoredReason.NONE
+                && nativeState.open) {
+            String promptId = ResidentExpresswayStore.tryCommitUnavailableEndPrompt(
+                    this, nativeState.revision, result.state);
+            if (!promptId.isEmpty()) {
+                showStoredExpresswayEndPrompt(promptId, tripId);
+                return;
+            }
+        }
         if (result.effect.kind == ResidentExpresswayDetectionPolicy.EffectKind.CLEAR_KEEP) {
             if (ResidentExpresswayStore.clearKeepSuppression(
                     this,
@@ -626,14 +656,7 @@ public final class ResidentLocationService extends Service {
                 promptId = ResidentExpresswayStore.commitEndPrompt(this, probe.id, result.signal);
             }
             if (!promptId.isEmpty()) {
-                expresswayDetectionState = ResidentExpresswayDetectionPolicy.afterRestoredEndPrompt(
-                        expresswayDetectionState,
-                        probe.tripId
-                );
-                expresswayDetectionRevision = ResidentExpresswayStore.snapshot(this).revision;
-                handler.post(() -> {
-                    if (!stopping) ResidentExpresswayNotification.show(this, promptId);
-                });
+                showStoredExpresswayEndPrompt(promptId, probe.tripId);
             } else {
                 ResidentExpresswayStore.markProbeFailure(
                         this,
@@ -646,6 +669,15 @@ public final class ResidentLocationService extends Service {
             expresswayProbeInFlight.set(false);
             handler.post(expresswayProbeRetryCheck);
         }
+    }
+
+    private void showStoredExpresswayEndPrompt(String promptId, String tripId) {
+        expresswayDetectionState = ResidentExpresswayDetectionPolicy.afterRestoredEndPrompt(
+                expresswayDetectionState, tripId);
+        expresswayDetectionRevision = ResidentExpresswayStore.snapshot(this).revision;
+        handler.post(() -> {
+            if (!stopping) ResidentExpresswayNotification.show(this, promptId);
+        });
     }
 
     private static String probeFailureCategory(

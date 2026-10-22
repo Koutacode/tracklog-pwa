@@ -3,16 +3,21 @@ import assert from 'node:assert/strict';
 import { liveQuery } from 'dexie';
 import { withRemoteSyncSignalsSuppressed } from '../app/remoteSyncSignal';
 import { db } from '../db/db';
-import { getEventsByTripId, updateEventAddress, updateExpresswayIcNameManual } from '../db/repositories';
+import { claimExpresswayIcUpstreamRecovery, getEventsByTripId, updateEventAddress, updateExpresswayIcNameManual } from '../db/repositories';
 import type { AppEvent, Geo, RoutePoint } from '../domain/types';
 import {
   createExpresswayIcResolutionRunner,
   createExpresswayIcRetryBatchRunner,
   getIcResolutionReferenceTs,
+  isUsableIcResolutionGeo,
   selectIcResolutionSupplementalPoints,
 } from './expresswayIcResolution';
-import { IcResolverError, type IcResult } from './icResolver';
-import { IC_RESOLVE_ALGORITHM_VERSION, IC_RESOLVE_RETRY_LIMIT } from './expresswayIcRetryPolicy';
+import { createNearestIcResolver, IcResolverError, type IcResult } from './icResolver';
+import { captureIcResolutionEventVersion, IC_RESOLVE_ALGORITHM_VERSION, IC_RESOLVE_RETRY_LIMIT } from './expresswayIcRetryPolicy';
+import {
+  getIcUpstreamRecoveryCandidates, IC_UPSTREAM_RECOVERY_KEY, IC_UPSTREAM_RECOVERY_INTERVAL_MS,
+  IC_UPSTREAM_SUCCESS_TTL_MS, icUpstreamRecoverySpentKey, recordIcUpstreamSuccess,
+} from './expresswayIcRecovery';
 import { buildTripDetailReportSnapshot } from '../ui/screens/tripDetailReportSnapshot';
 
 // All fixtures are synthetic; no device/session/network data is used.
@@ -29,6 +34,7 @@ function point(id: string, seconds: number, meters: number, extra: Partial<Route
 }
 
 async function reset(points: RoutePoint[] = [], eventOverrides: Partial<AppEvent> = {}) {
+  await db.meta.where('key').startsWith('ic-upstream-recovery').delete();
   await db.transaction('rw', db.events, db.routePoints, async () => {
     await db.events.clear();
     await db.routePoints.clear();
@@ -906,6 +912,210 @@ async function testManualCorrectionClearsAutomaticOriginMetadata() {
   assert.equal(extras.icResolveGeoOffsetSeconds, undefined);
 }
 
+async function withExhaustedIcRecovery(test: (clock: {
+  now: () => number; advance: (ms: number) => void;
+}) => Promise<void>) {
+  const realNow = Date.now;
+  let now = referenceMs + 600_000;
+  Date.now = () => now;
+  try {
+    await reset([], { address: '合成保存住所', extras: { odoKm: 1234, evidence: 'synthetic',
+      icResolveStatus: 'failed', icResolveRetryCount: 6, icResolveAlgorithmVersion: IC_RESOLVE_ALGORITHM_VERSION,
+      icResolveLastAttemptAt: new Date(now - 1_000).toISOString(), icResolveError: 'synthetic outage' } });
+    await test({ now: () => now, advance: ms => { now += ms; } });
+  } finally {
+    Date.now = realNow;
+  }
+}
+
+async function testExhaustedRecoveryNeedsMapReceiptAndOnlineState() {
+  await withExhaustedIcRecovery(async () => {
+    let requests = 0;
+    const run = createExpresswayIcResolutionRunner(async () => { requests += 1; return null; });
+    const before = await db.events.get(eventId);
+    assert.equal(await createExpresswayIcRetryBatchRunner(run)(12), false);
+    assert.equal((await run({ eventId, source: 'upstream-recovery' })).status, 'deferred');
+    assert.deepEqual(await db.events.get(eventId), before, 'online/auth triggers alone do not mutate a terminal row');
+    await recordIcUpstreamSuccess(); // Synthetic equivalent of a verified ordinary response.
+    Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { onLine: false } });
+    try {
+      assert.equal(await createExpresswayIcRetryBatchRunner(run, true)(12), false);
+      assert.equal((await run({ eventId, source: 'upstream-recovery' })).status, 'deferred');
+      assert.deepEqual(await db.events.get(eventId), before);
+    } finally {
+      Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { onLine: true } });
+    }
+    assert.equal(requests, 0, 'no new health or location probe is sent');
+  });
+}
+
+async function testOrdinaryMapResponseRevivesOneMissingNameWithoutRenewingItself() {
+  await withExhaustedIcRecovery(async clock => {
+    const before = (await db.events.get(eventId))!;
+    await db.events.put({ ...before, id: 'synthetic-proof-event', type: 'expressway_start',
+      extras: { icResolveStatus: 'pending' } });
+    let requests = 0;
+    const remote = createNearestIcResolver(() => null, async request => {
+      requests += 1;
+      if (request.eventType === 'expressway_end') {
+        assert.equal((await savedExtras()).icResolveRetryCount, 7, 'recovery is consumed before network I/O');
+        assert.ok(await db.meta.get(icUpstreamRecoverySpentKey(eventId)));
+      }
+      return { icName: request.eventType === 'expressway_start' ? '合成通常IC' : '合成復旧IC',
+        distanceM: 80, confidence: 'estimated', estimateSource: 'overpass_nearby' };
+    });
+    const run = createExpresswayIcResolutionRunner(remote);
+    const retry = createExpresswayIcRetryBatchRunner(run);
+    assert.equal(await retry(1), true);
+    assert.equal(requests, 1, 'a full ordinary batch leaves no extra request slot');
+    assert.equal((await savedExtras()).icResolveRetryCount, 6);
+    const receipt = (await db.meta.get(IC_UPSTREAM_RECOVERY_KEY))!.value;
+    clock.advance(1_000);
+    assert.equal(await retry(1), true);
+    const after = (await db.events.get(eventId))!;
+    assert.equal(requests, 2);
+    assert.equal(after.extras?.icName, '合成復旧IC（推定）');
+    assert.equal(after.extras?.icResolveStatus, 'resolved');
+    assert.equal(after.extras?.upstreamResponseObserved, undefined, 'runtime receipts are not event metadata');
+    assert.equal(after.ts, before.ts);
+    assert.deepEqual(after.geo, before.geo);
+    assert.equal(after.address, before.address);
+    assert.equal(after.extras?.odoKm, before.extras?.odoKm);
+    assert.equal(after.extras?.evidence, before.extras?.evidence);
+    assert.equal(JSON.parse((await db.meta.get(IC_UPSTREAM_RECOVERY_KEY))!.value).observedAt,
+      JSON.parse(receipt).observedAt, 'a recovery cannot renew its own proof');
+  });
+}
+
+async function testFailedRecoveryStaysConsumedAcrossRestartAndOldSyncReplay() {
+  await withExhaustedIcRecovery(async clock => {
+    const previous = await savedExtras();
+    await recordIcUpstreamSuccess();
+    let requests = 0;
+    const lookup = async () => {
+      requests += 1;
+      assert.equal((await savedExtras()).icResolveRetryCount, requests === 1 ? 7 : 6);
+      throw new IcResolverError('synthetic continuing 502', true, 502);
+    };
+    const run = createExpresswayIcResolutionRunner(lookup);
+    assert.equal(await createExpresswayIcRetryBatchRunner(run)(12), true);
+    assert.equal((await savedExtras()).icResolveRetryCount, 7);
+    assert.equal((await savedExtras()).icResolveStatus, 'failed');
+    assert.equal((await savedExtras()).icResolveNextRetryAt, undefined);
+    db.close(); await db.open();
+    clock.advance(IC_UPSTREAM_RECOVERY_INTERVAL_MS);
+    await recordIcUpstreamSuccess();
+    await createExpresswayIcRetryBatchRunner(createExpresswayIcResolutionRunner(lookup))(12);
+    // Simulate an old client's IC payload arriving after the seventh attempt.
+    await db.events.update(eventId, { extras: { ...previous, icResolveRetryCount: 6 } });
+    assert.deepEqual(await getIcUpstreamRecoveryCandidates(isUsableIcResolutionGeo), []);
+    await createExpresswayIcResolutionRunner(lookup)({ eventId, source: 'upstream-recovery' });
+    assert.equal(requests, 1, 'persisted spent marker rejects even a count=6 replay');
+    await run({ eventId, source: 'manual' });
+    assert.equal(requests, 2, 'explicit manual retry remains available');
+    assert.equal((await savedExtras()).icResolveRetryCount, 1);
+  });
+}
+
+async function testRecoveryClaimIsAtomicAndItsGlobalCooldownSurvivesRestart() {
+  await withExhaustedIcRecovery(async clock => {
+    const otherId = 'synthetic-other-exhausted';
+    await db.events.put({ ...(await db.events.get(eventId))!, id: otherId });
+    await recordIcUpstreamSuccess();
+    let requests = 0;
+    const lookup = async () => { requests += 1; throw new IcResolverError('synthetic 502', true, 502); };
+    await Promise.all([
+      createExpresswayIcResolutionRunner(lookup)({ eventId, source: 'upstream-recovery' }),
+      createExpresswayIcResolutionRunner(lookup)({ eventId: otherId, source: 'upstream-recovery' }),
+    ]);
+    assert.equal(requests, 1, 'transactions across independent runners reserve only one global slot');
+    const remaining = (await db.events.toArray()).find(event => event.extras?.icResolveRetryCount === 6)!;
+    db.close(); await db.open();
+    clock.advance(IC_UPSTREAM_RECOVERY_INTERVAL_MS - 1);
+    await createExpresswayIcResolutionRunner(lookup)({ eventId: remaining.id, source: 'upstream-recovery' });
+    assert.equal(requests, 1);
+    clock.advance(1);
+    await createExpresswayIcResolutionRunner(lookup)({ eventId: remaining.id, source: 'upstream-recovery' });
+    assert.equal(requests, 2, 'the next distinct event may use the next minute while proof is fresh');
+  });
+}
+
+async function testRecoveryClaimIsDurableBeforeIoAndDoesNotChangeOperationData() {
+  await withExhaustedIcRecovery(async () => {
+    const before = (await db.events.get(eventId))!;
+    await recordIcUpstreamSuccess();
+    assert.ok(await claimExpresswayIcUpstreamRecovery(eventId, captureIcResolutionEventVersion(before)));
+    // Simulate process loss after durable claim but before a request is sent.
+    db.close(); await db.open();
+    let requests = 0;
+    const run = createExpresswayIcResolutionRunner(async () => { requests += 1; return null; });
+    await run({ eventId, source: 'upstream-recovery' });
+    await createExpresswayIcRetryBatchRunner(run)(12);
+    const after = (await db.events.get(eventId))!;
+    assert.equal(requests, 0, 'a lost reservation is not retried automatically');
+    assert.equal(after.extras?.icResolveRetryCount, 7);
+    assert.equal(after.extras?.icResolveError, before.extras?.icResolveError);
+    assert.equal(after.ts, before.ts);
+    assert.deepEqual(after.geo, before.geo);
+    assert.equal(after.address, before.address);
+    assert.equal(after.extras?.odoKm, before.extras?.odoKm);
+  });
+}
+
+async function testRecoveryNeverOverwritesConcurrentManualOrLocationEdits() {
+  for (const edit of ['manual', 'geo', 'time']) {
+    await withExhaustedIcRecovery(async () => {
+      await recordIcUpstreamSuccess();
+      const run = createExpresswayIcResolutionRunner(async () => {
+        if (edit === 'manual') await updateExpresswayIcNameManual(eventId, '本人の手動IC');
+        if (edit === 'geo') await db.events.update(eventId, { geo: geoAt(700) });
+        if (edit === 'time') await db.events.update(eventId, { ts: ts(30) });
+        return { icName: '遅い自動IC', distanceM: 80 };
+      });
+      assert.equal((await run({ eventId, source: 'upstream-recovery' })).status, 'deferred');
+      const after = (await db.events.get(eventId))!;
+      assert.equal(after.extras?.icName, edit === 'manual' ? '本人の手動IC' : undefined);
+      if (edit === 'manual') assert.equal(after.extras?.icResolvedManually, true);
+      if (edit === 'geo') assert.deepEqual(after.geo, geoAt(700));
+      if (edit === 'time') assert.equal(after.ts, ts(30));
+    });
+  }
+}
+
+async function testRecoveryFiltersExcludedRowsBeforeApplyingItsBatchLimit() {
+  await withExhaustedIcRecovery(async clock => {
+    const event = (await db.events.get(eventId))!;
+    for (let index = 0; index < 30; index += 1) {
+      const extras = { ...event.extras, icResolveLastAttemptAt: new Date(clock.now() - 60_000).toISOString() };
+      await db.events.put({ ...event, id: `synthetic-geoless-${index}`, geo: undefined, extras });
+      const spentId = `synthetic-spent-${index}`;
+      await db.events.put({ ...event, id: spentId, extras });
+      await db.meta.put({ key: icUpstreamRecoverySpentKey(spentId), value: String(clock.now() - 10_000),
+        updatedAt: new Date(clock.now()).toISOString() });
+    }
+    await recordIcUpstreamSuccess();
+    assert.deepEqual((await getIcUpstreamRecoveryCandidates(isUsableIcResolutionGeo, 1)).map(row => row.id), [eventId]);
+    let requests = 0;
+    const run = createExpresswayIcResolutionRunner(async () => { requests += 1; return { icName: '対象IC', distanceM: 80 }; });
+    await createExpresswayIcRetryBatchRunner(run)(1);
+    assert.equal(requests, 1, 'excluded rows cannot starve the valid record or spend its page');
+    assert.equal((await savedExtras()).icName, '対象IC');
+  });
+}
+
+async function testStaleReceiptCannotRestartAnExhaustedIc() {
+  await withExhaustedIcRecovery(async clock => {
+    await recordIcUpstreamSuccess();
+    clock.advance(IC_UPSTREAM_SUCCESS_TTL_MS + 1);
+    let requests = 0;
+    const run = createExpresswayIcResolutionRunner(async () => { requests += 1; return null; });
+    await createExpresswayIcRetryBatchRunner(run)(12);
+    assert.equal((await run({ eventId, source: 'upstream-recovery' })).status, 'deferred');
+    assert.equal(requests, 0);
+    assert.equal((await savedExtras()).icResolveRetryCount, 6);
+  });
+}
+
 const tests = [
   testPrimarySuccessDoesNotQueryAdditionalPoints,
   testConcurrentAddressCompletionKeepsResolvedIcAndReport,
@@ -947,6 +1157,14 @@ const tests = [
   testLocalSupplementBoundsEveryAlternativeFromOriginalEvent,
   testLocalSupplementUnionOverflowDoesNotTruncateCandidates,
   testOnlineLocalUnionOverflowCannotFallbackToSharedRepresentative,
+  testExhaustedRecoveryNeedsMapReceiptAndOnlineState,
+  testOrdinaryMapResponseRevivesOneMissingNameWithoutRenewingItself,
+  testFailedRecoveryStaysConsumedAcrossRestartAndOldSyncReplay,
+  testRecoveryClaimIsAtomicAndItsGlobalCooldownSurvivesRestart,
+  testRecoveryClaimIsDurableBeforeIoAndDoesNotChangeOperationData,
+  testRecoveryNeverOverwritesConcurrentManualOrLocationEdits,
+  testRecoveryFiltersExcludedRowsBeforeApplyingItsBatchLimit,
+  testStaleReceiptCannotRestartAnExhaustedIc,
 ];
 
 async function main() {

@@ -17,6 +17,7 @@ final class ResidentExpresswayDetectionPolicy {
     static final long END_DECELERATION_WINDOW_MS = 90_000L;
     static final long END_PROBE_MIN_INTERVAL_MS = 30_000L;
     static final long END_UNRESOLVED_FALLBACK_MS = 90_000L;
+    private static final long UNAVAILABLE_END_MAX_SAMPLE_GAP_MS = 30_000L;
     static final double END_RECOVERY_MARGIN_KMH = 8d;
     static final long END_RECOVERY_HOLD_MS = 20_000L;
 
@@ -177,6 +178,7 @@ final class ResidentExpresswayDetectionPolicy {
         long lastSpeedAtMs = -1L;
         long speedAboveSinceMs = -1L;
         long speedBelowSinceMs = -1L;
+        long continuousLowSpeedSinceMs = -1L;
         long speedRecoveredSinceMs = -1L;
         long lastStrongAccelerationAtMs = -1L;
         long lastStrongDecelerationAtMs = -1L;
@@ -200,6 +202,7 @@ final class ResidentExpresswayDetectionPolicy {
             lastSpeedAtMs = source.lastSpeedAtMs;
             speedAboveSinceMs = source.speedAboveSinceMs;
             speedBelowSinceMs = source.speedBelowSinceMs;
+            continuousLowSpeedSinceMs = source.continuousLowSpeedSinceMs;
             speedRecoveredSinceMs = source.speedRecoveredSinceMs;
             lastStrongAccelerationAtMs = source.lastStrongAccelerationAtMs;
             lastStrongDecelerationAtMs = source.lastStrongDecelerationAtMs;
@@ -232,9 +235,21 @@ final class ResidentExpresswayDetectionPolicy {
             return new Result(previous, Effect.none(), clock.ignored);
         }
         if (clock.resetMotion) resetMotion(state);
+        if (previous.lastMotionAtMs >= 0L
+                && clock.motionAtMs - previous.lastMotionAtMs > UNAVAILABLE_END_MAX_SAMPLE_GAP_MS) {
+            state.continuousLowSpeedSinceMs = -1L;
+        }
         state.lastMonotonicSessionId = clock.sessionId;
         state.lastElapsedRealtimeMs = clock.elapsedRealtimeMs;
         state.lastMotionAtMs = clock.motionAtMs;
+
+        // Unavailable-road confirmation needs its own continuous, accurate evidence. Keep the
+        // established motion windows and thresholds independent of this conservative fallback.
+        boolean accurate = point.hasAccuracy && Double.isFinite(point.accuracyM)
+                && point.accuracyM >= 0d && point.accuracyM <= MAX_DETECTION_ACCURACY_M;
+        if (!accurate || !isOpen || state.keepSuppressed || hasPendingPrompt) {
+            state.continuousLowSpeedSinceMs = -1L;
+        }
 
         if (point.hasAccuracy
                 && (!Double.isFinite(point.accuracyM)
@@ -252,6 +267,12 @@ final class ResidentExpresswayDetectionPolicy {
         }
 
         double speedKmh = point.speedMs * 3.6d;
+        if (speedKmh >= config.endSpeedKmh) {
+            state.continuousLowSpeedSinceMs = -1L;
+        } else if (accurate && isOpen && !state.keepSuppressed && !hasPendingPrompt
+                && state.continuousLowSpeedSinceMs < 0L) {
+            state.continuousLowSpeedSinceMs = clock.motionAtMs;
+        }
         Double acceleration = deriveAcceleration(
                 state.lastSpeedMs,
                 state.lastSpeedAtMs,
@@ -389,6 +410,27 @@ final class ResidentExpresswayDetectionPolicy {
         return lowSpeedElapsedMs >= END_UNRESOLVED_FALLBACK_MS;
     }
 
+    static boolean canPromptForUnavailableEnd(
+            State state,
+            String probeSessionId,
+            long probeElapsedRealtimeMs
+    ) {
+        if (state == null || probeSessionId == null || probeSessionId.isEmpty()
+                || !probeSessionId.equals(state.lastMonotonicSessionId)
+                || state.lastElapsedRealtimeMs < 0L
+                || state.lastElapsedRealtimeMs != state.lastMotionAtMs
+                || state.continuousLowSpeedSinceMs < 0L
+                || state.lastMotionAtMs < state.continuousLowSpeedSinceMs) return false;
+        return state.lastMotionAtMs - state.continuousLowSpeedSinceMs >= END_UNRESOLVED_FALLBACK_MS
+                && probeElapsedRealtimeMs >= state.continuousLowSpeedSinceMs
+                && probeElapsedRealtimeMs <= state.lastMotionAtMs;
+    }
+
+    static boolean isUnavailableEndFixFresh(long fixElapsedRealtimeMs, long nowElapsedRealtimeMs) {
+        return fixElapsedRealtimeMs > 0L && nowElapsedRealtimeMs >= fixElapsedRealtimeMs
+                && nowElapsedRealtimeMs - fixElapsedRealtimeMs <= UNAVAILABLE_END_MAX_SAMPLE_GAP_MS;
+    }
+
     static State afterTransition(State previous, boolean keepSuppressed) {
         State state = new State(previous);
         resetMotion(state);
@@ -457,6 +499,7 @@ final class ResidentExpresswayDetectionPolicy {
         state.lastSpeedAtMs = -1L;
         state.speedAboveSinceMs = -1L;
         state.speedBelowSinceMs = -1L;
+        state.continuousLowSpeedSinceMs = -1L;
         state.speedRecoveredSinceMs = -1L;
         state.lastStrongAccelerationAtMs = -1L;
         state.lastStrongDecelerationAtMs = -1L;
@@ -470,6 +513,7 @@ final class ResidentExpresswayDetectionPolicy {
         state.lastSpeedAtMs = -1L;
         state.speedAboveSinceMs = -1L;
         state.speedBelowSinceMs = -1L;
+        state.continuousLowSpeedSinceMs = -1L;
         state.speedRecoveredSinceMs = -1L;
         resetStartCandidate(state);
     }

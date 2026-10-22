@@ -54,6 +54,7 @@ import { validateExpresswayIcManualSelection, type ExpresswayIcManualSelection }
 import { notifyTrackLogEventsChanged } from '../services/localEventsChanged';
 import {
   canApplyIcResolutionResult,
+  canRecoverExhaustedIcResolve,
   canRetryIcResolve as canRetryIcResolveExtras,
   captureIcResolutionEventVersion,
   computeIcResolveBackoffMs,
@@ -61,9 +62,15 @@ import {
   getIcResolveRetryCount as getIcResolveRetryCountFromExtras,
   IC_RESOLVE_ALGORITHM_VERSION,
   IC_RESOLVE_RETRY_LIMIT,
+  IC_RESOLVE_RECOVERY_RETRY_COUNT,
   isStaleIcResolveAlgorithm as isStaleIcResolveAlgorithmExtras,
   type IcResolutionEventVersion,
 } from '../services/expresswayIcRetryPolicy';
+import {
+  canUseIcUpstreamRecovery, IC_UPSTREAM_RECOVERY_KEY, IC_UPSTREAM_RECOVERY_INTERVAL_MS,
+  parseIcUpstreamRecoveryState,
+  icUpstreamRecoverySpentKey,
+} from '../services/expresswayIcRecovery';
 
 /*
  * Utilities
@@ -2163,6 +2170,39 @@ function latestIcEstimateTimestamp(extras?: Record<string, unknown>): string | u
     return Number.isFinite(parsed) ? Math.max(maximum, parsed) : maximum;
   }, 0);
   return latest ? new Date(latest).toISOString() : undefined;
+}
+
+/** Consume the only recovery attempt before I/O, atomically across tabs/restarts. */
+export async function claimExpresswayIcUpstreamRecovery(
+  eventId: string, expectedVersion: IcResolutionEventVersion,
+): Promise<IcResolutionEventVersion | null> {
+  const version = await db.transaction('rw', db.events, db.meta, async () => {
+    const nowMs = Date.now();
+    const state = parseIcUpstreamRecoveryState((await db.meta.get(IC_UPSTREAM_RECOVERY_KEY))?.value);
+    const event = await db.events.get(eventId);
+    if (!event || !EXPRESSWAY_EVENT_TYPES.some(type => type === event.type)
+      || !canUseIcUpstreamRecovery(state, nowMs)
+      || await db.meta.get(icUpstreamRecoverySpentKey(eventId))
+      || !canRecoverExhaustedIcResolve(event.extras, nowMs, state.observedAt)
+      || !canApplyIcResolutionResult(expectedVersion, event)) return null;
+    const extras = { ...event.extras,
+      icResolveRetryCount: IC_RESOLVE_RECOVERY_RETRY_COUNT,
+      icResolveLastAttemptAt: nextIcMetadataTimestamp(event.extras?.icResolveLastAttemptAt) };
+    await db.events.update(eventId, { extras, syncStatus: 'pending' });
+    // A later sync from an old client may replay count=6. Keep the local claim
+    // independently so that it cannot reopen the one automatic recovery.
+    await db.meta.put({ key: icUpstreamRecoverySpentKey(eventId), value: String(nowMs),
+      updatedAt: new Date(nowMs).toISOString() });
+    await db.meta.put({ key: IC_UPSTREAM_RECOVERY_KEY,
+      value: JSON.stringify({ ...state, nextAttemptAt: nowMs + IC_UPSTREAM_RECOVERY_INTERVAL_MS }),
+      updatedAt: new Date(nowMs).toISOString() });
+    return captureIcResolutionEventVersion((await db.events.get(eventId))!);
+  });
+  if (version) {
+    notifyRemoteMutation('expressway-ic-recovery-claim');
+    notifyTrackLogEventsChanged();
+  }
+  return version;
 }
 
 export async function updateExpresswayResolved(params: {
