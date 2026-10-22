@@ -1,0 +1,202 @@
+# Rollback reserve only: previous published source with a greater Android versionCode.
+# This first branch push creates a short-lived signed artifact, not a Release.
+name: TrackLog rollback reserve APK
+
+on:
+  push:
+    branches: [trial/ic-rollback-ready-20261022]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tracklog-ic-rollback-reserve-only
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  trial:
+    if: >-
+      github.repository == 'Koutacode/tracklog-pwa' &&
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/trial/ic-rollback-ready-20261022' &&
+      github.event.created == true &&
+      github.event.deleted == false &&
+      github.event.forced == false &&
+      github.run_attempt == 1
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      TRIAL_EXPECTED_VERSION: '0.1.81'
+      TRIAL_EXPECTED_CODE: '79'
+      TRIAL_EXPECTED_MAIN: b3ea41cdfaa2e14fb6b5693111e11088b925cdce
+      TRIAL_EXPECTED_PREVIOUS_SHA: 70148761977e1cd6e6133a850cc35ede99ba368d
+      TRIAL_EXPECTED_LATEST_TAG: v0.1.79
+    steps:
+      - name: Checkout immutable push SHA
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node without persistent cache
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          package-manager-cache: false
+
+      - name: Validate reviewed version and unchanged public targets
+        env:
+          OBSERVED_SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$OBSERVED_SOURCE_SHA"
+          test "$(git rev-parse HEAD^)" = "$TRIAL_EXPECTED_PREVIOUS_SHA"
+          actual_diff="$(git diff --name-only "$TRIAL_EXPECTED_PREVIOUS_SHA" HEAD)"
+          expected_diff="$(printf '%s\n' .github/workflows/android-rollback-ready.yml android/gradle.properties package-lock.json package.json)"
+          test "$actual_diff" = "$expected_diff"
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import { readExpectedRelease } from './scripts/verify-latest-release-apk.mjs';
+          const expected = await readExpectedRelease(process.cwd());
+          assert.equal(expected.version, process.env.TRIAL_EXPECTED_VERSION);
+          assert.equal(expected.versionCode, process.env.TRIAL_EXPECTED_CODE);
+          assert.ok(Number(expected.versionCode) > 78);
+          const get = async path => {
+            const response = await fetch(`https://api.github.com/repos/Koutacode/tracklog-pwa/${path}`, {
+              headers: { Accept: 'application/vnd.github+json' }, signal: AbortSignal.timeout(15000),
+            });
+            assert.equal(response.ok, true, 'Public target read failed; stop without signing');
+            return response.json();
+          };
+          const [main, latest] = await Promise.all([get('branches/main'), get('releases/latest')]);
+          assert.equal(main.commit.sha, process.env.TRIAL_EXPECTED_MAIN);
+          assert.equal(latest.tag_name, process.env.TRIAL_EXPECTED_LATEST_TAG);
+          assert.equal(latest.draft, false);
+          assert.equal(latest.prerelease, false);
+          NODE
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Web and protocol regressions without production configuration
+        run: |
+          npm run typecheck
+          npm run test:logic
+          npm run test:sync
+          npm run test:release-apk
+          npm run check:csp
+
+      - name: Build web assets with existing client configuration
+        env:
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+          VITE_FIREBASE_API_KEY: ${{ secrets.VITE_FIREBASE_API_KEY }}
+          VITE_FIREBASE_AUTH_DOMAIN: ${{ secrets.VITE_FIREBASE_AUTH_DOMAIN }}
+          VITE_FIREBASE_PROJECT_ID: ${{ secrets.VITE_FIREBASE_PROJECT_ID }}
+          VITE_FIREBASE_MESSAGING_SENDER_ID: ${{ secrets.VITE_FIREBASE_MESSAGING_SENDER_ID }}
+          VITE_FIREBASE_APP_ID: ${{ secrets.VITE_FIREBASE_APP_ID }}
+          VITE_FIREBASE_VAPID_KEY: ${{ secrets.VITE_FIREBASE_VAPID_KEY }}
+          VITE_TRACKLOG_NATIVE_PUSH_ENABLED: 'true'
+        run: |
+          set -euo pipefail
+          test -n "${VITE_SUPABASE_URL:-}"
+          test -n "${VITE_SUPABASE_ANON_KEY:-}"
+          npm run build
+          npm run check:offline
+          npm run cap:sync:android
+
+      - name: Set up JDK without persistent cache
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: zulu
+
+      - name: Set up standard Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: 'platform-tools platforms;android-36 build-tools;36.0.0'
+
+      - name: Restore existing native configuration inside this runner only
+        env:
+          TRACKLOG_ANDROID_DEBUG_KEYSTORE_BASE64: ${{ secrets.TRACKLOG_ANDROID_DEBUG_KEYSTORE_BASE64 }}
+          TRACKLOG_GOOGLE_SERVICES_JSON_BASE64: ${{ secrets.TRACKLOG_GOOGLE_SERVICES_JSON_BASE64 }}
+        run: |
+          set -euo pipefail
+          umask 077
+          test -n "${TRACKLOG_ANDROID_DEBUG_KEYSTORE_BASE64:-}"
+          test -n "${TRACKLOG_GOOGLE_SERVICES_JSON_BASE64:-}"
+          test ! -e "$RUNNER_TEMP/tracklog-ic-rollback.keystore"
+          test ! -e android/app/google-services.json
+          printf '%s' "$TRACKLOG_ANDROID_DEBUG_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/tracklog-ic-rollback.keystore"
+          printf '%s' "$TRACKLOG_GOOGLE_SERVICES_JSON_BASE64" | base64 --decode > android/app/google-services.json
+
+      - name: Run Android regressions and build once
+        working-directory: android
+        env:
+          TRACKLOG_ANDROID_KEYSTORE_PATH: ${{ runner.temp }}/tracklog-ic-rollback.keystore
+        run: bash ./gradlew --no-daemon --no-build-cache :app:testDebugUnitTest :app:assembleDebugAndroidTest :app:assembleDebug
+
+      - name: Verify actual signed APK and prepare only three trial files
+        env:
+          OBSERVED_SOURCE_SHA: ${{ github.sha }}
+          OBSERVED_RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import { createHash } from 'node:crypto';
+          import { readFile, mkdir, copyFile, writeFile, constants } from 'node:fs/promises';
+          import { locateAndroidTool, runCommand, parseManifest, parseSigner, readExpectedRelease, OFFICIAL_SIGNER_SHA256 } from './scripts/verify-latest-release-apk.mjs';
+          const source = 'android/app/build/outputs/apk/debug/app-debug.apk';
+          const expected = await readExpectedRelease(process.cwd());
+          assert.equal(expected.version, process.env.TRIAL_EXPECTED_VERSION);
+          assert.equal(expected.versionCode, process.env.TRIAL_EXPECTED_CODE);
+          const aapt = await locateAndroidTool('aapt', process.env);
+          const apksigner = await locateAndroidTool('apksigner', process.env);
+          const manifest = parseManifest(await runCommand(aapt, ['dump', 'badging', source]));
+          assert.equal(manifest.packageName, 'com.tracklog.assist');
+          assert.equal(manifest.versionName, expected.version);
+          assert.equal(manifest.versionCode, expected.versionCode);
+          const signerSha256 = parseSigner(await runCommand(apksigner, ['verify', '--print-certs', source]));
+          assert.equal(signerSha256, OFFICIAL_SIGNER_SHA256, 'APK signer is not the prior official signer');
+          const embedded = JSON.parse(await runCommand('unzip', ['-p', source, 'assets/public/version.json']));
+          assert.equal(embedded.version, expected.version);
+          const bytes = await readFile(source);
+          assert.ok(bytes.length > 0 && bytes.length <= 20 * 1024 * 1024, 'APK exceeds trial storage cap');
+          const sha256 = createHash('sha256').update(bytes).digest('hex');
+          await mkdir('trial-artifact');
+          await copyFile(source, 'trial-artifact/tracklog-previous-code-79.apk', constants.COPYFILE_EXCL);
+          await writeFile('trial-artifact/tracklog-previous-code-79.apk.sha256', `${sha256}  tracklog-previous-code-79.apk\n`, { flag: 'wx' });
+          await writeFile('trial-artifact/verification.json', JSON.stringify({
+            ...manifest, signerSha256, sha256, sizeBytes: bytes.length,
+            buildDate: embedded.buildDate ?? null, sourceSha: process.env.OBSERVED_SOURCE_SHA,
+            previousReleasedSourceSha: process.env.TRIAL_EXPECTED_PREVIOUS_SHA,
+            previousReleasedTag: process.env.TRIAL_EXPECTED_LATEST_TAG, rollbackReserve: true,
+            runId: process.env.OBSERVED_RUN_ID, runAttempt: 1, retentionDays: 1,
+            nativePushBuildFlag: true, deviceVerified: false,
+          }, null, 2) + '\n', { flag: 'wx' });
+          const copied = await readFile('trial-artifact/tracklog-previous-code-79.apk');
+          assert.equal(createHash('sha256').update(copied).digest('hex'), sha256);
+          NODE
+
+      - name: Clean only temporary native secret files
+        if: always()
+        run: |
+          rm -f -- "$RUNNER_TEMP/tracklog-ic-rollback.keystore" android/app/google-services.json
+
+      - name: Preserve one short-lived trial artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tracklog-rollback-reserve-${{ github.run_id }}
+          path: |
+            trial-artifact/tracklog-previous-code-79.apk
+            trial-artifact/tracklog-previous-code-79.apk.sha256
+            trial-artifact/verification.json
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
