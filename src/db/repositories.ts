@@ -1068,6 +1068,7 @@ export async function startTrip(params: {
     await setMeta(META_PENDING_EXPRESSWAY_END_DECISION, null);
   });
   if (!event) throw new Error('運行開始イベントを保存できませんでした');
+  notifyTrackLogEventsChanged();
   notifyRemoteMutation('trip-start');
   return { tripId, event };
 }
@@ -1162,6 +1163,7 @@ export async function endTrip(params: {
     await clearBreakToRestConfirmationsForTripTx(params.tripId);
   });
   if (!event) throw new Error('運行終了イベントを保存できませんでした');
+  notifyTrackLogEventsChanged();
   notifyRemoteMutation('trip-end');
   return { event };
 }
