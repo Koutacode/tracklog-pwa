@@ -1,5 +1,6 @@
 package com.tracklog.assist;
 
+import android.Manifest;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
@@ -9,6 +10,7 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.pm.PackageManager;
 import android.content.pm.ServiceInfo;
 import android.location.Location;
 import android.location.LocationListener;
@@ -326,7 +328,13 @@ public final class ResidentLocationService extends Service {
             public void onStatusChanged(String provider, int status, Bundle extras) {}
         };
         registeredLocationListener = listener;
+        // The readiness check can become stale before or between provider registrations.
         if (request.gpsAvailable) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
+                    != PackageManager.PERMISSION_GRANTED) {
+                handler.post(locationReadinessRefresh);
+                return false;
+            }
             locationManager.requestLocationUpdates(
                     LocationManager.GPS_PROVIDER,
                     ResidentLocationSamplingPolicy.RECORDING_INTERVAL_MS,
@@ -337,6 +345,11 @@ public final class ResidentLocationService extends Service {
         }
         if (request.networkAvailable) {
             if (!canProcessTrip(request.tripId)) {
+                handler.post(locationReadinessRefresh);
+                return false;
+            }
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
+                    != PackageManager.PERMISSION_GRANTED) {
                 handler.post(locationReadinessRefresh);
                 return false;
             }

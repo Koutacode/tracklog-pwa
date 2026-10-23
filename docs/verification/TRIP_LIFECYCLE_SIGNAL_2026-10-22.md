@@ -38,7 +38,8 @@ IC判定、署名と権限設定は変更しない。
 `npm run check:csp`、`npm run cap:sync:android`、Android unit tests
 （136件、失敗0件）、Android debug APK / test APK のビルドが成功。
 debug APK の manifest は `com.tracklog.assist` / `0.1.82` / code80。
-Android lint は既存 Java の `MissingPermission` 2件で失敗（55 warnings）。
+初回候補の Android lint は既存 Java の `MissingPermission` 2件で失敗
+（55 warnings）。後続の位置権限修正でこの2件を解消した。
 今回変更した TS、テスト、版番号による新規 lint 指摘は確認されていない。
 
 本人端末の導入版は更新済みとの本人申告のみ。実機 GPS、画面 OFF、更新・復旧の
