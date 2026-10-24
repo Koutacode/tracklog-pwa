@@ -451,6 +451,14 @@ public final class ResidentLocationService extends Service {
     private void advanceExpresswayDetection(Location location, String tripId) {
         if (!canProcessTrip(tripId)) return;
         ResidentExpresswayStore.Snapshot nativeState = ResidentExpresswayStore.snapshot(this);
+        if (nativeState.storageHealthy && !nativeState.promptId.isEmpty()
+                && !nativeState.promptId.equals(ResidentExpresswayStore.freshPromptIdForNotification(
+                        this, System.currentTimeMillis()))) {
+            // Retire a moved prompt on the first accepted fix. Returning to its
+            // original coordinate must not revive the old notification later.
+            ResidentExpresswayNotification.restoreIfPending(this);
+            nativeState = ResidentExpresswayStore.snapshot(this);
+        }
         if (!nativeState.storageHealthy
                 || nativeState.paused
                 || !tripId.equals(nativeState.tripId)) {

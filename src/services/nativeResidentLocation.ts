@@ -706,6 +706,7 @@ export type NativeResidentExpresswayPromptResolution = {
   stored: true;
   eventId: string;
   generation: number;
+  decidedAt: string;
 };
 
 export async function resolveNativeResidentExpresswayPrompt(options: {
@@ -721,8 +722,12 @@ export async function resolveNativeResidentExpresswayPrompt(options: {
   });
   const eventId = typeof result?.eventId === 'string' ? result.eventId.trim() : '';
   const generation = Number(result?.generation);
-  if (result?.stored !== true || !eventId || !Number.isSafeInteger(generation) || generation < 1) {
+  const decidedAt = typeof result?.decidedAt === 'string'
+    && Number.isFinite(Date.parse(result.decidedAt))
+    ? new Date(Date.parse(result.decidedAt)).toISOString() : '';
+  if (result?.stored !== true || !eventId || !Number.isSafeInteger(generation)
+    || generation < 1 || !decidedAt) {
     throw new Error('Android高速判定の保存結果が不正です');
   }
-  return { stored: true, eventId, generation };
+  return { stored: true, eventId, generation, decidedAt };
 }

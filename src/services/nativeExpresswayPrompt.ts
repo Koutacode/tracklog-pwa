@@ -2,16 +2,24 @@ import { Capacitor } from '@capacitor/core';
 import { LocalNotifications, type ActionPerformed, type ActionType } from '@capacitor/local-notifications';
 import { checkNotificationPermissionStatus } from './nativeSetup';
 import {
-  clearPendingExpresswayEndDecision,
   clearPendingExpresswayEndPrompt,
   clearPendingExpresswayEndPromptIfMatches,
+  commitPendingExpresswayKeepDecision,
+  STALE_NATIVE_EXPRESSWAY_DETECTION_ERROR,
   endExpressway,
   getPendingExpresswayEndPrompt,
+  getEventsByTripId,
+  getLatestRoutePointForTrip,
   setPendingExpresswayEndDecision,
   setPendingExpresswayEndPrompt,
   type PendingExpresswayEndPrompt,
 } from '../db/repositories';
 import { enqueueNotificationExpresswayEndIcResolution } from './expresswayIcResolution';
+import {
+  EXPRESSWAY_PROMPT_MAX_AGE_MS,
+  isFreshExpresswayEndPrompt,
+  matchesExpresswayPromptDecision,
+} from '../domain/expresswayPromptFreshness';
 
 const ACTION_TYPE_ID = 'tracklog_expressway_end_actions';
 const ACTION_END = 'end_expressway';
@@ -79,23 +87,29 @@ function promptIdentity(prompt: PendingExpresswayEndPrompt) {
   };
 }
 
-async function clearHandledPrompt(prompt: PendingExpresswayEndPrompt) {
-  if (prompt.promptId || prompt.reason?.nativeDetectionId) {
-    return clearPendingExpresswayEndPromptIfMatches(promptIdentity(prompt));
+async function clearHandledPrompt(prompt: PendingExpresswayEndPrompt,
+  clearMatchingDecision = false) {
+  return clearPendingExpresswayEndPromptIfMatches({
+    ...promptIdentity(prompt), detectedAt: prompt.detectedAt,
+  }, clearMatchingDecision);
+}
+
+async function cancelIfNoCurrentPrompt(tripId: string) {
+  const current = await getPendingExpresswayEndPrompt();
+  if (!current || current.tripId !== tripId) {
+    await cancelNativeExpresswayEndPrompt(tripId);
   }
-  await clearPendingExpresswayEndPrompt(prompt.tripId);
-  return true;
 }
 
 async function canPersistFailedPromptAction(prompt: PendingExpresswayEndPrompt) {
   const current = await getPendingExpresswayEndPrompt();
-  if (!current) return true;
-  if (current.tripId !== prompt.tripId) return false;
-  if (prompt.promptId) return current.promptId === prompt.promptId;
-  if (prompt.reason?.nativeDetectionId) {
-    return current.reason?.nativeDetectionId === prompt.reason.nativeDetectionId;
-  }
-  return !current.promptId && !current.reason?.nativeDetectionId;
+  return current?.detectedAt === prompt.detectedAt
+    && matchesExpresswayPromptDecision({
+      tripId: prompt.tripId,
+      promptId: prompt.promptId,
+      nativeDetectionId: prompt.reason?.nativeDetectionId,
+      detectedAt: prompt.detectedAt,
+    }, current);
 }
 
 async function ensureNativePermission(): Promise<boolean> {
@@ -136,13 +150,22 @@ export async function handleNativeExpresswayPromptNotificationAction(
         tripId: prompt.tripId,
         geo: prompt.geo,
         autoDecision: prompt.reason,
+        expectedPrompt: {
+          detectedAt: prompt.detectedAt,
+          promptId: prompt.promptId,
+          nativeDetectionId: prompt.reason?.nativeDetectionId,
+        },
         source: 'automatic_detection',
         automaticConfirmation: 'confirmed',
       });
       enqueueNotificationExpresswayEndIcResolution({ eventId, geo: prompt.geo });
       await clearHandledPrompt(prompt);
-      await clearPendingExpresswayEndDecision(prompt.tripId);
-    } catch {
+    } catch (error) {
+      if (error instanceof Error && error.message === STALE_NATIVE_EXPRESSWAY_DETECTION_ERROR) {
+        await clearHandledPrompt(prompt, true);
+        await cancelIfNoCurrentPrompt(prompt.tripId);
+        return true;
+      }
       if (await canPersistFailedPromptAction(prompt)) {
         await setPendingExpresswayEndPrompt(prompt);
         await setPendingExpresswayEndDecision({
@@ -151,29 +174,62 @@ export async function handleNativeExpresswayPromptNotificationAction(
           nativeDetectionId: prompt.reason?.nativeDetectionId,
           action: 'end',
           decidedAt: new Date().toISOString(),
+          detectedAt: prompt.detectedAt,
           speedKmh: prompt.speedKmh,
           geo: prompt.geo,
-        });
+        }, { detectedAt: prompt.detectedAt, promptId: prompt.promptId,
+          nativeDetectionId: prompt.reason?.nativeDetectionId });
       } else {
         shouldCancel = false;
+        await cancelIfNoCurrentPrompt(prompt.tripId);
       }
     }
-    if (shouldCancel) await cancelNativeExpresswayEndPrompt(prompt.tripId);
+    if (shouldCancel) {
+      const current = await getPendingExpresswayEndPrompt();
+      if (!current || current.tripId !== prompt.tripId
+        || current.detectedAt === prompt.detectedAt
+          && matchesExpresswayPromptDecision({ tripId: prompt.tripId,
+            promptId: prompt.promptId,
+            nativeDetectionId: prompt.reason?.nativeDetectionId,
+            detectedAt: prompt.detectedAt }, current)) {
+        await cancelNativeExpresswayEndPrompt(prompt.tripId);
+      }
+    }
     return true;
   }
   if (event.actionId === ACTION_KEEP) {
-    const cleared = await clearHandledPrompt(prompt);
-    if (!cleared) return true;
-    await setPendingExpresswayEndDecision({
-      tripId: prompt.tripId,
-      promptId: prompt.promptId,
-      nativeDetectionId: prompt.reason?.nativeDetectionId,
-      action: 'keep',
-      decidedAt: new Date().toISOString(),
-      speedKmh: prompt.speedKmh,
+    const nowMs = Date.now();
+    if (!isFreshExpresswayEndPrompt({
+      detectedAt: prompt.detectedAt,
+      decidedAt: new Date(nowMs).toISOString(),
       geo: prompt.geo,
-    });
-    await cancelNativeExpresswayEndPrompt(prompt.tripId);
+      events: await getEventsByTripId(prompt.tripId),
+      latestFix: await getLatestRoutePointForTrip(
+        prompt.tripId, nowMs, EXPRESSWAY_PROMPT_MAX_AGE_MS,
+        prompt.geo, prompt.detectedAt),
+    })) {
+      await clearHandledPrompt(prompt, true);
+      await cancelIfNoCurrentPrompt(prompt.tripId);
+      return true;
+    }
+    try {
+      await commitPendingExpresswayKeepDecision({
+        tripId: prompt.tripId,
+        promptId: prompt.promptId,
+        nativeDetectionId: prompt.reason?.nativeDetectionId,
+        action: 'keep',
+        decidedAt: new Date().toISOString(),
+        detectedAt: prompt.detectedAt,
+        speedKmh: prompt.speedKmh,
+        geo: prompt.geo,
+      }, { detectedAt: prompt.detectedAt, promptId: prompt.promptId,
+        nativeDetectionId: prompt.reason?.nativeDetectionId });
+      await cancelNativeExpresswayEndPrompt(prompt.tripId);
+    } catch (error) {
+      if (!(error instanceof Error)
+        || error.message !== STALE_NATIVE_EXPRESSWAY_DETECTION_ERROR) throw error;
+      await cancelIfNoCurrentPrompt(prompt.tripId);
+    }
   }
   return true;
 }

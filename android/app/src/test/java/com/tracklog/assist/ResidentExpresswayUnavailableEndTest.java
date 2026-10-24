@@ -59,8 +59,10 @@ public class ResidentExpresswayUnavailableEndTest {
         assertFalse(event.reason.getBoolean("nearIc"));
         assertFalse(event.reason.getBoolean("nearEtcGate"));
         assertFalse(event.reason.has("nearestIcName"));
-        assertTrue(ResidentExpresswayStore.recordDecision(context, promptId, true,
-                WALL_BASE + 120_000).stored);
+        ResidentExpresswayStore.DecisionResult result = ResidentExpresswayStore.recordDecision(
+                context, promptId, true, WALL_BASE + 120_000);
+        assertTrue(result.stored);
+        assertEquals(iso(120_000), result.decidedAt);
         ResidentExpresswayStore.Snapshot ended = ResidentExpresswayStore.snapshot(context);
         assertFalse(ended.open);
         ResidentExpresswayStore.Event decision = ended.events.get(1);

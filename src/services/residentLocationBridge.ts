@@ -150,6 +150,7 @@ type ResidentLocationPlugin = {
     stored: true;
     eventId: string;
     generation: number;
+    decidedAt: string;
   }>;
 };
 

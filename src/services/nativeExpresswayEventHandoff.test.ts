@@ -1,5 +1,5 @@
 import type { AutoExpresswayDecisionReason, endExpressway } from '../db/repositories';
-import type { AppEvent } from '../domain/types';
+import type { AppEvent, RoutePoint } from '../domain/types';
 import type { NativeResidentExpresswayEvent } from './nativeResidentLocation';
 import {
   drainNativeResidentExpresswayEventQueue,
@@ -85,8 +85,12 @@ function createHarness(options?: {
   queued?: NativeResidentExpresswayEvent[];
   events?: AppEvent[];
   activeTripId?: string | null;
+  latestFix?: RoutePoint | null;
+  nowMs?: number;
 }) {
   const queued = [...(options?.queued ?? [])];
+  const nowMs = Math.max(Date.parse('2026-08-23T00:02:05.000Z'),
+    ...queued.map(event => Date.parse(event.detectedAt))) + 1_000;
   const events = [...(options?.events ?? [tripStart()])];
   const generations = new Map<string, number>();
   const acknowledgements: string[] = [];
@@ -114,6 +118,8 @@ function createHarness(options?: {
     getActiveTripId: async () => options?.activeTripId === undefined ? TRIP_ID : options.activeTripId,
     getEventsByTripId: async () => [...events],
     getAutoExpresswayConfig: async () => BASE_CONFIG,
+    getLatestRoutePointForTrip: async () => options?.latestFix ?? null,
+    now: () => options?.nowMs ?? nowMs,
     getGeneration: async (tripId: string) => generations.get(tripId) ?? 0,
     advanceGeneration: async (tripId: string, generation: number) => {
       const next = Math.max(generations.get(tripId) ?? 0, generation);
@@ -518,7 +524,75 @@ async function run() {
     assertEqual(harness.counts().decisionMaterializations, 0, 'old action cannot leak to generic Supervisor');
   }
 
-  console.log('nativeExpresswayEventHandoff: 41 tests passed');
+  {
+    const stalePrompt = nativeEvent('end_prompt', 2, 'overnight-prompt');
+    const harness = createHarness({
+      queued: [stalePrompt],
+      events: [tripStart(), expresswayStart()],
+      nowMs: Date.parse('2026-08-24T01:02:00.000Z'),
+    });
+    const result = await drainNativeResidentExpresswayEventQueue({
+      enabled: true, dependencies: harness.dependencies,
+    });
+    assertEqual(result.terminal, 1, 'replayed overnight prompt is retired');
+    assertEqual(harness.counts().promptMaterializations, 0, 'restart cannot display an old candidate');
+  }
+  {
+    const restEvents: AppEvent[] = [
+      tripStart(), expresswayStart(),
+      { id: 'rest-1', tripId: TRIP_ID, type: 'rest_start',
+        ts: '2026-08-23T00:03:00.000Z', syncStatus: 'pending',
+        extras: { restSessionId: 'rest-session' } },
+      { id: 'rest-2', tripId: TRIP_ID, type: 'rest_end',
+        ts: '2026-08-23T00:04:00.000Z', syncStatus: 'pending',
+        extras: { restSessionId: 'rest-session' } },
+    ];
+    const decision = { ...nativeEvent('decision_end', 2, 'after-rest'),
+      decidedAt: '2026-08-23T00:05:00.000Z' };
+    const oldPrompt = createHarness({
+      queued: [nativeEvent('end_prompt', 2, 'prompt-before-rest')],
+      events: restEvents,
+      nowMs: Date.parse('2026-08-23T00:05:00.000Z'),
+    });
+    const promptReplay = await drainNativeResidentExpresswayEventQueue({
+      enabled: true, dependencies: oldPrompt.dependencies,
+    });
+    assertEqual(promptReplay.terminal, 1, 'a paused candidate cannot reappear after rest');
+    assertEqual(oldPrompt.counts().promptMaterializations, 0,
+      'replayed old prompt is never shown after re-driving');
+    const harness = createHarness({ queued: [decision], events: restEvents });
+    const result = await drainNativeResidentExpresswayEventQueue({
+      enabled: true, dependencies: harness.dependencies,
+    });
+    assertEqual(result.terminal, 1, 'rest then re-drive invalidates an old decision');
+    assertEqual(harness.counts().endMaterializations, 0, 'no old end or event anchor is written');
+    const confirmedBeforeRest = { ...decision, id: 'before-rest',
+      decidedAt: '2026-08-23T00:02:05.000Z' };
+    const earlier = createHarness({ queued: [confirmedBeforeRest], events: restEvents });
+    const replay = await drainNativeResidentExpresswayEventQueue({
+      enabled: true, dependencies: earlier.dependencies,
+    });
+    assertEqual(replay.materialized, 1,
+      'a valid confirmation made before rest survives delayed queue replay');
+    assertEqual(earlier.counts().endMaterializations, 1,
+      'the valid end is materialized at its original decision time');
+  }
+  {
+    const latestFix: RoutePoint = { id: 'new-fix', tripId: TRIP_ID,
+      ts: '2026-08-23T00:02:03.000Z', lat: 10, lng: 20.05,
+      accuracy: 10, source: 'background' };
+    const decision = { ...nativeEvent('decision_end', 2, 'moved-decision'),
+      geo: { lat: 10, lon: 20, accuracy: 10 } };
+    const harness = createHarness({ queued: [decision],
+      events: [tripStart(), expresswayStart()], latestFix });
+    const result = await drainNativeResidentExpresswayEventQueue({
+      enabled: true, dependencies: harness.dependencies,
+    });
+    assertEqual(result.terminal, 1, 'five-kilometre movement rejects the old prompt');
+    assertEqual(harness.counts().endMaterializations, 0, 'movement never writes an end anchor');
+  }
+
+  console.log('nativeExpresswayEventHandoff: 46 tests passed');
 }
 
 void run().catch(error => {

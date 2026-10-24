@@ -9,6 +9,7 @@ import {
   getAutoExpresswayConfig,
   getEventsByTripId,
   getNativeExpresswayGeneration,
+  getLatestRoutePointForTrip,
   setPendingExpresswayEndDecision,
   setPendingExpresswayEndPrompt,
   startExpressway,
@@ -16,6 +17,10 @@ import {
   type AutoExpresswayDecisionReason,
 } from '../db/repositories';
 import type { AppEvent, Geo } from '../domain/types';
+import {
+  EXPRESSWAY_PROMPT_MAX_AGE_MS,
+  isFreshExpresswayEndPrompt,
+} from '../domain/expresswayPromptFreshness';
 import {
   EXPRESSWAY_TOGGLE_DEFINITION,
   PERSISTED_BASIC_TOGGLE_DEFINITIONS,
@@ -40,6 +45,8 @@ type NativeExpresswayEventHandoffDependencies = {
   acknowledge(ids: string[]): Promise<{ remaining: number }>;
   getActiveTripId(): Promise<string | null>;
   getEventsByTripId(tripId: string): Promise<AppEvent[]>;
+  getLatestRoutePointForTrip: typeof getLatestRoutePointForTrip;
+  now(): number;
   getAutoExpresswayConfig(): Promise<AutoExpresswayConfig>;
   getGeneration(tripId: string): Promise<number>;
   advanceGeneration(tripId: string, generation: number): Promise<number>;
@@ -58,6 +65,8 @@ const DEFAULT_DEPENDENCIES: NativeExpresswayEventHandoffDependencies = {
   acknowledge: acknowledgeNativeResidentExpresswayEvents,
   getActiveTripId,
   getEventsByTripId,
+  getLatestRoutePointForTrip,
+  now: Date.now,
   getAutoExpresswayConfig,
   getGeneration: getNativeExpresswayGeneration,
   advanceGeneration: advanceNativeExpresswayGeneration,
@@ -342,6 +351,16 @@ async function materializeEvent(
 
   if (event.kind === 'end_prompt') {
     if (!openExpressway || staleAtEventWatermark) return 'terminal';
+    const nowMs = dependencies.now();
+    if (!isFreshExpresswayEndPrompt({
+      detectedAt: event.detectedAt,
+      decidedAt: new Date(nowMs).toISOString(),
+      geo,
+      events,
+      latestFix: await dependencies.getLatestRoutePointForTrip(
+        event.tripId, nowMs, EXPRESSWAY_PROMPT_MAX_AGE_MS,
+        geo, event.detectedAt),
+    })) return 'terminal';
     // A new Java prompt proves that its earlier keep suppression recovered.
     // Remove only an old keep marker; never consume an end action here.
     await dependencies.clearPendingKeepDecision(event.tripId);
@@ -357,7 +376,15 @@ async function materializeEvent(
   }
 
   if (event.kind === 'decision_keep') {
-    if (!openExpressway || staleAtEventWatermark) {
+    if (!openExpressway || staleAtEventWatermark || !isFreshExpresswayEndPrompt({
+      detectedAt: event.detectedAt,
+      decidedAt: event.decidedAt ?? event.detectedAt,
+      geo,
+      events,
+      latestFix: await dependencies.getLatestRoutePointForTrip(
+        event.tripId, Date.parse(event.decidedAt ?? event.detectedAt),
+        EXPRESSWAY_PROMPT_MAX_AGE_MS, geo, event.detectedAt),
+    })) {
       await dependencies.clearPendingPromptIfMatches({
         tripId: event.tripId,
         promptId: event.promptId,
@@ -389,6 +416,20 @@ async function materializeEvent(
       tripId: event.tripId,
       promptId: event.promptId,
     });
+    return 'terminal';
+  }
+  // Keep the native detection-id duplicate path intact, including a replay
+  // after a successful foreground commit. No fresh end may use an old geo.
+  if (!sameEnd && !isFreshExpresswayEndPrompt({
+    detectedAt: event.detectedAt,
+    decidedAt: event.decidedAt ?? event.detectedAt,
+    geo,
+    events,
+    latestFix: await dependencies.getLatestRoutePointForTrip(
+      event.tripId, Date.parse(event.decidedAt ?? event.detectedAt),
+      EXPRESSWAY_PROMPT_MAX_AGE_MS, geo, event.detectedAt),
+  })) {
+    await dependencies.clearPendingPromptIfMatches({ tripId: event.tripId, promptId: event.promptId });
     return 'terminal';
   }
   try {

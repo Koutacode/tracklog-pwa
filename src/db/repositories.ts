@@ -49,6 +49,11 @@ import {
   type ExpresswayEndCommitAuthorization,
 } from '../domain/expresswayEndRequest';
 import { reverseGeocode } from '../services/geo';
+import {
+  EXPRESSWAY_PROMPT_MAX_AGE_MS,
+  isFreshExpresswayEndPrompt,
+  matchesExpresswayPromptDecision,
+} from '../domain/expresswayPromptFreshness';
 import { resolveNearestIC, type IcResult } from '../services/icResolver';
 import { validateExpresswayIcManualSelection, type ExpresswayIcManualSelection } from '../services/expresswayIcManualEdit';
 import { notifyTrackLogEventsChanged } from '../services/localEventsChanged';
@@ -147,6 +152,7 @@ export type PendingExpresswayEndDecision = {
   tripId: string;
   nativeDetectionId?: string;
   promptId?: string;
+  detectedAt?: string;
   action: 'end' | 'keep';
   decidedAt: string;
   speedKmh?: number;
@@ -387,6 +393,8 @@ function normalizePendingExpresswayEndDecision(raw: unknown): PendingExpresswayE
   const speedRaw = Number(row.speedKmh);
   const nativeDetectionId = normalizeNativeDetectionId(row.nativeDetectionId);
   const promptId = normalizeNativeDetectionId(row.promptId);
+  const detectedAt = typeof row.detectedAt === 'string' && Number.isFinite(Date.parse(row.detectedAt))
+    ? new Date(Date.parse(row.detectedAt)).toISOString() : undefined;
   const geoRaw = (row.geo ?? null) as Record<string, unknown> | null;
   let geo: Geo | undefined;
   if (geoRaw) {
@@ -405,6 +413,7 @@ function normalizePendingExpresswayEndDecision(raw: unknown): PendingExpresswayE
     tripId,
     ...(nativeDetectionId ? { nativeDetectionId } : {}),
     ...(promptId ? { promptId } : {}),
+    ...(detectedAt ? { detectedAt } : {}),
     action,
     decidedAt,
     ...(Number.isFinite(speedRaw) ? { speedKmh: Math.max(0, Math.min(200, Math.round(speedRaw))) } : {}),
@@ -526,10 +535,11 @@ export async function clearPendingExpresswayEndPromptIfMatches(expected: {
   tripId: string;
   promptId?: string;
   nativeDetectionId?: string;
-}): Promise<boolean> {
+  detectedAt?: string;
+}, clearMatchingDecision = false): Promise<boolean> {
   const promptId = normalizeNativeDetectionId(expected.promptId);
   const nativeDetectionId = normalizeNativeDetectionId(expected.nativeDetectionId);
-  if (!promptId && !nativeDetectionId) return false;
+  if (!promptId && !nativeDetectionId && !expected.detectedAt) return false;
   return db.transaction('rw', db.meta, async () => {
     const raw = (await db.meta.get(META_PENDING_EXPRESSWAY_END_PROMPT))?.value ?? null;
     if (!raw) return false;
@@ -543,10 +553,23 @@ export async function clearPendingExpresswayEndPromptIfMatches(expected: {
       current?.tripId !== expected.tripId
       || (promptId && current.promptId !== promptId)
       || (nativeDetectionId && current.reason?.nativeDetectionId !== nativeDetectionId)
+      || (expected.detectedAt && current.detectedAt !== expected.detectedAt)
     ) {
       return false;
     }
     await db.meta.delete(META_PENDING_EXPRESSWAY_END_PROMPT);
+    if (clearMatchingDecision) {
+      const rawDecision = (await db.meta.get(META_PENDING_EXPRESSWAY_END_DECISION))?.value;
+      let decision: PendingExpresswayEndDecision | null = null;
+      try {
+        decision = rawDecision
+          ? normalizePendingExpresswayEndDecision(JSON.parse(rawDecision) as unknown) : null;
+      } catch { /* A malformed marker cannot match this prompt. */ }
+      if (decision?.detectedAt === current.detectedAt
+        && matchesExpresswayPromptDecision(decision, current)) {
+        await db.meta.delete(META_PENDING_EXPRESSWAY_END_DECISION);
+      }
+    }
     return true;
   });
 }
@@ -561,18 +584,64 @@ export async function getPendingExpresswayEndDecision(): Promise<PendingExpressw
   }
 }
 
-export async function setPendingExpresswayEndDecision(decision: PendingExpresswayEndDecision): Promise<void> {
+export async function setPendingExpresswayEndDecision(
+  decision: PendingExpresswayEndDecision,
+  expectedPrompt?: { detectedAt: string; promptId?: string; nativeDetectionId?: string },
+): Promise<void> {
   const normalized = normalizePendingExpresswayEndDecision(decision);
   if (!normalized) throw new Error('高速終了アクションが不正です');
-  const current = await getPendingExpresswayEndDecision();
-  if (
-    (current?.nativeDetectionId
-      && current.nativeDetectionId === normalized.nativeDetectionId)
-    || (current?.promptId && current.promptId === normalized.promptId)
-  ) {
-    return;
+  const save = async () => {
+    if (expectedPrompt) {
+      const raw = (await db.meta.get(META_PENDING_EXPRESSWAY_END_PROMPT))?.value;
+      let stored: PendingExpresswayEndPrompt | null = null;
+      try {
+        stored = raw ? normalizePendingExpresswayEndPrompt(JSON.parse(raw) as unknown) : null;
+      } catch { /* Invalid candidate cannot authorize a decision. */ }
+      if (stored?.detectedAt !== expectedPrompt.detectedAt
+        || !matchesExpresswayPromptDecision({ tripId: normalized.tripId,
+          ...expectedPrompt }, stored)) throw new Error(STALE_NATIVE_EXPRESSWAY_DETECTION_ERROR);
+    }
+    const current = await getPendingExpresswayEndDecision();
+    if (
+      (current?.nativeDetectionId
+        && current.nativeDetectionId === normalized.nativeDetectionId)
+      || (current?.promptId && current.promptId === normalized.promptId)
+    ) return;
+    await setMeta(META_PENDING_EXPRESSWAY_END_DECISION, JSON.stringify(normalized));
+  };
+  if (expectedPrompt) await db.transaction('rw', db.meta, save);
+  else await save();
+}
+
+/** Commit a Web-owned keep and retire exactly its prompt in one durable write. */
+export async function commitPendingExpresswayKeepDecision(
+  decision: PendingExpresswayEndDecision,
+  expectedPrompt: { detectedAt: string; promptId?: string; nativeDetectionId?: string },
+): Promise<void> {
+  const normalized = normalizePendingExpresswayEndDecision(decision);
+  if (!normalized || normalized.action !== 'keep'
+    || normalized.detectedAt !== expectedPrompt.detectedAt) {
+    throw new Error(STALE_NATIVE_EXPRESSWAY_DETECTION_ERROR);
   }
-  await setMeta(META_PENDING_EXPRESSWAY_END_DECISION, JSON.stringify(normalized));
+  await db.transaction('rw', db.meta, async () => {
+    const raw = (await db.meta.get(META_PENDING_EXPRESSWAY_END_PROMPT))?.value;
+    let stored: PendingExpresswayEndPrompt | null = null;
+    try {
+      stored = raw ? normalizePendingExpresswayEndPrompt(JSON.parse(raw) as unknown) : null;
+    } catch { /* Invalid candidate cannot authorize a keep. */ }
+    if (stored?.detectedAt !== expectedPrompt.detectedAt
+      || !matchesExpresswayPromptDecision({ tripId: normalized.tripId,
+        ...expectedPrompt }, stored)) throw new Error(STALE_NATIVE_EXPRESSWAY_DETECTION_ERROR);
+    const oldDecision = await getPendingExpresswayEndDecision();
+    if (oldDecision?.tripId === normalized.tripId
+      && oldDecision.action === 'end'
+      && matchesExpresswayPromptDecision(oldDecision, stored)) {
+      throw new Error(STALE_NATIVE_EXPRESSWAY_DETECTION_ERROR);
+    }
+    await db.meta.put({ key: META_PENDING_EXPRESSWAY_END_DECISION,
+      value: JSON.stringify(normalized), updatedAt: nowIso() });
+    await db.meta.delete(META_PENDING_EXPRESSWAY_END_PROMPT);
+  });
 }
 
 export async function clearPendingExpresswayEndDecision(tripId?: string): Promise<void> {
@@ -1006,10 +1075,18 @@ export async function getLatestRoutePoint(): Promise<RoutePoint | null> {
   return point ?? null;
 }
 
-export async function getLatestRoutePointForTrip(tripId: string, atMs: number): Promise<RoutePoint | null> {
+export async function getLatestRoutePointForTrip(
+  tripId: string, atMs: number, maxAgeMs = 120_000,
+  promptGeo?: Geo, detectedAt?: string,
+): Promise<RoutePoint | null> {
   if (!Number.isFinite(atMs)) return null;
+  // Freshness needs the greatest displacement, not the latest fix: a driver
+  // may have left the candidate and returned before pressing the notification.
+  if (promptGeo && detectedAt) {
+    return getFarthestRoutePointFromGeo(tripId, detectedAt, new Date(atMs).toISOString(), promptGeo);
+  }
   return await db.routePoints.where('[tripId+ts]')
-    .between([tripId, new Date(atMs - 120_000).toISOString()], [tripId, new Date(atMs).toISOString()], true, true)
+    .between([tripId, new Date(atMs - maxAgeMs).toISOString()], [tripId, new Date(atMs).toISOString()], true, true)
     .reverse()
     // Event anchors may copy an older detected location with a later confirmation
     // timestamp. Only real fixes can establish a fresh end-of-trip position.
@@ -1019,6 +1096,38 @@ export async function getLatestRoutePointForTrip(tripId: string, atMs: number): 
       && (point.accuracy == null || (Number.isFinite(point.accuracy)
         && point.accuracy >= 0 && point.accuracy <= 150)))
     .first() ?? null;
+}
+
+/** Return the clearest recorded displacement since a prompt, even if the driver returns. */
+export async function getFarthestRoutePointFromGeo(
+  tripId: string, detectedAt: string, decidedAt: string, geo: Geo,
+): Promise<RoutePoint | null> {
+  const start = Date.parse(detectedAt);
+  const end = Date.parse(decidedAt);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start
+    || end - start > EXPRESSWAY_PROMPT_MAX_AGE_MS) return null;
+  const points = await db.routePoints.where('[tripId+ts]')
+    .between([tripId, new Date(start).toISOString()],
+      [tripId, new Date(end).toISOString()], false, true)
+    .filter(point => point.source !== 'event'
+      && Number.isFinite(point.lat) && Math.abs(point.lat) <= 90
+      && Number.isFinite(point.lng) && Math.abs(point.lng) <= 180
+      && (point.accuracy == null || (Number.isFinite(point.accuracy)
+        && point.accuracy >= 0 && point.accuracy <= 150)))
+    .toArray();
+  let farthest: RoutePoint | null = null;
+  let strongest = Number.NEGATIVE_INFINITY;
+  for (const point of points) {
+    const lat = (point.lat - geo.lat) * Math.PI / 180;
+    const lng = (point.lng - geo.lng) * Math.PI / 180;
+    const a = Math.sin(lat / 2) ** 2
+      + Math.cos(geo.lat * Math.PI / 180) * Math.cos(point.lat * Math.PI / 180)
+      * Math.sin(lng / 2) ** 2;
+    const distance = 6_371_000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(Math.max(0, 1 - a)));
+    const evidence = distance - Math.max(geo.accuracy ?? 0, point.accuracy ?? 0);
+    if (evidence > strongest) { strongest = evidence; farthest = point; }
+  }
+  return farthest;
 }
 
 export async function getEventsByTripId(tripId: string): Promise<AppEvent[]> {
@@ -1969,6 +2078,7 @@ export async function endExpressway(params: {
   address?: string;
   occurredAt?: string;
   autoDecision?: AutoExpresswayDecisionReason;
+  expectedPrompt?: { detectedAt: string; promptId?: string; nativeDetectionId?: string };
 } & ExpresswayEndCommitAuthorization) {
   assertExpresswayEndCommitAuthorization(params);
   let eventId = '';
@@ -2007,6 +2117,43 @@ export async function endExpressway(params: {
     assertTripOpen(events);
     const open = findOpenToggleSessionId(events, EXPRESSWAY_TOGGLE_DEFINITION);
     if (!open) throw new Error('高速道路が開始されていません');
+    if (params.source === 'automatic_detection') {
+      if (params.expectedPrompt) {
+        const rawPrompt = (await db.meta.get(META_PENDING_EXPRESSWAY_END_PROMPT))?.value;
+        let storedPrompt: PendingExpresswayEndPrompt | null = null;
+        try {
+          storedPrompt = rawPrompt
+            ? normalizePendingExpresswayEndPrompt(JSON.parse(rawPrompt) as unknown) : null;
+        } catch { /* Malformed or absent candidates cannot authorize an end. */ }
+        if (storedPrompt?.detectedAt !== params.expectedPrompt.detectedAt
+          || !matchesExpresswayPromptDecision({
+            tripId: params.tripId,
+            ...params.expectedPrompt,
+          }, storedPrompt)) throw new Error(STALE_NATIVE_EXPRESSWAY_DETECTION_ERROR);
+        const rawDecision = (await db.meta.get(META_PENDING_EXPRESSWAY_END_DECISION))?.value;
+        let storedDecision: PendingExpresswayEndDecision | null = null;
+        try {
+          storedDecision = rawDecision
+            ? normalizePendingExpresswayEndDecision(JSON.parse(rawDecision) as unknown) : null;
+        } catch { /* A malformed keep marker cannot authorize an end. */ }
+        if (storedDecision?.tripId === params.tripId && storedDecision.action === 'keep') {
+          throw new Error(STALE_NATIVE_EXPRESSWAY_DETECTION_ERROR);
+        }
+      }
+      // The transaction is the last guard for every Web, notification and
+      // queue replay path. Reject before putEventWithRoutePointTx creates an
+      // event-anchor using an old prompt coordinate at a new decision time.
+      const latestFix = await getLatestRoutePointForTrip(
+        params.tripId, Date.parse(occurredAt), EXPRESSWAY_PROMPT_MAX_AGE_MS,
+        params.geo, autoDecision?.evaluatedAt);
+      if (!autoDecision || !params.geo || !isFreshExpresswayEndPrompt({
+        detectedAt: autoDecision.evaluatedAt,
+        decidedAt: occurredAt,
+        geo: params.geo,
+        events,
+        latestFix,
+      })) throw new Error(STALE_NATIVE_EXPRESSWAY_DETECTION_ERROR);
+    }
     const e = baseEvent({
       tripId: params.tripId,
       type: 'expressway_end',
