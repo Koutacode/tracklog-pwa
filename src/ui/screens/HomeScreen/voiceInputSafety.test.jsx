@@ -373,7 +373,9 @@ async function main() {
     assert.equal(openDialogs(renderer).length, 0);
   });
   await check('automatic_expressway_still_waits_for_existing_confirmation', () => {
-    addExpressway(); fixture.pendingPrompt = { tripId: fixture.manager.tripId, detectedAt: '2026-10-13T00:25:00.000Z', speedKmh: 0 };
+    addExpressway(); fixture.pendingPrompt = { tripId: fixture.manager.tripId,
+      detectedAt: new Date().toISOString(), speedKmh: 0,
+      geo: { lat: 10, lng: 20, accuracy: 10 } };
   }, async ({ renderer }) => {
     assert.ok(text(renderer.root).includes('高速道路を降りましたか？'));
     noActions();

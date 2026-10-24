@@ -30,15 +30,15 @@ public final class ResidentExpresswayNotificationReceiver extends BroadcastRecei
                 end,
                 System.currentTimeMillis()
         );
-        // Never close the prompt before the durable decision commit succeeds. A process restart or
-        // transient storage failure therefore leaves the action recoverable instead of losing it.
-        if (shouldCloseNotification(result.stored)) {
+        // Close only after a durable decision or durable expiry. Storage failure leaves
+        // the action recoverable after a process restart.
+        if (shouldCloseNotification(result.stored || result.expired)) {
             ResidentExpresswayNotification.cancel(context);
             ResidentLocationService.startIfEligible(context);
         }
     }
 
-    static boolean shouldCloseNotification(boolean durableDecisionStored) {
-        return durableDecisionStored;
+    static boolean shouldCloseNotification(boolean durableActionResolved) {
+        return durableActionResolved;
     }
 }

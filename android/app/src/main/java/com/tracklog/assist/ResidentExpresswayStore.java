@@ -14,6 +14,12 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
+import java.text.ParseException;
+import java.text.ParsePosition;
+import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.Locale;
+import java.util.TimeZone;
 
 /**
  * Durable native expressway state and at-least-once WebView handoff queue.
@@ -28,6 +34,8 @@ final class ResidentExpresswayStore {
     static final int MAX_PEEK_LIMIT = 1_000;
     static final long PROBE_RETRY_BASE_MS = 30_000L;
     static final long PROBE_RETRY_MAX_MS = 15L * 60L * 1000L;
+    static final long PROMPT_MAX_AGE_MS = 30L * 60L * 1000L;
+    static final double PROMPT_MOVE_METERS = 500d;
     private static final int STATE_VERSION = 1;
     private static final Object LOCK = new Object();
     private static volatile boolean processStorageHealthy = true;
@@ -428,11 +436,17 @@ final class ResidentExpresswayStore {
 
     static final class DecisionResult {
         final boolean stored;
+        final boolean expired;
         final String eventId;
         final long generation;
 
         DecisionResult(boolean stored, String eventId, long generation) {
+            this(stored, false, eventId, generation);
+        }
+
+        DecisionResult(boolean stored, boolean expired, String eventId, long generation) {
             this.stored = stored;
+            this.expired = expired;
             this.eventId = eventId;
             this.generation = Math.max(0L, generation);
         }
@@ -443,6 +457,22 @@ final class ResidentExpresswayStore {
     static Snapshot snapshot(Context context) {
         synchronized (LOCK) {
             return read(context);
+        }
+    }
+
+    /** Retire an obsolete notification before restoring it after a service restart. */
+    static String freshPromptIdForNotification(Context context, long nowMs) {
+        synchronized (LOCK) {
+            Snapshot current = read(context);
+            if (!current.storageHealthy || current.promptId.isEmpty()) return "";
+            if (current.pendingPrompt != null && isPromptFresh(context, current.pendingPrompt, nowMs)) {
+                return current.promptId;
+            }
+            Snapshot expired = current.copy(current.tripId,
+                    incrementRevision(current.revision), current.open, current.paused,
+                    false, "", current.events, null, current.config);
+            write(context, expired);
+            return "";
         }
     }
 
@@ -458,14 +488,14 @@ final class ResidentExpresswayStore {
             String normalizedTripId = normalizeText(activeTripId, 200);
             Snapshot next = current;
             if (normalizedTripId.isEmpty()) {
-                if (!current.paused || current.pendingProbe != null) {
+                if (!current.paused || current.pendingProbe != null || !current.promptId.isEmpty()) {
                     next = current.copy(
                             current.tripId,
                             incrementRevision(current.revision),
                             current.open,
                             true,
                             current.keepSuppressed,
-                            current.promptId,
+                            "",
                             current.events,
                             null,
                             config
@@ -502,9 +532,13 @@ final class ResidentExpresswayStore {
                 );
                 boolean nextOpen = nativeTransitionPending ? current.open : webExpresswayOpen;
                 boolean nextKeep = nextOpen && current.keepSuppressed;
-                String nextPrompt = nextOpen ? current.promptId : "";
+                boolean expiredPrompt = !current.promptId.isEmpty()
+                        && (current.pendingPrompt == null || !isPromptFresh(
+                                context, current.pendingPrompt, System.currentTimeMillis()));
+                String nextPrompt = nextOpen && !expiredPrompt ? current.promptId : "";
                 boolean invalidatesProbe = current.paused
                         || nextOpen != current.open
+                        || expiredPrompt
                         || !sameConfig(current.config, config);
                 next = current.copy(
                         current.tripId,
@@ -942,6 +976,15 @@ final class ResidentExpresswayStore {
             if (prompt == null || prompt.kind != EventKind.END_PROMPT) {
                 return new DecisionResult(false, "", current.revision);
             }
+            if (!isPromptFresh(context, prompt, decidedAtMs)) {
+                // Keep the queued prompt for replay/audit, but revoke its action.
+                // WebView handoff independently rejects it after a rest or drive.
+                Snapshot expired = current.copy(current.tripId,
+                        incrementRevision(current.revision), current.open, current.paused,
+                        false, "", current.events, null, current.config);
+                boolean saved = write(context, expired);
+                return new DecisionResult(false, saved, "", current.revision);
+            }
             long generation = incrementRevision(current.revision);
             String decisionId = UUID.randomUUID().toString();
             JSONObject reason;
@@ -990,6 +1033,55 @@ final class ResidentExpresswayStore {
             return write(context, next)
                     ? new DecisionResult(true, decisionId, generation)
                     : new DecisionResult(false, "", current.revision);
+        }
+    }
+
+    private static long promptTimestamp(String value) throws ParseException {
+        SimpleDateFormat format = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US);
+        format.setTimeZone(TimeZone.getTimeZone("UTC"));
+        format.setLenient(false);
+        ParsePosition position = new ParsePosition(0);
+        Date parsed = format.parse(value, position);
+        if (parsed == null || position.getIndex() != value.length()) {
+            throw new ParseException("Invalid prompt timestamp", Math.max(0, position.getErrorIndex()));
+        }
+        return parsed.getTime();
+    }
+
+    private static boolean isPromptFresh(Context context, Event prompt, long decidedAtMs) {
+        if (!Double.isFinite(prompt.latitude) || Math.abs(prompt.latitude) > 90d
+                || !Double.isFinite(prompt.longitude) || Math.abs(prompt.longitude) > 180d
+                || (prompt.accuracyM != null && (!Double.isFinite(prompt.accuracyM)
+                    || prompt.accuracyM < 0d))) return false;
+        final long detectedAtMs;
+        try {
+            detectedAtMs = promptTimestamp(prompt.detectedAt);
+        } catch (ParseException exception) {
+            return false;
+        }
+        if (decidedAtMs < detectedAtMs || decidedAtMs - detectedAtMs > PROMPT_MAX_AGE_MS) {
+            return false;
+        }
+        JSONObject latest = ResidentLocationState.getLatestRecordedLocation(context);
+        if (latest == null || !prompt.tripId.equals(latest.optString("tripId"))) return true;
+        try {
+            long fixAtMs = promptTimestamp(latest.optString("ts"));
+            if (fixAtMs <= detectedAtMs || fixAtMs > decidedAtMs) return true;
+            double lat = latest.optDouble("lat", Double.NaN);
+            double lon = latest.optDouble("lng", Double.NaN);
+            double accuracy = latest.isNull("accuracy") ? 0d
+                    : latest.optDouble("accuracy", Double.NaN);
+            if (!Double.isFinite(lat) || !Double.isFinite(lon)
+                    || !Double.isFinite(accuracy) || accuracy < 0d || accuracy > 150d) return true;
+            ResidentExpresswayExitWatch.Fix first = new ResidentExpresswayExitWatch.Fix(
+                    detectedAtMs, prompt.latitude, prompt.longitude,
+                    prompt.accuracyM == null ? 0d : prompt.accuracyM, prompt.speedKmh);
+            ResidentExpresswayExitWatch.Fix second = new ResidentExpresswayExitWatch.Fix(
+                    fixAtMs, lat, lon, accuracy, 0d);
+            return ResidentExpresswayExitWatch.distance(first, second)
+                    < PROMPT_MOVE_METERS + Math.max(first.accuracy, second.accuracy);
+        } catch (ParseException exception) {
+            return true;
         }
     }
 

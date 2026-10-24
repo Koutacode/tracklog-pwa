@@ -2,6 +2,7 @@ package com.tracklog.assist;
 
 import static org.junit.Assert.*;
 import android.content.Context;
+import android.location.Location;
 import org.json.JSONObject;
 import org.junit.Before;
 import org.junit.Test;
@@ -18,6 +19,8 @@ public class ResidentExpresswayExitStoreTest {
     @Before public void setup() {
         context = RuntimeEnvironment.getApplication();
         assertTrue(ResidentExpresswayStore.clearPrivateData(context));
+        ResidentLocationState.clearLatestRecordedLocation(context);
+        ResidentLocationState.applyTrackingIntent(context, "synthetic-trip", 0L);
         assertTrue(ResidentExpresswayStore.reconcile(context, "synthetic-trip", true,
                 ResidentExpresswayDetectionPolicy.Config.DEFAULT));
     }
@@ -88,6 +91,79 @@ public class ResidentExpresswayExitStoreTest {
         assertEquals("", resolve(old, gate(), 13_000));
         assertEquals(0, ResidentExpresswayStore.snapshot(context).events.size());
         assertNull(ResidentExpresswayStore.snapshot(context).exitWatch.brief);
+    }
+
+    @Test public void overnightNotificationCannotEndAtYesterdayLocation() {
+        observe(1_000, 0, 70, false);
+        String prompt = resolve(observe(11_000, .001, 18, true), gate(), 12_000);
+        assertFalse(prompt.isEmpty());
+        ResidentExpresswayStore.DecisionResult result = ResidentExpresswayStore.recordDecision(
+                context, prompt, true, 12L * 60L * 60L * 1000L);
+        assertFalse(result.stored);
+        assertTrue(result.expired);
+        assertTrue(ResidentExpresswayStore.snapshot(context).open);
+        assertEquals("", ResidentExpresswayStore.snapshot(context).promptId);
+        assertEquals(1, ResidentExpresswayStore.snapshot(context).events.size());
+        assertFalse(ResidentExpresswayStore.recordDecision(context, prompt, true,
+                12L * 60L * 60L * 1000L + 1L).stored);
+    }
+
+    @Test public void restartReconcileDropsExpiredPromptBeforeShowingNotification() {
+        observe(1_000, 0, 70, false);
+        String prompt = resolve(observe(11_000, .001, 18, true), gate(), 12_000);
+        assertFalse(prompt.isEmpty());
+        assertTrue(ResidentExpresswayStore.reconcile(context, "synthetic-trip", true,
+                ResidentExpresswayDetectionPolicy.Config.DEFAULT));
+        assertEquals("", ResidentExpresswayStore.snapshot(context).promptId);
+        assertFalse(ResidentExpresswayStore.recordDecision(context, prompt, true,
+                12L * 60L * 60L * 1000L).stored);
+        assertTrue(ResidentExpresswayStore.snapshot(context).open);
+    }
+
+    @Test public void serviceRestartNeverRestoresAnOldNotification() {
+        observe(1_000, 0, 70, false);
+        String prompt = resolve(observe(11_000, .001, 18, true), gate(), 12_000);
+        assertEquals(prompt, ResidentExpresswayStore.freshPromptIdForNotification(context, 13_000));
+        assertEquals("", ResidentExpresswayStore.freshPromptIdForNotification(
+                context, 12L * 60L * 60L * 1000L));
+        assertEquals("", ResidentExpresswayStore.snapshot(context).promptId);
+        assertTrue(ResidentExpresswayStore.snapshot(context).open);
+    }
+
+    @Test public void restRestartAndFiveKilometreDriveRevokeOldNotification() {
+        observe(1_000, 0, 70, false);
+        String prompt = resolve(observe(11_000, .001, 18, true), gate(), 12_000);
+        assertFalse(prompt.isEmpty());
+        assertTrue(ResidentExpresswayStore.reconcile(context, "", true,
+                ResidentExpresswayDetectionPolicy.Config.DEFAULT));
+        assertEquals("", ResidentExpresswayStore.snapshot(context).promptId);
+        assertTrue(ResidentExpresswayStore.reconcile(context, "synthetic-trip", true,
+                ResidentExpresswayDetectionPolicy.Config.DEFAULT));
+        Location resumed = new Location("synthetic");
+        resumed.setTime(18_000L);
+        resumed.setLatitude(0d);
+        resumed.setLongitude(.05d);
+        resumed.setAccuracy(10f);
+        ResidentLocationState.cacheLatestRecordedLocation(context, "synthetic-trip", resumed);
+        assertFalse(ResidentExpresswayStore.recordDecision(context, prompt, true, 20_000).stored);
+        assertTrue(ResidentExpresswayStore.snapshot(context).open);
+    }
+
+    @Test public void movedFiveKilometresCannotConfirmOldPromptDespiteRecentTimestamp() {
+        observe(1_000, 0, 70, false);
+        String prompt = resolve(observe(11_000, .001, 18, true), gate(), 12_000);
+        assertFalse(prompt.isEmpty());
+        Location moved = new Location("synthetic");
+        moved.setTime(25_000L);
+        moved.setLatitude(0d);
+        moved.setLongitude(.05d);
+        moved.setAccuracy(10f);
+        ResidentLocationState.cacheLatestRecordedLocation(context, "synthetic-trip", moved);
+        ResidentExpresswayStore.DecisionResult result = ResidentExpresswayStore.recordDecision(
+                context, prompt, true, 30_000L);
+        assertFalse(result.stored);
+        assertTrue(result.expired);
+        assertTrue(ResidentExpresswayStore.snapshot(context).open);
     }
 
     @Test public void expiredOfflineProbeCannotBlockFreshRoadChecksOrShowStaleGate() {

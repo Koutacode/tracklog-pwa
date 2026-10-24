@@ -322,17 +322,30 @@ assert.equal(selectPendingExpresswayEndPrompt({
   activeTripId: 'trip-1',
   expresswayActive: true,
   prompt: pendingPrompt,
+  nowMs: Date.parse('2026-08-23T06:11:00.000Z'),
 }), pendingPrompt);
 assert.equal(selectPendingExpresswayEndPrompt({
   activeTripId: 'trip-2',
   expresswayActive: true,
   prompt: pendingPrompt,
+  nowMs: Date.parse('2026-08-23T06:11:00.000Z'),
 }), null);
 assert.equal(selectPendingExpresswayEndPrompt({
   activeTripId: 'trip-1',
   expresswayActive: false,
   prompt: pendingPrompt,
+  nowMs: Date.parse('2026-08-23T06:11:00.000Z'),
 }), null);
+assert.equal(selectPendingExpresswayEndPrompt({
+  activeTripId: 'trip-1', expresswayActive: true, prompt: pendingPrompt,
+  nowMs: Date.parse('2026-08-24T06:11:00.000Z'),
+}), null, 'restarted screen does not show an overnight prompt');
+assert.equal(selectPendingExpresswayEndPrompt({
+  activeTripId: 'trip-1', expresswayActive: true, prompt: pendingPrompt,
+  nowMs: Date.parse('2026-08-23T06:12:00.000Z'),
+  events: [{ id: 'synthetic-rest', tripId: 'trip-1', type: 'rest_start',
+    ts: '2026-08-23T06:11:30.000Z', syncStatus: 'pending' }],
+}), null, 'rested screen does not show a stale prompt');
 const keepDecision = buildPendingExpresswayKeepDecision(pendingPrompt, '2026-08-23T06:11:00.000Z');
 assert.deepEqual(keepDecision, {
   tripId: 'trip-1',

@@ -1,13 +1,20 @@
 import {
   clearPendingExpresswayEndDecision,
   clearPendingExpresswayEndPrompt,
+  clearPendingExpresswayEndPromptIfMatches,
   endExpressway,
+  getEventsByTripId,
+  getLatestRoutePointForTrip,
   setPendingExpresswayEndDecision,
   type AutoExpresswayDecisionReason,
   type PendingExpresswayEndPrompt,
 } from '../db/repositories';
 import { enqueueNotificationExpresswayEndIcResolution } from './expresswayIcResolution';
 import { cancelNativeExpresswayEndPrompt } from './nativeExpresswayPrompt';
+import {
+  EXPRESSWAY_PROMPT_MAX_AGE_MS,
+  isFreshExpresswayEndPrompt,
+} from '../domain/expresswayPromptFreshness';
 import {
   resolveNativeResidentExpresswayPrompt,
   type NativeResidentExpresswayPromptResolution,
@@ -17,21 +24,55 @@ type AutomaticPromptDecisionDependencies = {
   resolveNativePrompt: typeof resolveNativeResidentExpresswayPrompt;
   setPendingDecision: typeof setPendingExpresswayEndDecision;
   clearPendingPrompt: typeof clearPendingExpresswayEndPrompt;
+  clearPendingPromptIfMatches: typeof clearPendingExpresswayEndPromptIfMatches;
   clearPendingDecision: typeof clearPendingExpresswayEndDecision;
   endExpressway: typeof endExpressway;
   enqueueEndIcResolution: typeof enqueueNotificationExpresswayEndIcResolution;
   cancelLocalNotification: typeof cancelNativeExpresswayEndPrompt;
+  getEventsByTripId: typeof getEventsByTripId;
+  getLatestRoutePointForTrip: typeof getLatestRoutePointForTrip;
+  now(): number;
 };
 
 const DEFAULT_DEPENDENCIES: AutomaticPromptDecisionDependencies = {
   resolveNativePrompt: resolveNativeResidentExpresswayPrompt,
   setPendingDecision: setPendingExpresswayEndDecision,
   clearPendingPrompt: clearPendingExpresswayEndPrompt,
+  clearPendingPromptIfMatches: clearPendingExpresswayEndPromptIfMatches,
   clearPendingDecision: clearPendingExpresswayEndDecision,
   endExpressway,
   enqueueEndIcResolution: enqueueNotificationExpresswayEndIcResolution,
   cancelLocalNotification: cancelNativeExpresswayEndPrompt,
+  getEventsByTripId,
+  getLatestRoutePointForTrip,
+  now: Date.now,
 };
+
+async function requireFreshWebPrompt(
+  isAndroidNative: boolean,
+  prompt: PendingExpresswayEndPrompt,
+  dependencies: AutomaticPromptDecisionDependencies,
+): Promise<void> {
+  if (isJavaOwnedExpresswayPrompt(isAndroidNative, prompt)) return;
+  const nowMs = dependencies.now();
+  const fresh = isFreshExpresswayEndPrompt({
+    detectedAt: prompt.detectedAt,
+    decidedAt: new Date(nowMs).toISOString(),
+    geo: prompt.geo,
+    events: await dependencies.getEventsByTripId(prompt.tripId),
+    latestFix: await dependencies.getLatestRoutePointForTrip(
+      prompt.tripId, nowMs, EXPRESSWAY_PROMPT_MAX_AGE_MS),
+  });
+  if (fresh) return;
+  const cleared = await dependencies.clearPendingPromptIfMatches({
+    tripId: prompt.tripId,
+    promptId: prompt.promptId,
+    nativeDetectionId: prompt.reason?.nativeDetectionId,
+    detectedAt: prompt.detectedAt,
+  });
+  if (cleared) await dependencies.cancelLocalNotification(prompt.tripId).catch(() => undefined);
+  throw new Error('高速道路の確認候補が古くなりました。現在地を確認して再度操作してください。');
+}
 
 export function isJavaOwnedExpresswayPrompt(
   isAndroidNative: boolean,
@@ -83,6 +124,7 @@ export async function commitAutomaticExpresswayKeep(options: {
   dependencies?: Partial<AutomaticPromptDecisionDependencies>;
 }): Promise<void> {
   const dependencies = { ...DEFAULT_DEPENDENCIES, ...options.dependencies };
+  await requireFreshWebPrompt(options.isAndroidNative, options.prompt, dependencies);
   const nativeResolution = await resolveJavaOwnedPrompt({
     isAndroidNative: options.isAndroidNative,
     prompt: options.prompt,
@@ -108,6 +150,7 @@ export async function commitAutomaticExpresswayEnd(options: {
   dependencies?: Partial<AutomaticPromptDecisionDependencies>;
 }): Promise<{ eventId: string }> {
   const dependencies = { ...DEFAULT_DEPENDENCIES, ...options.dependencies };
+  await requireFreshWebPrompt(options.isAndroidNative, options.prompt, dependencies);
   const nativeResolution = await resolveJavaOwnedPrompt({
     isAndroidNative: options.isAndroidNative,
     prompt: options.prompt,

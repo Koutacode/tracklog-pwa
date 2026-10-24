@@ -66,10 +66,10 @@ final class ResidentExpresswayNotification {
     }
 
     static void restoreIfPending(Context context) {
-        ResidentExpresswayStore.Snapshot snapshot = ResidentExpresswayStore.snapshot(context);
-        if (snapshot.storageHealthy && !snapshot.promptId.isEmpty()) {
-            show(context, snapshot.promptId);
-        }
+        String promptId = ResidentExpresswayStore.freshPromptIdForNotification(
+                context, System.currentTimeMillis());
+        if (!promptId.isEmpty()) show(context, promptId);
+        else cancel(context);
     }
 
     static void cancel(Context context) {

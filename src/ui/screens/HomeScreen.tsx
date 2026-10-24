@@ -295,6 +295,7 @@ export default function HomeScreen() {
           activeTripId: tripId,
           expresswayActive,
           prompt,
+          events,
         });
         setPendingExpresswayEndPromptState(currentPrompt);
         if (currentPrompt && !breakToRestModalOpen) {
@@ -317,7 +318,7 @@ export default function HomeScreen() {
       window.clearInterval(intervalId);
       document.removeEventListener('visibilitychange', handleVisibility);
     };
-  }, [breakToRestModalOpen, expresswayActive, tripId]);
+  }, [breakToRestModalOpen, events, expresswayActive, tripId]);
 
   const activeStatuses = useMemo(
     () => buildActiveOperationStatuses(events, liveDrive),

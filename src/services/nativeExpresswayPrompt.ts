@@ -5,13 +5,20 @@ import {
   clearPendingExpresswayEndDecision,
   clearPendingExpresswayEndPrompt,
   clearPendingExpresswayEndPromptIfMatches,
+  STALE_NATIVE_EXPRESSWAY_DETECTION_ERROR,
   endExpressway,
   getPendingExpresswayEndPrompt,
+  getEventsByTripId,
+  getLatestRoutePointForTrip,
   setPendingExpresswayEndDecision,
   setPendingExpresswayEndPrompt,
   type PendingExpresswayEndPrompt,
 } from '../db/repositories';
 import { enqueueNotificationExpresswayEndIcResolution } from './expresswayIcResolution';
+import {
+  EXPRESSWAY_PROMPT_MAX_AGE_MS,
+  isFreshExpresswayEndPrompt,
+} from '../domain/expresswayPromptFreshness';
 
 const ACTION_TYPE_ID = 'tracklog_expressway_end_actions';
 const ACTION_END = 'end_expressway';
@@ -80,11 +87,9 @@ function promptIdentity(prompt: PendingExpresswayEndPrompt) {
 }
 
 async function clearHandledPrompt(prompt: PendingExpresswayEndPrompt) {
-  if (prompt.promptId || prompt.reason?.nativeDetectionId) {
-    return clearPendingExpresswayEndPromptIfMatches(promptIdentity(prompt));
-  }
-  await clearPendingExpresswayEndPrompt(prompt.tripId);
-  return true;
+  return clearPendingExpresswayEndPromptIfMatches({
+    ...promptIdentity(prompt), detectedAt: prompt.detectedAt,
+  });
 }
 
 async function canPersistFailedPromptAction(prompt: PendingExpresswayEndPrompt) {
@@ -142,7 +147,14 @@ export async function handleNativeExpresswayPromptNotificationAction(
       enqueueNotificationExpresswayEndIcResolution({ eventId, geo: prompt.geo });
       await clearHandledPrompt(prompt);
       await clearPendingExpresswayEndDecision(prompt.tripId);
-    } catch {
+    } catch (error) {
+      if (error instanceof Error && error.message === STALE_NATIVE_EXPRESSWAY_DETECTION_ERROR) {
+        if (await clearHandledPrompt(prompt)) {
+          await clearPendingExpresswayEndDecision(prompt.tripId);
+          await cancelNativeExpresswayEndPrompt(prompt.tripId);
+        }
+        return true;
+      }
       if (await canPersistFailedPromptAction(prompt)) {
         await setPendingExpresswayEndPrompt(prompt);
         await setPendingExpresswayEndDecision({
@@ -162,6 +174,21 @@ export async function handleNativeExpresswayPromptNotificationAction(
     return true;
   }
   if (event.actionId === ACTION_KEEP) {
+    const nowMs = Date.now();
+    if (!isFreshExpresswayEndPrompt({
+      detectedAt: prompt.detectedAt,
+      decidedAt: new Date(nowMs).toISOString(),
+      geo: prompt.geo,
+      events: await getEventsByTripId(prompt.tripId),
+      latestFix: await getLatestRoutePointForTrip(
+        prompt.tripId, nowMs, EXPRESSWAY_PROMPT_MAX_AGE_MS),
+    })) {
+      if (await clearHandledPrompt(prompt)) {
+        await clearPendingExpresswayEndDecision(prompt.tripId);
+        await cancelNativeExpresswayEndPrompt(prompt.tripId);
+      }
+      return true;
+    }
     const cleared = await clearHandledPrompt(prompt);
     if (!cleared) return true;
     await setPendingExpresswayEndDecision({

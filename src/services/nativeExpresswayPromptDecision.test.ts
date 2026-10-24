@@ -3,6 +3,7 @@ import type {
   endExpressway,
   PendingExpresswayEndPrompt,
 } from '../db/repositories';
+import type { AppEvent } from '../domain/types';
 import {
   commitAutomaticExpresswayEnd,
   commitAutomaticExpresswayKeep,
@@ -46,6 +47,7 @@ function dependencies(log: string[]) {
       log.push(`decision:${decision.nativeDetectionId}:${decision.promptId}`);
     },
     clearPendingPrompt: async () => { log.push('clear-prompt'); },
+    clearPendingPromptIfMatches: async () => { log.push('clear-matching-prompt'); return true; },
     clearPendingDecision: async () => { log.push('clear-decision'); },
     endExpressway: async (input: Parameters<typeof endExpressway>[0]) => {
       assertEqual(input.source, 'automatic_detection', 'automatic prompt records its source');
@@ -59,6 +61,9 @@ function dependencies(log: string[]) {
     },
     enqueueEndIcResolution: () => { log.push('enqueue-ic'); },
     cancelLocalNotification: async () => { log.push('cancel-local'); },
+    getEventsByTripId: async (): Promise<AppEvent[]> => [],
+    getLatestRoutePointForTrip: async () => null,
+    now: () => Date.parse('2026-08-23T01:01:00.000Z'),
   };
 }
 
@@ -201,7 +206,39 @@ async function run() {
     assertEqual(failedClosed, true, 'native mismatch fails closed');
     assertEqual(log.join(','), 'native:mismatch:end', 'native mismatch cannot mutate or clear Dexie');
   }
-  console.log('nativeExpresswayPromptDecision: 20 tests passed');
+  {
+    const log: string[] = [];
+    const stale = dependencies(log);
+    stale.now = () => Date.parse('2026-08-24T01:00:00.000Z');
+    let rejected = false;
+    try {
+      await commitAutomaticExpresswayEnd({
+        isAndroidNative: false, prompt, dependencies: stale,
+      });
+    } catch { rejected = true; }
+    assertEqual(rejected, true, 'overnight Web confirmation is rejected');
+    assertEqual(log.join(','), 'clear-matching-prompt,cancel-local',
+      'stale Web prompt never writes an end or anchor');
+  }
+  {
+    const log: string[] = [];
+    const stale = dependencies(log);
+    stale.getEventsByTripId = async () => [{
+      id: 'synthetic-rest', tripId: prompt.tripId, type: 'rest_start',
+      ts: '2026-08-23T01:00:30.000Z', syncStatus: 'pending',
+    }];
+    let rejected = false;
+    try {
+      await commitAutomaticExpresswayKeep({
+        isAndroidNative: false, prompt,
+        decidedAt: '2026-08-23T01:01:00.000Z', dependencies: stale,
+      });
+    } catch { rejected = true; }
+    assertEqual(rejected, true, 'Web keep after rest is also rejected');
+    assertEqual(log.includes('decision:undefined:prompt-4'), false,
+      'old Web keep cannot suppress a new detection');
+  }
+  console.log('nativeExpresswayPromptDecision: 22 tests passed');
 }
 
 void run().catch(error => {

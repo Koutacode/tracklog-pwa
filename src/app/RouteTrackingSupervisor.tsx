@@ -3,13 +3,16 @@ import { App as CapacitorApp } from '@capacitor/app';
 import { Capacitor } from '@capacitor/core';
 import {
   addRoutePoint,
+  STALE_NATIVE_EXPRESSWAY_DETECTION_ERROR,
   clearPendingExpresswayEndDecision,
   clearPendingExpresswayEndPrompt,
+  clearPendingExpresswayEndPromptIfMatches,
   endExpressway,
   getActiveTripId,
   getAutoExpresswayConfig,
   getBreakToRestConfirmationState,
   getEventsByTripId,
+  getLatestRoutePointForTrip,
   getPendingExpresswayEndDecision,
   getPendingExpresswayEndPrompt,
   getRouteTrackingMode,
@@ -30,6 +33,11 @@ import {
 } from '../services/routeTracking';
 import { cancelNativeExpresswayEndPrompt } from '../services/nativeExpresswayPrompt';
 import { enqueueNotificationExpresswayEndIcResolution } from '../services/expresswayIcResolution';
+import {
+  EXPRESSWAY_PROMPT_MAX_AGE_MS,
+  isFreshExpresswayEndPrompt,
+  matchesExpresswayPromptDecision,
+} from '../domain/expresswayPromptFreshness';
 import {
   resetNativeExpresswayDetection,
   resumePendingNativeExpresswayDetection,
@@ -361,21 +369,35 @@ export default function RouteTrackingSupervisor() {
             }
           } else if (openExpressway) {
             const pendingPrompt = await getPendingExpresswayEndPrompt();
-            const geo =
-              pendingDecision.geo ??
-              (pendingPrompt?.tripId === tripId ? pendingPrompt.geo : undefined);
-            if (geo) {
-              const { eventId } = await endExpressway({
-                tripId,
-                geo,
-                source: 'automatic_detection',
-                automaticConfirmation: 'confirmed',
-              });
-              enqueueNotificationExpresswayEndIcResolution({ eventId, geo });
+            const matchedPrompt = matchesExpresswayPromptDecision(pendingDecision, pendingPrompt)
+              ? pendingPrompt : null;
+            const geo = matchedPrompt?.geo;
+            if (geo && matchedPrompt?.reason) {
+              try {
+                const { eventId } = await endExpressway({
+                  tripId,
+                  geo,
+                  occurredAt: pendingDecision.decidedAt,
+                  autoDecision: matchedPrompt.reason,
+                  source: 'automatic_detection',
+                  automaticConfirmation: 'confirmed',
+                });
+                enqueueNotificationExpresswayEndIcResolution({ eventId, geo });
+              } catch (error) {
+                if (!(error instanceof Error)
+                    || error.message !== STALE_NATIVE_EXPRESSWAY_DETECTION_ERROR) throw error;
+              }
             }
-            await clearPendingExpresswayEndPrompt(tripId);
+            if (matchedPrompt) {
+              await clearPendingExpresswayEndPromptIfMatches({
+                tripId,
+                promptId: matchedPrompt.promptId,
+                nativeDetectionId: matchedPrompt.reason?.nativeDetectionId,
+                detectedAt: matchedPrompt.detectedAt,
+              });
+            }
             await clearPendingExpresswayEndDecision(tripId);
-            await cancelNativeExpresswayEndPrompt(tripId);
+            if (matchedPrompt) await cancelNativeExpresswayEndPrompt(tripId);
           } else {
             await clearPendingExpresswayEndPrompt(tripId);
             await clearPendingExpresswayEndDecision(tripId);
@@ -383,6 +405,26 @@ export default function RouteTrackingSupervisor() {
           }
         } else if (pendingDecision && pendingDecision.tripId !== tripId) {
           await clearPendingExpresswayEndDecision(pendingDecision.tripId);
+        }
+        if (!pendingDecision || pendingDecision.tripId !== tripId) {
+          const pendingPrompt = await getPendingExpresswayEndPrompt();
+          if (pendingPrompt?.tripId === tripId) {
+            const nowMs = Date.now();
+            const fresh = isFreshExpresswayEndPrompt({
+              detectedAt: pendingPrompt.detectedAt,
+              decidedAt: new Date(nowMs).toISOString(),
+              geo: pendingPrompt.geo,
+              events,
+              latestFix: await getLatestRoutePointForTrip(
+                tripId, nowMs, EXPRESSWAY_PROMPT_MAX_AGE_MS),
+            });
+            if (!fresh && await clearPendingExpresswayEndPromptIfMatches({
+              tripId,
+              promptId: pendingPrompt.promptId,
+              nativeDetectionId: pendingPrompt.reason?.nativeDetectionId,
+              detectedAt: pendingPrompt.detectedAt,
+            })) await cancelNativeExpresswayEndPrompt(tripId);
+          }
         }
         if (hasOpenRest(events) || hasOpenFerry(events)) {
           if (native) {

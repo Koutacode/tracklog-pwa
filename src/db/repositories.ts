@@ -49,6 +49,10 @@ import {
   type ExpresswayEndCommitAuthorization,
 } from '../domain/expresswayEndRequest';
 import { reverseGeocode } from '../services/geo';
+import {
+  EXPRESSWAY_PROMPT_MAX_AGE_MS,
+  isFreshExpresswayEndPrompt,
+} from '../domain/expresswayPromptFreshness';
 import { resolveNearestIC, type IcResult } from '../services/icResolver';
 import { validateExpresswayIcManualSelection, type ExpresswayIcManualSelection } from '../services/expresswayIcManualEdit';
 import { notifyTrackLogEventsChanged } from '../services/localEventsChanged';
@@ -526,10 +530,11 @@ export async function clearPendingExpresswayEndPromptIfMatches(expected: {
   tripId: string;
   promptId?: string;
   nativeDetectionId?: string;
+  detectedAt?: string;
 }): Promise<boolean> {
   const promptId = normalizeNativeDetectionId(expected.promptId);
   const nativeDetectionId = normalizeNativeDetectionId(expected.nativeDetectionId);
-  if (!promptId && !nativeDetectionId) return false;
+  if (!promptId && !nativeDetectionId && !expected.detectedAt) return false;
   return db.transaction('rw', db.meta, async () => {
     const raw = (await db.meta.get(META_PENDING_EXPRESSWAY_END_PROMPT))?.value ?? null;
     if (!raw) return false;
@@ -543,6 +548,7 @@ export async function clearPendingExpresswayEndPromptIfMatches(expected: {
       current?.tripId !== expected.tripId
       || (promptId && current.promptId !== promptId)
       || (nativeDetectionId && current.reason?.nativeDetectionId !== nativeDetectionId)
+      || (expected.detectedAt && current.detectedAt !== expected.detectedAt)
     ) {
       return false;
     }
@@ -1006,10 +1012,12 @@ export async function getLatestRoutePoint(): Promise<RoutePoint | null> {
   return point ?? null;
 }
 
-export async function getLatestRoutePointForTrip(tripId: string, atMs: number): Promise<RoutePoint | null> {
+export async function getLatestRoutePointForTrip(
+  tripId: string, atMs: number, maxAgeMs = 120_000,
+): Promise<RoutePoint | null> {
   if (!Number.isFinite(atMs)) return null;
   return await db.routePoints.where('[tripId+ts]')
-    .between([tripId, new Date(atMs - 120_000).toISOString()], [tripId, new Date(atMs).toISOString()], true, true)
+    .between([tripId, new Date(atMs - maxAgeMs).toISOString()], [tripId, new Date(atMs).toISOString()], true, true)
     .reverse()
     // Event anchors may copy an older detected location with a later confirmation
     // timestamp. Only real fixes can establish a fresh end-of-trip position.
@@ -2007,6 +2015,20 @@ export async function endExpressway(params: {
     assertTripOpen(events);
     const open = findOpenToggleSessionId(events, EXPRESSWAY_TOGGLE_DEFINITION);
     if (!open) throw new Error('高速道路が開始されていません');
+    if (params.source === 'automatic_detection') {
+      // The transaction is the last guard for every Web, notification and
+      // queue replay path. Reject before putEventWithRoutePointTx creates an
+      // event-anchor using an old prompt coordinate at a new decision time.
+      const latestFix = await getLatestRoutePointForTrip(
+        params.tripId, Date.parse(occurredAt), EXPRESSWAY_PROMPT_MAX_AGE_MS);
+      if (!autoDecision || !params.geo || !isFreshExpresswayEndPrompt({
+        detectedAt: autoDecision.evaluatedAt,
+        decidedAt: occurredAt,
+        geo: params.geo,
+        events,
+        latestFix,
+      })) throw new Error(STALE_NATIVE_EXPRESSWAY_DETECTION_ERROR);
+    }
     const e = baseEvent({
       tripId: params.tripId,
       type: 'expressway_end',

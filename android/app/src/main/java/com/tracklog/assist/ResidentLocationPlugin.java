@@ -343,7 +343,10 @@ public final class ResidentLocationPlugin extends Plugin {
                             System.currentTimeMillis()
                     );
             if (!decision.stored) {
-                call.reject("この高速道路の確認はすでに更新されています。");
+                if (decision.expired) ResidentExpresswayNotification.cancel(appContext);
+                call.reject(decision.expired
+                        ? "高速道路の確認候補が古くなりました。現在地を確認して再度操作してください。"
+                        : "この高速道路の確認はすでに更新されています。");
                 return;
             }
             // The notification is closed only after the native durable decision exists.
@@ -444,9 +447,10 @@ public final class ResidentLocationPlugin extends Plugin {
     }
 
     private static void reconcileExpresswayNotification(Context context) {
-        ResidentExpresswayStore.Snapshot snapshot = ResidentExpresswayStore.snapshot(context);
-        if (!snapshot.promptId.isEmpty()) {
-            ResidentExpresswayNotification.show(context, snapshot.promptId);
+        String promptId = ResidentExpresswayStore.freshPromptIdForNotification(
+                context, System.currentTimeMillis());
+        if (!promptId.isEmpty()) {
+            ResidentExpresswayNotification.show(context, promptId);
         } else {
             ResidentExpresswayNotification.cancel(context);
         }

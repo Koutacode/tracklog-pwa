@@ -6,6 +6,7 @@ import type {
 } from '../../../db/repositories';
 import type { NativeResidentLocationStatus } from '../../../services/nativeResidentLocation';
 import type { StartupDiagnosticItem } from '../../../services/startupDiagnostics';
+import { isFreshExpresswayEndPrompt } from '../../../domain/expresswayPromptFreshness';
 
 export type HomeStatusTone = 'success' | 'warning' | 'error' | 'neutral';
 
@@ -26,9 +27,17 @@ export function selectPendingExpresswayEndPrompt(params: {
   activeTripId: string | null;
   expresswayActive: boolean;
   prompt: PendingExpresswayEndPrompt | null;
+  events?: readonly AppEvent[];
+  nowMs?: number;
 }): PendingExpresswayEndPrompt | null {
   const { activeTripId, expresswayActive, prompt } = params;
   if (!activeTripId || !expresswayActive || prompt?.tripId !== activeTripId) return null;
+  if (!isFreshExpresswayEndPrompt({
+    detectedAt: prompt.detectedAt,
+    decidedAt: new Date(params.nowMs ?? Date.now()).toISOString(),
+    geo: prompt.geo,
+    events: params.events ?? [],
+  })) return null;
   return prompt;
 }
 
