@@ -292,6 +292,7 @@ async function runProcessorTests() {
     getPendingExpresswayEndDecision: async () => null,
     getPendingExpresswayEndPrompt: async () => null,
     clearPendingExpresswayEndDecision: async () => undefined,
+    clearPendingExpresswayKeepDecision: async () => false,
     clearPendingExpresswayEndPrompt: async () => undefined,
     cancelNativeExpresswayEndPrompt: async () => undefined,
     detectExpresswaySignal: async () => POSITIVE_START_SIGNAL,

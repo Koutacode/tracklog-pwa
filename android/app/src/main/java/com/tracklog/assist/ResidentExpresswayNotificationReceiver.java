@@ -33,7 +33,7 @@ public final class ResidentExpresswayNotificationReceiver extends BroadcastRecei
         // Close only after a durable decision or durable expiry. Storage failure leaves
         // the action recoverable after a process restart.
         if (shouldCloseNotification(result.stored || result.expired)) {
-            ResidentExpresswayNotification.cancel(context);
+            ResidentExpresswayNotification.restoreIfPending(context);
             ResidentLocationService.startIfEligible(context);
         }
     }

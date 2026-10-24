@@ -358,7 +358,8 @@ async function materializeEvent(
       geo,
       events,
       latestFix: await dependencies.getLatestRoutePointForTrip(
-        event.tripId, nowMs, EXPRESSWAY_PROMPT_MAX_AGE_MS),
+        event.tripId, nowMs, EXPRESSWAY_PROMPT_MAX_AGE_MS,
+        geo, event.detectedAt),
     })) return 'terminal';
     // A new Java prompt proves that its earlier keep suppression recovered.
     // Remove only an old keep marker; never consume an end action here.
@@ -382,7 +383,7 @@ async function materializeEvent(
       events,
       latestFix: await dependencies.getLatestRoutePointForTrip(
         event.tripId, Date.parse(event.decidedAt ?? event.detectedAt),
-        EXPRESSWAY_PROMPT_MAX_AGE_MS),
+        EXPRESSWAY_PROMPT_MAX_AGE_MS, geo, event.detectedAt),
     })) {
       await dependencies.clearPendingPromptIfMatches({
         tripId: event.tripId,
@@ -426,7 +427,7 @@ async function materializeEvent(
     events,
     latestFix: await dependencies.getLatestRoutePointForTrip(
       event.tripId, Date.parse(event.decidedAt ?? event.detectedAt),
-      EXPRESSWAY_PROMPT_MAX_AGE_MS),
+      EXPRESSWAY_PROMPT_MAX_AGE_MS, geo, event.detectedAt),
   })) {
     await dependencies.clearPendingPromptIfMatches({ tripId: event.tripId, promptId: event.promptId });
     return 'terminal';

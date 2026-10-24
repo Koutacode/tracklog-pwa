@@ -416,7 +416,8 @@ export default function RouteTrackingSupervisor() {
               geo: pendingPrompt.geo,
               events,
               latestFix: await getLatestRoutePointForTrip(
-                tripId, nowMs, EXPRESSWAY_PROMPT_MAX_AGE_MS),
+                tripId, nowMs, EXPRESSWAY_PROMPT_MAX_AGE_MS,
+                pendingPrompt.geo, pendingPrompt.detectedAt),
             });
             if (!fresh && await clearPendingExpresswayEndPromptIfMatches({
               tripId,

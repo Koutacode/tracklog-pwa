@@ -1,4 +1,10 @@
 import type { AppEvent, Geo, RoutePoint } from './types';
+import {
+  PERSISTED_BASIC_TOGGLE_DEFINITIONS,
+  findOpenToggleStart,
+} from './togglePairing';
+
+const [REST_DEFINITION, , , , FERRY_DEFINITION] = PERSISTED_BASIC_TOGGLE_DEFINITIONS;
 
 // A driver can answer after stopping safely, but an old road observation must
 // not be attached to a new confirmation time after a rest or another drive.
@@ -6,14 +12,17 @@ export const EXPRESSWAY_PROMPT_MAX_AGE_MS = 30 * 60_000;
 export const EXPRESSWAY_PROMPT_MOVE_METERS = 500;
 
 export function matchesExpresswayPromptDecision(
-  decision: { tripId: string; promptId?: string; nativeDetectionId?: string },
-  prompt: { tripId: string; promptId?: string;
+  decision: { tripId: string; promptId?: string; nativeDetectionId?: string;
+    detectedAt?: string },
+  prompt: { tripId: string; promptId?: string; detectedAt: string;
     reason?: { nativeDetectionId?: string } } | null,
 ): boolean {
   if (!prompt || decision.tripId !== prompt.tripId) return false;
   if (decision.promptId) return decision.promptId === prompt.promptId;
-  return !!decision.nativeDetectionId
-    && decision.nativeDetectionId === prompt.reason?.nativeDetectionId;
+  if (decision.nativeDetectionId) {
+    return decision.nativeDetectionId === prompt.reason?.nativeDetectionId;
+  }
+  return !!decision.detectedAt && decision.detectedAt === prompt.detectedAt;
 }
 
 function distanceMeters(first: Geo, second: Geo): number {
@@ -45,6 +54,12 @@ export function isFreshExpresswayEndPrompt(input: {
     const at = Date.parse(event.ts);
     return Number.isFinite(at) && at >= detected && at <= decided;
   })) return false;
+  const priorEvents = input.events.filter(event => {
+    const at = Date.parse(event.ts);
+    return Number.isFinite(at) && at < detected;
+  });
+  if (findOpenToggleStart(priorEvents, REST_DEFINITION)
+    || findOpenToggleStart(priorEvents, FERRY_DEFINITION)) return false;
   const fix = input.latestFix;
   const fixAt = fix ? Date.parse(fix.ts) : Number.NaN;
   const realFix = !!fix && fix.source !== 'event' && Number.isFinite(fixAt)

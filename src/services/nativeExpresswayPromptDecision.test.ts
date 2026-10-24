@@ -41,11 +41,13 @@ function dependencies(log: string[]) {
   return {
     resolveNativePrompt: async (input: { promptId: string; action: 'end' | 'keep' }) => {
       log.push(`native:${input.action}:${input.promptId}`);
-      return { stored: true as const, eventId: `decision-${input.action}-5`, generation: 5 };
+      return { stored: true as const, eventId: `decision-${input.action}-5`,
+        generation: 5, decidedAt: '2026-08-23T01:00:05.000Z' };
     },
     setPendingDecision: async (decision: { nativeDetectionId?: string; promptId?: string }) => {
       log.push(`decision:${decision.nativeDetectionId}:${decision.promptId}`);
     },
+    commitPendingKeepDecision: async () => { log.push('atomic-keep'); },
     clearPendingPrompt: async () => { log.push('clear-prompt'); },
     clearPendingPromptIfMatches: async () => { log.push('clear-matching-prompt'); return true; },
     clearPendingDecision: async () => { log.push('clear-decision'); },
@@ -56,6 +58,10 @@ function dependencies(log: string[]) {
         'confirmed',
         'automatic prompt is explicitly confirmed',
       );
+      if (input.autoDecision?.nativeDetectionId === 'decision-end-5') {
+        assertEqual(input.occurredAt, '2026-08-23T01:00:05.000Z',
+          'Java commit timestamp is preserved in the Web end event');
+      }
       log.push(`end:${input.autoDecision?.nativeDetectionId}:${input.autoDecision?.nativeGeneration}`);
       return { eventId: 'stored-end', created: true };
     },
@@ -63,6 +69,7 @@ function dependencies(log: string[]) {
     cancelLocalNotification: async () => { log.push('cancel-local'); },
     getEventsByTripId: async (): Promise<AppEvent[]> => [],
     getLatestRoutePointForTrip: async () => null,
+    getPendingPrompt: async (): Promise<PendingExpresswayEndPrompt> => prompt,
     now: () => Date.parse('2026-08-23T01:01:00.000Z'),
   };
 }
@@ -80,7 +87,7 @@ async function run() {
     });
     assertEqual(
       log.join(','),
-      'native:keep:prompt-4,decision:decision-keep-5:prompt-4,clear-prompt,cancel-local',
+      'native:keep:prompt-4,decision:decision-keep-5:prompt-4,clear-matching-prompt,cancel-local',
       'Java keep is committed before Dexie prompt clear',
     );
   }
@@ -93,7 +100,7 @@ async function run() {
     });
     assertEqual(
       log.join(','),
-      'native:end:prompt-4,end:decision-end-5:5,enqueue-ic,clear-prompt,clear-decision,cancel-local',
+      'native:end:prompt-4,end:decision-end-5:5,enqueue-ic,clear-matching-prompt,cancel-local',
       'Java end identity is committed and reused before Dexie cleanup',
     );
   }
@@ -137,14 +144,15 @@ async function run() {
       firstFailed = true;
     }
     assertEqual(firstFailed, true, 'Dexie interruption keeps the Home dialog retryable');
-    assertEqual(log.includes('clear-prompt'), false, 'failed Dexie end never clears its prompt');
+    assertEqual(log.includes('clear-matching-prompt'), false, 'failed Dexie end never clears its prompt');
     await commitAutomaticExpresswayEnd({ isAndroidNative: true, prompt, dependencies: retrying });
     assertEqual(
       log.filter(item => item === 'native:end:prompt-4').length,
       2,
       'retry asks the idempotent native API for the same decision',
     );
-    assertEqual(log.filter(item => item === 'clear-prompt').length, 1, 'only successful retry clears prompt');
+    assertEqual(log.filter(item => item === 'clear-matching-prompt').length, 1,
+      'only successful retry clears the matching prompt');
   }
   {
     const log: string[] = [];
@@ -155,7 +163,8 @@ async function run() {
       dependencies: dependencies(log),
     });
     assertEqual(log.some(item => item.startsWith('native:')), false, 'legacy prompt remains local-only');
-    assertEqual(log.includes('clear-prompt'), true, 'legacy keep remains backward compatible');
+    assertEqual(log.join(','), 'atomic-keep,cancel-local',
+      'legacy keep is committed atomically with its prompt');
   }
   {
     const log: string[] = [];
@@ -168,20 +177,22 @@ async function run() {
         nativeGeneration: undefined,
       },
     };
+    const legacyDependencies = dependencies(log);
+    legacyDependencies.getPendingPrompt = async () => upgradedLegacyPrompt;
     await commitAutomaticExpresswayKeep({
       isAndroidNative: true,
       prompt: upgradedLegacyPrompt,
       decidedAt: '2026-08-23T01:01:00.000Z',
-      dependencies: dependencies(log),
+      dependencies: legacyDependencies,
     });
     assertEqual(log.some(item => item.startsWith('native:')), false, 'upgrade legacy keep bypasses Java resolve');
-    assertEqual(log.includes('clear-prompt'), true, 'upgrade legacy keep remains operable');
+    assertEqual(log.includes('atomic-keep'), true, 'upgrade legacy keep remains operable');
 
     log.length = 0;
     await commitAutomaticExpresswayEnd({
       isAndroidNative: true,
       prompt: upgradedLegacyPrompt,
-      dependencies: dependencies(log),
+      dependencies: legacyDependencies,
     });
     assertEqual(log.some(item => item.startsWith('native:')), false, 'upgrade legacy end bypasses Java resolve');
     assertEqual(log.some(item => item.startsWith('end:legacy-detection-id:')), true, 'upgrade legacy end stays local');
@@ -205,6 +216,19 @@ async function run() {
     }
     assertEqual(failedClosed, true, 'native mismatch fails closed');
     assertEqual(log.join(','), 'native:mismatch:end', 'native mismatch cannot mutate or clear Dexie');
+  }
+  {
+    const log: string[] = [];
+    const newer = dependencies(log);
+    newer.getPendingPrompt = async () => ({ ...prompt, promptId: 'new-prompt',
+      detectedAt: '2026-08-23T01:02:00.000Z' });
+    let rejected = false;
+    try {
+      await commitAutomaticExpresswayEnd({ isAndroidNative: true, prompt,
+        dependencies: newer });
+    } catch { rejected = true; }
+    assertEqual(rejected, true, 'an old Home confirmation cannot borrow a newer prompt');
+    assertEqual(log.join(','), '', 'the newer prompt and native notification remain untouched');
   }
   {
     const log: string[] = [];
@@ -238,7 +262,7 @@ async function run() {
     assertEqual(log.includes('decision:undefined:prompt-4'), false,
       'old Web keep cannot suppress a new detection');
   }
-  console.log('nativeExpresswayPromptDecision: 22 tests passed');
+  console.log('nativeExpresswayPromptDecision: 23 tests passed');
 }
 
 void run().catch(error => {

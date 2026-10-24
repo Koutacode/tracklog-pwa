@@ -48,8 +48,14 @@ public class ResidentExpresswayExitStoreTest {
         assertEquals(1, snapshot.events.size());
         assertEquals(ResidentExpresswayStore.EventKind.END_PROMPT, snapshot.events.get(0).kind);
         assertEquals(prompt, snapshot.pendingPrompt.id);
-        assertTrue(ResidentExpresswayStore.recordDecision(context, prompt, true, 70_000).stored);
-        assertTrue(ResidentExpresswayStore.recordDecision(context, prompt, true, 71_000).stored);
+        ResidentExpresswayStore.DecisionResult first = ResidentExpresswayStore.recordDecision(
+                context, prompt, true, 70_000);
+        ResidentExpresswayStore.DecisionResult repeated = ResidentExpresswayStore.recordDecision(
+                context, prompt, true, 71_000);
+        assertTrue(first.stored);
+        assertTrue(repeated.stored);
+        assertEquals(ResidentLocationQueue.toIsoTimestamp(70_000), first.decidedAt);
+        assertEquals(first.decidedAt, repeated.decidedAt);
         assertFalse(ResidentExpresswayStore.snapshot(context).open);
         assertEquals(2, ResidentExpresswayStore.snapshot(context).events.size());
     }
@@ -77,7 +83,10 @@ public class ResidentExpresswayExitStoreTest {
         assertNotNull(ResidentExpresswayStore.snapshot(context).exitWatch.keep);
         assertNull(observe(74_000, .0011, 20, true));
         assertEquals("", resolve(observe(84_000, .01, 30, false), outside(), 85_000));
-        assertFalse(resolve(observe(144_000, .02, 30, false), outside(), 145_000).isEmpty());
+        String newerPrompt = resolve(observe(144_000, .02, 30, false), outside(), 145_000);
+        assertFalse(newerPrompt.isEmpty());
+        assertFalse(ResidentExpresswayStore.recordDecision(context, prompt, false, 146_000).stored);
+        assertEquals(newerPrompt, ResidentExpresswayStore.snapshot(context).promptId);
     }
 
     @Test public void lateResponsesFromOldSectionOrOtherTripAreIgnored() {
@@ -163,6 +172,27 @@ public class ResidentExpresswayExitStoreTest {
                 context, prompt, true, 30_000L);
         assertFalse(result.stored);
         assertTrue(result.expired);
+        assertTrue(ResidentExpresswayStore.snapshot(context).open);
+    }
+
+    @Test public void movedPromptStaysRetiredAfterReturningNearCandidate() {
+        observe(1_000, 0, 70, false);
+        String prompt = resolve(observe(11_000, .001, 18, true), gate(), 12_000);
+        assertFalse(prompt.isEmpty());
+        Location moved = new Location("synthetic");
+        moved.setTime(25_000L);
+        moved.setLatitude(0d);
+        moved.setLongitude(.05d);
+        moved.setAccuracy(10f);
+        ResidentLocationState.cacheLatestRecordedLocation(context, "synthetic-trip", moved);
+        assertEquals("", ResidentExpresswayStore.freshPromptIdForNotification(context, 25_000L));
+        Location returned = new Location("synthetic");
+        returned.setTime(28_000L);
+        returned.setLatitude(0d);
+        returned.setLongitude(.001d);
+        returned.setAccuracy(10f);
+        ResidentLocationState.cacheLatestRecordedLocation(context, "synthetic-trip", returned);
+        assertFalse(ResidentExpresswayStore.recordDecision(context, prompt, true, 30_000L).stored);
         assertTrue(ResidentExpresswayStore.snapshot(context).open);
     }
 

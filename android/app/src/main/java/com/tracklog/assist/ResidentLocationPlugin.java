@@ -350,12 +350,13 @@ public final class ResidentLocationPlugin extends Plugin {
                 return;
             }
             // The notification is closed only after the native durable decision exists.
-            ResidentExpresswayNotification.cancel(appContext);
+            ResidentExpresswayNotification.restoreIfPending(appContext);
             ResidentLocationService.startIfEligible(appContext);
             JSObject response = new JSObject();
             response.put("stored", true);
             response.put("eventId", decision.eventId);
             response.put("generation", decision.generation);
+            response.put("decidedAt", decision.decidedAt);
             call.resolve(response);
         });
     }

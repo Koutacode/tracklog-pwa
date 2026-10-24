@@ -1,6 +1,7 @@
 import {
   DEFAULT_AUTO_EXPRESSWAY_CONFIG,
   clearPendingExpresswayEndDecision,
+  clearPendingExpresswayKeepDecision,
   clearPendingExpresswayEndPrompt,
   getAutoExpresswayConfig,
   getActiveTripId,
@@ -594,6 +595,7 @@ type DetectionDependencies = {
   getPendingExpresswayEndDecision: typeof getPendingExpresswayEndDecision;
   getPendingExpresswayEndPrompt: typeof getPendingExpresswayEndPrompt;
   clearPendingExpresswayEndDecision: typeof clearPendingExpresswayEndDecision;
+  clearPendingExpresswayKeepDecision: typeof clearPendingExpresswayKeepDecision;
   clearPendingExpresswayEndPrompt: typeof clearPendingExpresswayEndPrompt;
   cancelNativeExpresswayEndPrompt: typeof cancelNativeExpresswayEndPrompt;
   detectExpresswaySignal: typeof detectExpresswaySignal;
@@ -610,6 +612,7 @@ const DEFAULT_DEPENDENCIES: DetectionDependencies = {
   getPendingExpresswayEndDecision,
   getPendingExpresswayEndPrompt,
   clearPendingExpresswayEndDecision,
+  clearPendingExpresswayKeepDecision,
   clearPendingExpresswayEndPrompt,
   cancelNativeExpresswayEndPrompt,
   detectExpresswaySignal,
@@ -759,9 +762,8 @@ export function createNativeExpresswayDetectionProcessor(
     if (motion.effect.type === 'none') return 'processed';
 
     if (motion.effect.type === 'clear-keep') {
-      await dependencies.clearPendingExpresswayEndDecision(activeTripId);
-      await dependencies.clearPendingExpresswayEndPrompt(activeTripId);
-      await dependencies.cancelNativeExpresswayEndPrompt(activeTripId);
+      // A newer END/prompt may arrive while this old KEEP is being retired.
+      await dependencies.clearPendingExpresswayKeepDecision(activeTripId);
       return 'processed';
     }
 

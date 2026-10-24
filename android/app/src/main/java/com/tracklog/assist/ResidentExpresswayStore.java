@@ -439,16 +439,23 @@ final class ResidentExpresswayStore {
         final boolean expired;
         final String eventId;
         final long generation;
+        final String decidedAt;
 
         DecisionResult(boolean stored, String eventId, long generation) {
-            this(stored, false, eventId, generation);
+            this(stored, false, eventId, generation, "");
         }
 
         DecisionResult(boolean stored, boolean expired, String eventId, long generation) {
+            this(stored, expired, eventId, generation, "");
+        }
+
+        DecisionResult(boolean stored, boolean expired, String eventId,
+                long generation, String decidedAt) {
             this.stored = stored;
             this.expired = expired;
             this.eventId = eventId;
             this.generation = Math.max(0L, generation);
+            this.decidedAt = decidedAt;
         }
     }
 
@@ -958,11 +965,19 @@ final class ResidentExpresswayStore {
             EventKind expectedKind = end ? EventKind.DECISION_END : EventKind.DECISION_KEEP;
             Event existingDecision = findDecisionForPrompt(current.events, normalizedPromptId);
             if (existingDecision != null) {
+                // A duplicate action is idempotent only while it cannot consume
+                // or dismiss a newer candidate for the same trip.
+                if (!current.promptId.isEmpty()
+                        && !normalizedPromptId.equals(current.promptId)) {
+                    return new DecisionResult(false, "", current.revision);
+                }
                 return existingDecision.kind == expectedKind
                         ? new DecisionResult(
                                 true,
+                                false,
                                 existingDecision.id,
-                                existingDecision.generation
+                                existingDecision.generation,
+                                existingDecision.decidedAt
                         )
                         : new DecisionResult(false, "", current.revision);
             }
@@ -1031,7 +1046,7 @@ final class ResidentExpresswayStore {
                                 prompt.accuracyM == null ? 50d : prompt.accuracyM, prompt.speedKmh)));
             }
             return write(context, next)
-                    ? new DecisionResult(true, decisionId, generation)
+                    ? new DecisionResult(true, false, decisionId, generation, decision.decidedAt)
                     : new DecisionResult(false, "", current.revision);
         }
     }

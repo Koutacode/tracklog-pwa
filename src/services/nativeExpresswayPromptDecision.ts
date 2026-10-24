@@ -2,9 +2,11 @@ import {
   clearPendingExpresswayEndDecision,
   clearPendingExpresswayEndPrompt,
   clearPendingExpresswayEndPromptIfMatches,
+  commitPendingExpresswayKeepDecision,
   endExpressway,
   getEventsByTripId,
   getLatestRoutePointForTrip,
+  getPendingExpresswayEndPrompt,
   setPendingExpresswayEndDecision,
   type AutoExpresswayDecisionReason,
   type PendingExpresswayEndPrompt,
@@ -14,6 +16,7 @@ import { cancelNativeExpresswayEndPrompt } from './nativeExpresswayPrompt';
 import {
   EXPRESSWAY_PROMPT_MAX_AGE_MS,
   isFreshExpresswayEndPrompt,
+  matchesExpresswayPromptDecision,
 } from '../domain/expresswayPromptFreshness';
 import {
   resolveNativeResidentExpresswayPrompt,
@@ -23,6 +26,7 @@ import {
 type AutomaticPromptDecisionDependencies = {
   resolveNativePrompt: typeof resolveNativeResidentExpresswayPrompt;
   setPendingDecision: typeof setPendingExpresswayEndDecision;
+  commitPendingKeepDecision: typeof commitPendingExpresswayKeepDecision;
   clearPendingPrompt: typeof clearPendingExpresswayEndPrompt;
   clearPendingPromptIfMatches: typeof clearPendingExpresswayEndPromptIfMatches;
   clearPendingDecision: typeof clearPendingExpresswayEndDecision;
@@ -31,12 +35,14 @@ type AutomaticPromptDecisionDependencies = {
   cancelLocalNotification: typeof cancelNativeExpresswayEndPrompt;
   getEventsByTripId: typeof getEventsByTripId;
   getLatestRoutePointForTrip: typeof getLatestRoutePointForTrip;
+  getPendingPrompt: typeof getPendingExpresswayEndPrompt;
   now(): number;
 };
 
 const DEFAULT_DEPENDENCIES: AutomaticPromptDecisionDependencies = {
   resolveNativePrompt: resolveNativeResidentExpresswayPrompt,
   setPendingDecision: setPendingExpresswayEndDecision,
+  commitPendingKeepDecision: commitPendingExpresswayKeepDecision,
   clearPendingPrompt: clearPendingExpresswayEndPrompt,
   clearPendingPromptIfMatches: clearPendingExpresswayEndPromptIfMatches,
   clearPendingDecision: clearPendingExpresswayEndDecision,
@@ -45,8 +51,29 @@ const DEFAULT_DEPENDENCIES: AutomaticPromptDecisionDependencies = {
   cancelLocalNotification: cancelNativeExpresswayEndPrompt,
   getEventsByTripId,
   getLatestRoutePointForTrip,
+  getPendingPrompt: getPendingExpresswayEndPrompt,
   now: Date.now,
 };
+
+async function assertPromptStillCurrent(
+  isAndroidNative: boolean,
+  prompt: PendingExpresswayEndPrompt,
+  dependencies: AutomaticPromptDecisionDependencies,
+): Promise<void> {
+  const current = await dependencies.getPendingPrompt();
+  if (!current && !isJavaOwnedExpresswayPrompt(isAndroidNative, prompt)) {
+    throw new Error('この高速道路の確認はすでに更新されています。');
+  }
+  if (current && (current.detectedAt !== prompt.detectedAt
+    || !matchesExpresswayPromptDecision({
+      tripId: prompt.tripId,
+      promptId: prompt.promptId,
+      nativeDetectionId: prompt.reason?.nativeDetectionId,
+      detectedAt: prompt.detectedAt,
+    }, current))) {
+    throw new Error('この高速道路の確認はすでに更新されています。');
+  }
+}
 
 async function requireFreshWebPrompt(
   isAndroidNative: boolean,
@@ -61,7 +88,8 @@ async function requireFreshWebPrompt(
     geo: prompt.geo,
     events: await dependencies.getEventsByTripId(prompt.tripId),
     latestFix: await dependencies.getLatestRoutePointForTrip(
-      prompt.tripId, nowMs, EXPRESSWAY_PROMPT_MAX_AGE_MS),
+      prompt.tripId, nowMs, EXPRESSWAY_PROMPT_MAX_AGE_MS,
+      prompt.geo, prompt.detectedAt),
   });
   if (fresh) return;
   const cleared = await dependencies.clearPendingPromptIfMatches({
@@ -124,6 +152,7 @@ export async function commitAutomaticExpresswayKeep(options: {
   dependencies?: Partial<AutomaticPromptDecisionDependencies>;
 }): Promise<void> {
   const dependencies = { ...DEFAULT_DEPENDENCIES, ...options.dependencies };
+  await assertPromptStillCurrent(options.isAndroidNative, options.prompt, dependencies);
   await requireFreshWebPrompt(options.isAndroidNative, options.prompt, dependencies);
   const nativeResolution = await resolveJavaOwnedPrompt({
     isAndroidNative: options.isAndroidNative,
@@ -131,17 +160,37 @@ export async function commitAutomaticExpresswayKeep(options: {
     action: 'keep',
     dependencies,
   });
+  if (!nativeResolution) {
+    await dependencies.commitPendingKeepDecision({
+      tripId: options.prompt.tripId,
+      ...(options.prompt.promptId ? { promptId: options.prompt.promptId } : {}),
+      action: 'keep',
+      decidedAt: options.decidedAt,
+      detectedAt: options.prompt.detectedAt,
+      speedKmh: options.prompt.speedKmh,
+      geo: options.prompt.geo,
+    }, { detectedAt: options.prompt.detectedAt,
+      promptId: options.prompt.promptId,
+      nativeDetectionId: options.prompt.reason?.nativeDetectionId });
+    await dependencies.cancelLocalNotification(options.prompt.tripId).catch(() => undefined);
+    return;
+  }
   await dependencies.setPendingDecision({
     tripId: options.prompt.tripId,
     ...(nativeResolution ? { nativeDetectionId: nativeResolution.eventId } : {}),
     ...(options.prompt.promptId ? { promptId: options.prompt.promptId } : {}),
     action: 'keep',
-    decidedAt: options.decidedAt,
+    decidedAt: nativeResolution?.decidedAt ?? options.decidedAt,
+    detectedAt: options.prompt.detectedAt,
     speedKmh: options.prompt.speedKmh,
     geo: options.prompt.geo,
   });
-  await dependencies.clearPendingPrompt(options.prompt.tripId);
-  await dependencies.cancelLocalNotification(options.prompt.tripId).catch(() => undefined);
+  if (await dependencies.clearPendingPromptIfMatches({
+    tripId: options.prompt.tripId,
+    promptId: options.prompt.promptId,
+    nativeDetectionId: options.prompt.reason?.nativeDetectionId,
+    detectedAt: options.prompt.detectedAt,
+  })) await dependencies.cancelLocalNotification(options.prompt.tripId).catch(() => undefined);
 }
 
 export async function commitAutomaticExpresswayEnd(options: {
@@ -150,6 +199,7 @@ export async function commitAutomaticExpresswayEnd(options: {
   dependencies?: Partial<AutomaticPromptDecisionDependencies>;
 }): Promise<{ eventId: string }> {
   const dependencies = { ...DEFAULT_DEPENDENCIES, ...options.dependencies };
+  await assertPromptStillCurrent(options.isAndroidNative, options.prompt, dependencies);
   await requireFreshWebPrompt(options.isAndroidNative, options.prompt, dependencies);
   const nativeResolution = await resolveJavaOwnedPrompt({
     isAndroidNative: options.isAndroidNative,
@@ -157,16 +207,27 @@ export async function commitAutomaticExpresswayEnd(options: {
     action: 'end',
     dependencies,
   });
-  const { eventId } = await dependencies.endExpressway({
+  const { eventId, created } = await dependencies.endExpressway({
     tripId: options.prompt.tripId,
     geo: options.prompt.geo,
+    ...(nativeResolution ? { occurredAt: nativeResolution.decidedAt } : {}),
     autoDecision: decisionReason(options.prompt, nativeResolution),
+    ...(!isJavaOwnedExpresswayPrompt(options.isAndroidNative, options.prompt)
+      ? { expectedPrompt: {
+        detectedAt: options.prompt.detectedAt,
+        promptId: options.prompt.promptId,
+        nativeDetectionId: options.prompt.reason?.nativeDetectionId,
+      } } : {}),
     source: 'automatic_detection',
     automaticConfirmation: 'confirmed',
   });
-  dependencies.enqueueEndIcResolution({ eventId, geo: options.prompt.geo });
-  await dependencies.clearPendingPrompt(options.prompt.tripId);
-  await dependencies.clearPendingDecision(options.prompt.tripId);
-  await dependencies.cancelLocalNotification(options.prompt.tripId).catch(() => undefined);
+  if (created) dependencies.enqueueEndIcResolution({ eventId, geo: options.prompt.geo });
+  await dependencies.clearPendingPromptIfMatches({
+    tripId: options.prompt.tripId,
+    promptId: options.prompt.promptId,
+    nativeDetectionId: options.prompt.reason?.nativeDetectionId,
+    detectedAt: options.prompt.detectedAt,
+  });
+  if (created) await dependencies.cancelLocalNotification(options.prompt.tripId).catch(() => undefined);
   return { eventId };
 }

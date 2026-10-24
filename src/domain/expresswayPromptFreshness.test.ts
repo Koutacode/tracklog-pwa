@@ -27,6 +27,14 @@ assert(!check('2026-08-23T01:07:00.000Z', [
   event('boarding', '2026-08-23T01:03:00.000Z'),
   event('disembark', '2026-08-23T01:06:00.000Z'),
 ]), 'ferry pause revokes the old prompt');
+assert(!check('2026-08-23T01:07:00.000Z', [
+  event('rest_start', '2026-08-23T00:59:00.000Z'),
+  event('rest_end', '2026-08-23T01:04:00.000Z'),
+]), 'a candidate detected during an existing rest is invalid');
+assert(!check('2026-08-23T01:07:00.000Z', [
+  event('boarding', '2026-08-23T00:59:00.000Z'),
+  event('disembark', '2026-08-23T01:04:00.000Z'),
+]), 'a candidate detected during an existing ferry pause is invalid');
 assert(!check('2026-08-23T01:08:00.000Z', [], fix('2026-08-23T01:04:00.000Z', 20.05)),
   'five-kilometre re-drive revokes even a recently confirmed prompt');
 assert(check('2026-08-23T01:08:00.000Z', [], fix('2026-08-23T01:07:00.000Z', 20.0001)),
@@ -40,9 +48,15 @@ assert(check('2026-08-23T01:02:00.000Z', [
 ]), 'a confirmation made before rest remains valid when replayed later');
 assert(!check('2026-08-23T00:59:00.000Z'), 'decision before detection is invalid');
 assert(matchesExpresswayPromptDecision({ tripId, promptId: 'prompt-new' },
-  { tripId, promptId: 'prompt-new' }), 'matching notification action can resume');
+  { tripId, promptId: 'prompt-new', detectedAt }), 'matching notification action can resume');
 assert(!matchesExpresswayPromptDecision({ tripId, promptId: 'prompt-old' },
-  { tripId, promptId: 'prompt-new' }), 'old Web action cannot borrow a newer prompt coordinate');
+  { tripId, promptId: 'prompt-new', detectedAt }),
+  'old Web action cannot borrow a newer prompt coordinate');
+assert(matchesExpresswayPromptDecision({ tripId, detectedAt },
+  { tripId, detectedAt }), 'Web fallback notification resumes by detection time');
+assert(!matchesExpresswayPromptDecision({ tripId, detectedAt },
+  { tripId, detectedAt: '2026-08-23T01:05:00.000Z' }),
+  'old fallback notification cannot borrow a later prompt');
 assert(!matchesExpresswayPromptDecision({ tripId },
-  { tripId }), 'unidentified legacy action cannot bind an unrelated candidate');
-console.log('expresswayPromptFreshness: 13 tests passed');
+  { tripId, detectedAt }), 'unidentified legacy action cannot bind an unrelated candidate');
+console.log('expresswayPromptFreshness: 17 tests passed');
