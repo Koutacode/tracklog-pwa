@@ -6403,3 +6403,31 @@ a:hover {
     min-height: 48px;
   }
 }
+
+/* Recording clarity and the existing trip editor entry. */
+.home-recording-health--neutral > span { background: #94a3b8; box-shadow: none; }
+.home-operation-guide { margin: 0 0 10px; color: #cbd5e1; font-size: 14px; overflow-wrap: anywhere; }
+.home-record-review { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 12px; min-height: 52px; padding: 12px 16px; border: 1px solid rgba(148, 163, 184, 0.3); border-radius: 12px; background: rgba(15, 23, 42, 0.75); color: #e2e8f0; font-weight: 800; }
+.home-record-review span { color: #cbd5e1; font-size: 13px; font-weight: 500; }
+.home-runtime-status__badge--neutral { border-color: rgba(148, 163, 184, 0.4); background: rgba(51, 65, 85, 0.3); color: #e2e8f0; }
+/* Keep large text inside the cockpit instead of hiding it at the viewport edge. */
+.home-backdrop { padding-bottom: calc(8em + env(safe-area-inset-bottom)); }
+.home-backdrop .home-shell { grid-template-columns: minmax(0, 1fr); }
+.home-backdrop .home-shell > * { min-width: 0; overflow-wrap: anywhere; }
+.home-unified-header { flex-wrap: wrap; gap: 8px 12px; }
+.home-recording-health { max-width: 100%; }
+.home-recording-health > span { flex-shrink: 0; }
+.home-trip-heading { display: flex; flex-wrap: wrap; }
+.home-trip-heading > div:not(.home-trip-heading__icon) { flex: 1 1 130px; min-width: 0; }
+.home-trip-heading > strong, .home-active-status__time strong { white-space: normal; overflow-wrap: anywhere; }
+.home-ai-summary { flex-wrap: wrap; }
+.home-ai-summary__copy { flex: 1 1 140px; }
+.home-active-status { display: flex; flex-wrap: wrap; }
+.home-active-status__icon { flex: 0 0 34px; }
+.home-active-status__copy { flex: 1 1 90px; min-width: 0; }
+.home-active-status__time { min-width: 0; max-width: 100%; margin-left: auto; }
+.home-continuous-drive { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.home-backdrop .big-button { min-width: 0; grid-template-columns: minmax(0, 1fr); }
+.home-bottom-nav { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.home-bottom-nav a { min-width: 0; overflow-wrap: anywhere; }
+.home-runtime-status__header { flex-wrap: wrap; }

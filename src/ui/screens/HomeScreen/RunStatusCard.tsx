@@ -54,6 +54,11 @@ export default function RunStatusCard(props: RunStatusCardProps) {
     || diagnostics.tone === 'warning'
     || expressway.tone === 'error'
     || expressway.tone === 'warning';
+  const recordingVerified = route.tone === 'success' && diagnostics.tone === 'success';
+  const badgeTone = needsAttention ? 'attention' : recordingVerified ? 'ready' : 'neutral';
+  const badgeText = needsAttention ? '! 要確認' : recordingVerified ? '✓ 記録中'
+    : route.value === '未開始' ? '○ 開始前'
+      : route.value === '運行中（PWA）' ? '○ PWA' : '… 確認中';
   const allDiagnosticIssues = diagnosticItems.filter(item => item.level !== 'ok');
   const diagnosticIssues = allDiagnosticIssues.slice(0, 2);
   const tripActive = route.value !== '未開始';
@@ -70,8 +75,8 @@ export default function RunStatusCard(props: RunStatusCardProps) {
           <div className="home-section-label">運行サポート</div>
           <h2 id="home-runtime-status-title">いまの記録状態</h2>
         </div>
-        <span className={`home-runtime-status__badge home-runtime-status__badge--${needsAttention ? 'attention' : 'ready'}`}>
-          {needsAttention ? '! 要確認' : '✓ 正常'}
+        <span className={`home-runtime-status__badge home-runtime-status__badge--${badgeTone}`}>
+          {badgeText}
         </span>
       </div>
 

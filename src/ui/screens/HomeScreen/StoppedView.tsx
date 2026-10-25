@@ -63,13 +63,21 @@ export const StoppedView: React.FC<StoppedViewProps> = ({
     }
     previousActive.current = { workActive, ferryActive };
   }, [workActive, ferryActive]);
+  const activeOperations = [loadActive && '積込', unloadActive && '荷卸', breakActive && '休憩', restActive && '休息', workActive && 'その他作業', ferryActive && 'フェリー乗船']
+    .filter(Boolean).join('・');
+  const unavailableReason = disabled ? '処理・確認が終わるまでお待ちください。'
+    : activeOperations ? `${activeOperations}中です。開始できない操作は、進行中の作業・休息・乗船を終了してから選んでください。` : null;
   const secondaryStatus = [workActive && 'その他作業中', ferryActive && 'フェリー乗船中']
     .filter(Boolean).join('・');
 
   return (
     <div className="stopped-view home-unified-actions">
-      <section className="home-action-panel" aria-labelledby="primary-actions-title">
+      <section className="home-action-panel" aria-labelledby="primary-actions-title" aria-describedby="home-operation-guide">
         <h2 id="primary-actions-title" className="home-panel-title">よく使う操作</h2>
+        <p id="home-operation-guide" className="home-operation-guide">
+          休憩は運行途中の休み、休息は勤務を終えて休む時間です。どちらも運行は終了しません。
+        </p>
+        {unavailableReason && <p className="home-operation-guide" role="status">{unavailableReason}</p>}
         <div className="home-primary-action-grid">
           {loadActive ? (
             <BigButton label="積込終了" variant="neutral" disabled={disabled} onClick={() => onToggle('load', 'end')} />
