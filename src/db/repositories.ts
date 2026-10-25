@@ -2211,6 +2211,21 @@ export async function getPendingExpresswayEvents(
     });
 }
 
+/** Missing names may acquire bounded local evidence without renewing network retries. */
+export function canRecoverExhaustedExpresswayIcLocally(extras?: Record<string, unknown>): boolean {
+  return extras?.icResolvedManually !== true
+    && !(typeof extras?.icName === 'string' && extras.icName.trim())
+    && extras?.icResolveStatus === 'failed'
+    && getIcResolveAlgorithmVersionFromExtras(extras) === IC_RESOLVE_ALGORITHM_VERSION
+    && getIcResolveRetryCountFromExtras(extras) >= IC_RESOLVE_RETRY_LIMIT;
+}
+
+export async function getExhaustedExpresswayEventsForLocalRecovery() {
+  const events = await db.events.where('type').anyOf([...EXPRESSWAY_EVENT_TYPES]).toArray();
+  return events.filter(event => canRecoverExhaustedExpresswayIcLocally(event.extras))
+    .sort((a, b) => a.id.localeCompare(b.id));
+}
+
 let expresswayIcBackfillInFlight: Promise<boolean> | null = null;
 
 export async function backfillPendingExpresswayIcs(limit = 8): Promise<boolean> {
@@ -2285,7 +2300,7 @@ export type ExpresswayIcResolutionWriteGuard = {
 
 type IcResolutionEstimate = {
   candidates: string[];
-  source: 'overpass_nearby' | 'mlit_n06_2025';
+  source: 'overpass_nearby' | 'mlit_n06_2025' | 'public_ic_catalog';
   sourceDatasetDate?: string;
   sourceUrls: string[];
   note: string;
@@ -2414,7 +2429,9 @@ export async function updateExpresswayResolved(params: {
       } else {
         delete extras.icResolveGeoOffsetSeconds;
       }
-      extras.icResolveRetryCount = 0;
+      // A successful local-only recovery must not renew an exhausted network budget.
+      extras.icResolveRetryCount = Number.isFinite(params.retryCount)
+        ? Math.max(0, Math.floor(params.retryCount!)) : 0;
       delete extras.icResolveNextRetryAt;
       extras.icResolveLastAttemptAt = nextIcMetadataTimestamp(ev.extras?.icResolveLastAttemptAt);
       delete extras.icResolveError;

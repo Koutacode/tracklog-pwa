@@ -808,6 +808,41 @@ async function testDifferentLocalSupplementsRemainUnconfirmedCandidates() {
   assert.ok(Number(saved.icDistanceM) >= 480 && Number(saved.icDistanceM) <= 481);
 }
 
+async function testMixedLocalRouteCandidatesRetainEverySourceAndNoSingleDatasetDate() {
+  await reset([point('synthetic-mlit-fix', -10, 400), point('synthetic-public-fix', -50, -400)], {
+    extras: exhaustedExtras(),
+  });
+  let requests = 0;
+  const run = createExpresswayIcResolutionRunner(async () => { requests += 1; return null; }, lat => {
+    if (lat === originalGeo.lat) return null;
+    return lat > originalGeo.lat ? {
+      icName: '合成国土候補（推定）', distanceM: 40, confidence: 'estimated', candidates: ['合成国土候補'],
+      estimateSource: 'mlit_n06_2025', sourceDatasetDate: '2025-12-31',
+      sourceUrls: ['https://example.invalid/mlit-source'], note: '国土数値情報（2025-12-31）の近傍候補。',
+    } : {
+      icName: '合成公開地図候補（推定）', distanceM: 80, confidence: 'estimated', candidates: ['合成公開地図候補'],
+      estimateSource: 'public_ic_catalog',
+      sourceUrls: ['https://example.invalid/osm-node', 'https://www.openstreetmap.org/copyright'],
+      note: 'OpenStreetMap公開ノードの近傍候補。© OpenStreetMap contributors / ODbL。',
+    };
+  });
+  assert.equal((await run({ eventId, source: 'local-recovery' })).status, 'resolved');
+  assert.equal(requests, 0);
+  const saved = await savedExtras();
+  const estimate = saved.icNameEstimate as Record<string, unknown>;
+  assert.equal(saved.icName, '合成国土候補（推定）', 'the representative remains the nearer candidate');
+  assert.deepEqual(estimate.candidateNames, ['合成国土候補', '合成公開地図候補']);
+  assert.equal(estimate.certainty, 'ambiguous_candidates');
+  assert.equal(estimate.source, 'public_ic_catalog', 'the full union is not falsely attributed only to MLIT');
+  assert.equal(estimate.sourceDatasetDate, undefined, 'one source snapshot date does not apply to mixed evidence');
+  assert.deepEqual(estimate.sourceUrls, [
+    'https://example.invalid/mlit-source', 'https://example.invalid/osm-node', 'https://www.openstreetmap.org/copyright',
+  ]);
+  assert.match(String(estimate.note), /国土数値情報（2025-12-31）/);
+  assert.match(String(estimate.note), /© OpenStreetMap contributors \/ ODbL/);
+  assert.equal(saved.icResolveRetryCount, IC_RESOLVE_RETRY_LIMIT);
+}
+
 async function testLocalSupplementBoundsEveryAlternativeFromOriginalEvent() {
   for (const offset of [500, 1000]) {
     await reset([point('synthetic-multiple-local', -20, offset)]);
@@ -901,6 +936,128 @@ async function testOnlineLocalUnionOverflowCannotFallbackToSharedRepresentative(
   assert.equal(requests, 0);
 }
 
+function exhaustedExtras() {
+  return { icResolveStatus: 'failed', icResolveAlgorithmVersion: IC_RESOLVE_ALGORITHM_VERSION,
+    icResolveRetryCount: IC_RESOLVE_RETRY_LIMIT, icResolveLastAttemptAt: ts(-1),
+    icResolveError: 'synthetic transport failure', expresswaySessionId: 'synthetic-unchanged-session', odoKm: 1234 };
+}
+
+async function testExhaustedLocalMissKeepsExactFailureAndNeverUsesNetwork() {
+  for (const online of [true, false]) {
+    await reset([], { extras: exhaustedExtras() });
+    const before = await db.events.get(eventId);
+    let requests = 0;
+    let localQueries = 0;
+    const run = createExpresswayIcResolutionRunner(async () => { requests += 1; return null; }, () => {
+      localQueries += 1; return null;
+    });
+    Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { onLine: online } });
+    try {
+      const batch = createExpresswayIcRetryBatchRunner(run, true);
+      assert.equal(await batch(1), false);
+      assert.equal(await batch(1), false);
+      assert.equal(localQueries, 2, 'ordinary startup/recovery may recheck local evidence');
+      assert.equal(requests, 0);
+      assert.deepEqual(await db.events.get(eventId), before, 'misses do not write timestamps, revisions, errors or retry state');
+    } finally {
+      Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { onLine: true } });
+    }
+  }
+}
+
+async function testLateLocalEvidenceRecoversActualEntryAndKeepsNetworkBudget() {
+  await reset([], { type: 'expressway_start', extras: exhaustedExtras() });
+  const before = (await db.events.get(eventId))!;
+  let requests = 0;
+  const run = createExpresswayIcResolutionRunner(async () => { requests += 1; return null; }, lat => {
+    if (lat === originalGeo.lat) return null;
+    return { icName: '合成後着入口（推定）', distanceM: 80, confidence: 'estimated',
+      candidates: ['合成後着入口', '合成別入口'], estimateSource: 'mlit_n06_2025' };
+  });
+  const batch = createExpresswayIcRetryBatchRunner(run, true);
+  assert.equal(await batch(1), false);
+  assert.deepEqual(await db.events.get(eventId), before);
+  await db.routePoints.put(point('independent-late-fix', -20, 400));
+  assert.equal(await batch(1), true);
+  const saved = (await db.events.get(eventId))!;
+  assert.equal(requests, 0);
+  assert.equal(saved.extras?.icName, '合成後着入口（推定）');
+  assert.equal(saved.extras?.icResolveStatus, 'resolved');
+  assert.equal(saved.extras?.icResolveRetryCount, IC_RESOLVE_RETRY_LIMIT, 'local success does not reset network budget');
+  assert.equal(saved.extras?.icResolveError, undefined);
+  assert.equal(saved.extras?.icResolveGeoSource, 'route');
+  assert.equal(saved.extras?.icResolveGeoOffsetSeconds, -20);
+  assert.equal(saved.extras?.icResolvedManually, undefined);
+  const estimate = saved.extras?.icNameEstimate as Record<string, unknown>;
+  assert.equal(estimate.certainty, 'ambiguous_candidates');
+  assert.deepEqual(estimate.candidateNames, ['合成後着入口', '合成別入口']);
+  assert.equal(saved.ts, before.ts);
+  assert.deepEqual(saved.geo, before.geo);
+  assert.equal(saved.type, before.type);
+  assert.equal(saved.extras?.odoKm, before.extras?.odoKm);
+  assert.equal(saved.extras?.expresswaySessionId, before.extras?.expresswaySessionId);
+  assert.equal(await batch(1), false, 'saved candidates are not written again');
+  assert.deepEqual(await db.events.get(eventId), saved);
+}
+
+async function testExhaustedLocalRecoveryPreservesManualNamesBackoffAndStaleInputs() {
+  const excluded = [
+    { ...exhaustedExtras(), icName: '手動合成IC', icResolvedManually: true },
+    { ...exhaustedExtras(), icName: '既存合成IC', icResolveStatus: 'resolved' },
+    { ...exhaustedExtras(), icResolveStatus: 'pending', icResolveRetryCount: 2,
+      icResolveNextRetryAt: new Date(Date.now() + 60_000).toISOString() },
+  ];
+  for (const extras of excluded) {
+    await reset([], { extras });
+    const before = await db.events.get(eventId);
+    let queries = 0;
+    const run = createExpresswayIcResolutionRunner(async () => { queries += 1; return null; }, () => {
+      queries += 1; return { icName: '上書き不可IC', distanceM: 10 };
+    });
+    assert.equal(await createExpresswayIcRetryBatchRunner(run, true)(1), false);
+    assert.equal((await run({ eventId, source: 'local-recovery' })).status, 'deferred');
+    assert.equal(queries, 0);
+    assert.deepEqual(await db.events.get(eventId), before);
+  }
+  await reset([], { extras: exhaustedExtras() });
+  const run = createExpresswayIcResolutionRunner(async () => { throw new Error('no network'); }, () => ({
+    icName: '廃棄すべき候補IC', distanceM: 20, confidence: 'estimated', candidates: ['廃棄すべき候補IC'],
+  }));
+  const batch = createExpresswayIcRetryBatchRunner(async request => {
+    await updateExpresswayIcNameManual(request.eventId, '直前の本人訂正IC');
+    return run(request);
+  }, true);
+  assert.equal(await batch(1), false);
+  assert.equal((await savedExtras()).icName, '直前の本人訂正IC');
+  assert.equal((await savedExtras()).icResolvedManually, true);
+}
+
+async function testExhaustedLocalOverflowPreservesFailureAndBatchRotatesMisses() {
+  await reset([point('synthetic-local-one', -10, 400), point('synthetic-local-two', -50, -400)], {
+    extras: exhaustedExtras(),
+  });
+  const before = await db.events.get(eventId);
+  let requests = 0;
+  const run = createExpresswayIcResolutionRunner(async () => { requests += 1; return null; }, lat => {
+    if (lat === originalGeo.lat) return null;
+    const candidates = Array.from({ length: 7 }, (_, index) => `${lat > originalGeo.lat ? '北' : '南'}合成${index}IC`);
+    return { icName: candidates[0], distanceM: 50, confidence: 'estimated', candidates };
+  });
+  assert.equal(await createExpresswayIcRetryBatchRunner(run, true)(1), false);
+  assert.equal(requests, 0);
+  assert.deepEqual(await db.events.get(eventId), before, 'overflow never narrows or rewrites the saved failure');
+  const copy = (await db.events.get(eventId))!;
+  await db.events.bulkPut(['synthetic-a', 'synthetic-b'].map(id => ({ ...copy, id })));
+  const attempted: string[] = [];
+  const rotating = createExpresswayIcRetryBatchRunner(async request => {
+    attempted.push(request.eventId);
+    return { status: 'deferred', source: request.source, reason: 'temporary' };
+  }, true);
+  await rotating(1); await rotating(1); await rotating(1);
+  assert.equal(new Set(attempted).size, 3, 'bounded local misses do not starve later records');
+  assert.equal(attempted.length, 3, 'each pass respects the event limit');
+}
+
 async function testManualCorrectionClearsAutomaticOriginMetadata() {
   await reset([], {
     extras: { icName: '自動合成IC', icResolveStatus: 'resolved', icResolveGeoSource: 'route', icResolveGeoOffsetSeconds: -20 },
@@ -926,6 +1083,88 @@ async function withExhaustedIcRecovery(test: (clock: {
   } finally {
     Date.now = realNow;
   }
+}
+
+async function testInFlightLocalRecoveryRejectsChangedInputsAndManualCorrection() {
+  const mutations: Array<() => Promise<unknown>> = [
+    () => db.events.update(eventId, { geo: geoAt(700) }),
+    () => db.events.update(eventId, { ts: ts(20) }),
+    async () => db.events.update(eventId, { extras: { ...(await savedExtras()), expresswaySessionId: 'new-synthetic-session' } }),
+    () => updateExpresswayIcNameManual(eventId, '確認中に本人が訂正したIC'),
+  ];
+  for (const mutate of mutations) {
+    await reset([], { extras: exhaustedExtras() });
+    const started = deferred<void>();
+    const complete = deferred<IcResult | null>();
+    let requests = 0;
+    // The runner awaits its local adapter. Hold that boundary to reproduce an
+    // event edit before the guarded save without using a device or a network.
+    const localLookup = (() => {
+      started.resolve(); return complete.promise;
+    }) as unknown as NonNullable<Parameters<typeof createExpresswayIcResolutionRunner>[1]>;
+    const run = createExpresswayIcResolutionRunner(async () => { requests += 1; return null; }, localLookup);
+    const pending = run({ eventId, source: 'local-recovery' });
+    try {
+      await within(started.promise);
+      await mutate();
+      const edited = await db.events.get(eventId);
+      complete.resolve({ icName: '保存してはいけない旧入力候補', distanceM: 50,
+        confidence: 'estimated', candidates: ['保存してはいけない旧入力候補'] });
+      const outcome = await pending;
+      assert.equal(outcome.status, 'deferred');
+      if (outcome.status === 'deferred') assert.equal(outcome.reason, 'superseded');
+      assert.equal(requests, 0);
+      assert.deepEqual(await db.events.get(eventId), edited, 'the in-flight candidate cannot alter new inputs, manual name or provenance');
+    } finally {
+      complete.resolve(null);
+      await pending;
+    }
+  }
+}
+
+async function testLocalRecoveryBatchReservesUpstreamSlotAndDoesNotStarveLaterLocalRows() {
+  await withExhaustedIcRecovery(async clock => {
+    const base = (await db.events.get(eventId))!;
+    await db.events.bulkPut([
+      { ...base, id: 'a-local-first', geo: geoAt(500), extras: {
+        ...base.extras, icResolveLastAttemptAt: new Date(clock.now() - 500).toISOString(),
+      } },
+      { ...base, id: 'zz-local-later', geo: geoAt(800), extras: {
+        ...base.extras, icResolveLastAttemptAt: new Date(clock.now() - 400).toISOString(),
+      } },
+    ]);
+    await recordIcUpstreamSuccess();
+    let networkRequests = 0;
+    const attempts: Array<{ eventId: string; source: string }> = [];
+    const run = createExpresswayIcResolutionRunner(async () => {
+      networkRequests += 1;
+      assert.equal((await savedExtras()).icResolveRetryCount, IC_RESOLVE_RETRY_LIMIT + 1,
+        'the one-shot upstream claim is consumed before its request');
+      return { icName: '合成上流復旧候補', distanceM: 40, confidence: 'estimated', candidates: ['合成上流復旧候補'] };
+    }, lat => lat === originalGeo.lat ? null : {
+      icName: '合成ローカル復旧候補', distanceM: 40, confidence: 'estimated', candidates: ['合成ローカル復旧候補'],
+    });
+    const batch = createExpresswayIcRetryBatchRunner(async request => {
+      attempts.push({ eventId: request.eventId, source: request.source });
+      return run(request);
+    }, true);
+    assert.equal(await batch(2), true);
+    assert.deepEqual(attempts, [
+      { eventId: 'a-local-first', source: 'local-recovery' },
+      { eventId, source: 'upstream-recovery' },
+    ], 'the bounded pass reserves one upstream slot beside its local-only slot');
+    assert.equal(networkRequests, 1);
+    assert.equal((await db.events.get('a-local-first'))?.extras?.icResolveRetryCount, IC_RESOLVE_RETRY_LIMIT);
+    assert.equal((await db.events.get('zz-local-later'))?.extras?.icResolveStatus, 'failed');
+    const firstPassCount = attempts.length;
+    assert.equal(await batch(2), true);
+    assert.deepEqual(attempts.slice(firstPassCount), [
+      { eventId: 'zz-local-later', source: 'local-recovery' },
+    ], 'a later local row still progresses while upstream recovery is cooling down');
+    assert.ok(attempts.length - firstPassCount <= 2);
+    assert.equal(networkRequests, 1, 'the next local pass neither renews nor adds an upstream retry');
+    assert.equal((await db.events.get('zz-local-later'))?.extras?.icResolveRetryCount, IC_RESOLVE_RETRY_LIMIT);
+  });
 }
 
 async function testExhaustedRecoveryNeedsMapReceiptAndOnlineState() {
@@ -1144,6 +1383,10 @@ const tests = [
   testConcurrentManualCorrectionWinsOverDelayedLookup,
   testExistingManualNameSurvivesNetworkFailure,
   testManualCorrectionClearsAutomaticOriginMetadata,
+  testExhaustedLocalMissKeepsExactFailureAndNeverUsesNetwork,
+  testLateLocalEvidenceRecoversActualEntryAndKeepsNetworkBudget,
+  testExhaustedLocalRecoveryPreservesManualNamesBackoffAndStaleInputs,
+  testExhaustedLocalOverflowPreservesFailureAndBatchRotatesMisses,
   testTemporaryAndAuthFailuresHaveFinitePersistedBudget,
   testEstimatePendingSurvivesFailureOfflineAndRestart,
   testManualRetryNeverOverwritesExistingManualName,
@@ -1154,9 +1397,12 @@ const tests = [
   testAddressAloneCannotInferAnIcName,
   testLocalSupplementPrecedesFailingExternalLookup,
   testDifferentLocalSupplementsRemainUnconfirmedCandidates,
+  testMixedLocalRouteCandidatesRetainEverySourceAndNoSingleDatasetDate,
   testLocalSupplementBoundsEveryAlternativeFromOriginalEvent,
   testLocalSupplementUnionOverflowDoesNotTruncateCandidates,
   testOnlineLocalUnionOverflowCannotFallbackToSharedRepresentative,
+  testInFlightLocalRecoveryRejectsChangedInputsAndManualCorrection,
+  testLocalRecoveryBatchReservesUpstreamSlotAndDoesNotStarveLaterLocalRows,
   testExhaustedRecoveryNeedsMapReceiptAndOnlineState,
   testOrdinaryMapResponseRevivesOneMissingNameWithoutRenewingItself,
   testFailedRecoveryStaysConsumedAcrossRestartAndOldSyncReplay,

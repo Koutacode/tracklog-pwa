@@ -3,6 +3,7 @@ import { projectReportResolvedIc } from './reportResolvedIc';
 import type { AppEvent } from './types';
 import type { Trip } from './reportTypes';
 import { mergeIcMetadata, isEstimatedIcName } from './icMetadata';
+import { getExpresswayIcDisplay } from './expresswayIcDisplay';
 
 // Synthetic fixtures only; no production sessions, locations, or trip data.
 const trip: Trip = {
@@ -153,6 +154,17 @@ assert.equal(richerAddress?.unrelated, 'new-cloud-value');
 assert.equal(isEstimatedIcName(richerAddress), true, 'successful lookup does not confirm the address candidates');
 assert.equal(mergeIcMetadata(corrected, catalogueResult, { incomingIsNewer: true })?.icName, '手動合成C入口',
   'catalogue lookup cannot replace a driver correction');
+const publicEstimate = { ...catalogueEstimate, source: 'public_ic_catalog', sourceDatasetDate: undefined,
+  estimatedAt: '2026-09-01T00:41:00.000Z' };
+const publicResult = { ...catalogueResult, icNameEstimate: publicEstimate };
+const publicMerged = mergeIcMetadata(estimatedEvent.extras, publicResult, { incomingIsNewer: true });
+assert.equal(publicMerged?.icName, estimate.displayName, 'the public supplement also preserves detailed entrance evidence');
+assert.deepEqual(publicMerged?.icNameEstimateHistory, [estimate, publicEstimate]);
+const publicDisplay = getExpresswayIcDisplay(publicMerged);
+assert.equal(publicDisplay.state, 'estimated');
+assert.ok(publicDisplay.label.includes('合成中央IC') && publicDisplay.label.includes('公開地図資料・推定'));
+assert.ok(!publicDisplay.label.includes('国土数値情報'), 'OSM supplement is not relabelled as MLIT');
+assert.equal(mergeIcMetadata(corrected, publicResult, { incomingIsNewer: true })?.icName, '手動合成C入口');
 const futureEstimate = { ...catalogueEstimate, estimatedAt: '2040-01-01T00:00:00.000Z', displayName: '未来時計の旧候補（推定）' };
 const skewed = { ...catalogueResult, icName: futureEstimate.displayName, icNameEstimate: futureEstimate,
   icResolveStatus: 'pending', icResolveAlgorithmVersion: 15, icResolveRetryCount: 32,

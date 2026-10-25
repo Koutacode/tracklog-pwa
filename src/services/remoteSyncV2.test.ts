@@ -325,7 +325,15 @@ async function testCatalogueEvidenceAndClockSkewPersistence() {
   await updateExpresswayResolved({ eventId: event.id, status: 'resolved', icName: '合成隣接IC（推定）',
     estimate: { candidates: ['合成隣接IC'], source: 'mlit_n06_2025', sourceDatasetDate: '2025-12-31',
       sourceUrls: ['https://example.invalid/public-catalogue'], note: '追加の未確認候補', estimatedAt: TS } });
+  await updateExpresswayResolved({ eventId: event.id, status: 'resolved', icName: '合成公開補完IC（推定）',
+    estimate: { candidates: ['合成公開補完IC'], source: 'public_ic_catalog',
+      sourceUrls: ['https://example.invalid/public-supplement'], note: '公開地図資料の未確認候補', estimatedAt: TS } });
+  saved = (await db.events.get(event.id))!;
+  assert.equal(saved.extras?.icName, estimate.displayName, 'public supplements preserve the original entrance candidates');
+  assert.deepEqual(saved.extras?.icNameEstimate, estimate);
   const newerHistory = (await db.events.get(event.id))!.extras!.icNameEstimateHistory as Array<Record<string, unknown>>;
+  assert.equal(newerHistory[3].source, 'public_ic_catalog');
+  assert.equal(newerHistory[3].sourceDatasetDate, undefined);
   assert.deepEqual(newerHistory[0], estimate);
   assert.ok(Date.parse(String(newerHistory[2].estimatedAt)) > Date.parse(String(history[1].estimatedAt)),
     'later supplementary catalogue evidence is newer even while the primary address timestamp stays intact');

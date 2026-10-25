@@ -2,6 +2,8 @@ import { db } from '../db/db';
 import { IC_CATALOG_MAX_CANDIDATES, IC_CATALOG_MAX_DISTANCE_M } from '../../shared/ic-catalog/index';
 import {
   getPendingExpresswayEvents,
+  canRecoverExhaustedExpresswayIcLocally,
+  getExhaustedExpresswayEventsForLocalRecovery,
   claimExpresswayIcUpstreamRecovery,
   updateExpresswayResolved,
 } from '../db/repositories';
@@ -21,6 +23,7 @@ import {
   canApplyIcResolutionResult,
   captureIcResolutionEventVersion,
   getNextIcResolveDeferredRetryCount,
+  getIcResolveRetryCount,
 } from './expresswayIcRetryPolicy';
 import { getIcUpstreamRecoveryCandidates, recordIcUpstreamSuccess } from './expresswayIcRecovery';
 
@@ -29,6 +32,7 @@ export type ExpresswayIcResolutionSource =
   | 'retry'
   | 'manual'
   | 'upstream-recovery'
+  | 'local-recovery'
   | 'notification-end';
 
 export type ExpresswayIcResolutionOutcome =
@@ -288,6 +292,7 @@ async function resolveAtNearbyPoints(
   );
   const names = new Set<string>();
   const localNames = new Map<string, string>();
+  const localEvidence: IcResult[] = [];
   let localDistanceUpperBound = 0;
   let best: { result: IcResult; geoSource: 'route'; geoOffsetSeconds: number } | null = null;
   for (const supplementalGeo of supplementalGeos) {
@@ -309,6 +314,7 @@ async function resolveAtNearbyPoints(
     if (upperBound > IC_GEO_MAX_EVENT_DISTANCE_M) continue;
     if (mergeLocalCandidates) {
       localDistanceUpperBound = Math.max(localDistanceUpperBound, upperBound);
+      localEvidence.push(candidate);
       for (const name of candidateNames) localNames.set(normalizedIcName(name), name);
     }
     if (!best || candidate.distanceM < best.result.distanceM) {
@@ -324,12 +330,33 @@ async function resolveAtNearbyPoints(
     // enter the fallback (which also reads this catalog) and could save only one
     // route fix's subset. Stop this attempt without discarding alternatives.
     if (localNames.size > IC_CATALOG_MAX_CANDIDATES) throw new IcCatalogCandidateOverflowError();
+    const sourceUrls = [...new Set(localEvidence.flatMap(result => result.sourceUrls ?? []))];
+    const sourceNotes = [...new Set(localEvidence.map(result => result.note?.trim())
+      .filter((note): note is string => !!note))];
+    // Each parsed lookup contributes at most eight URLs and a 300-character
+    // note. Reject oversized evidence instead of dropping a source/license.
+    if (sourceUrls.length > IC_GEO_SUPPLEMENT_LIMIT * 8
+      || sourceUrls.some(url => url.length > 2048)
+      || sourceNotes.some(note => note.length > 300)) {
+      throw new Error('IC候補の出典情報が上限を超えたため保存できません');
+    }
+    const sourceKinds = new Set(localEvidence.map(result => result.estimateSource));
+    const publicOrMixed = sourceKinds.has('public_ic_catalog') || sourceKinds.size > 1;
+    const datasetDate = !publicOrMixed && best.result.sourceDatasetDate
+      && localEvidence.every(result => result.sourceDatasetDate === best!.result.sourceDatasetDate)
+      ? best.result.sourceDatasetDate : undefined;
+    // A nearest MLIT result cannot lend its source/date to a different OSM
+    // candidate found at another saved fix. Preserve their combined provenance.
+    const { sourceDatasetDate: _representativeDate, ...representative } = best.result;
     return { ...best, result: {
-      ...best.result,
+      ...representative,
       confidence: 'estimated',
       candidates: [...localNames.values()],
       distanceM: Math.ceil(localDistanceUpperBound),
-      note: `保存軌跡の補足点から得た近傍候補。距離は元イベント位置から候補全体までの保守的な上限。${best.result.note ?? '利用した入口・出口・進行方向は未確認。'}`,
+      estimateSource: publicOrMixed ? 'public_ic_catalog' : best.result.estimateSource,
+      ...(datasetDate ? { sourceDatasetDate: datasetDate } : {}),
+      sourceUrls,
+      note: `保存軌跡の補足点から得た近傍候補。距離は元イベント位置から候補全体までの保守的な上限。${sourceNotes.join(' ') || '利用した入口・出口・進行方向は未確認。'}`,
     } };
   }
   if (names.size > 1) throw new Error('付近の軌跡でIC候補が一致しないため自動確定できません');
@@ -344,12 +371,16 @@ async function performResolution(
   const eventId = request.eventId.trim();
   if (!eventId) throw new Error('eventId is required');
   let context = await loadEventGeo(eventId);
+  const localOnly = request.source === 'local-recovery';
   const offlineOutcome = (): ExpresswayIcResolutionOutcome => ({
     status: 'deferred', source: request.source, reason: 'offline',
   });
   if (context.expectedVersion.resolvedManually) {
     return { status: 'deferred', source: request.source, reason: 'superseded',
       error: '手動修正済みのIC名は保持されます。変更する場合はIC名を編集してください' };
+  }
+  if (localOnly && !canRecoverExhaustedExpresswayIcLocally(context.extras)) {
+    return { status: 'deferred', source: request.source, reason: 'temporary' };
   }
   if (request.source === 'upstream-recovery') {
     if (!isOnline()) return offlineOutcome();
@@ -358,7 +389,7 @@ async function performResolution(
     if (!claimedVersion) return { status: 'deferred', source: request.source, reason: 'temporary' };
     context = await loadEventGeo(eventId);
     if (!canApplyIcResolutionResult(claimedVersion, context.event)) return supersededOutcome(request.source);
-  } else if (request.source !== 'manual' && !canRetryIcResolve(context.extras, Date.now())) {
+  } else if (!localOnly && request.source !== 'manual' && !canRetryIcResolve(context.extras, Date.now())) {
     return { status: 'deferred', source: request.source, reason: 'temporary',
       error: '保存済みの再試行待ち時間と上限を維持しています' };
   }
@@ -390,6 +421,7 @@ async function performResolution(
     return { status: 'failed', source: request.source, error: message };
   };
   if (!geo) {
+    if (localOnly) return { status: 'deferred', source: request.source, reason: 'temporary' };
     if (!isOnline()) return offlineOutcome();
     return saveFailure('イベント付近の有効な位置情報が見つかりません', null);
   }
@@ -402,7 +434,12 @@ async function performResolution(
       ? await resolveAtNearbyPoints(context, geo,
           async (lat, lon, _radius, lookupContext) => resolveOfflineIc(lat, lon, lookupContext), true)
       : null;
-    const resolved = localResolved ?? (isOnline()
+    // Exhaustion limits network I/O, not a later lookup of independent saved
+    // fixes in the bundled catalog. A local miss never resets or spends it.
+    if (localOnly && !localResolved) {
+      return { status: 'deferred', source: request.source, reason: 'temporary' };
+    }
+    const resolved = localResolved ?? (!localOnly && isOnline()
       ? await resolveAtNearbyPoints(context, geo, resolveIc)
       : null);
     if (!resolved) {
@@ -417,7 +454,8 @@ async function performResolution(
       icDistanceM: result.distanceM,
       resolutionSource: resolved.geoSource,
       resolutionOffsetSeconds: resolved.geoOffsetSeconds,
-      ...(result.confidence === 'estimated' ? { estimate: {
+      ...(localOnly ? { retryCount: getIcResolveRetryCount(context.extras) } : {}),
+      ...(result.confidence === 'estimated' || localOnly ? { estimate: {
         candidates: result.candidates ?? [result.icName],
         source: result.estimateSource ?? 'overpass_nearby',
         ...(result.sourceDatasetDate ? { sourceDatasetDate: result.sourceDatasetDate } : {}),
@@ -435,6 +473,11 @@ async function performResolution(
     }
     return { status: 'resolved', source: request.source, result };
   } catch (error) {
+    if (localOnly) {
+      // Overflow, unusable or changed evidence cannot erase the original
+      // failure or turn a local-only pass into another upstream request.
+      return { status: 'deferred', source: request.source, reason: 'temporary' };
+    }
     // Offline catalog misses/failures are not network attempts. Preserve the
     // persisted retry budget and last error until online recovery is possible.
     if (!isOnline()) return offlineOutcome();
@@ -492,6 +535,7 @@ export function createExpresswayIcRetryBatchRunner(
   allowOfflineCatalog = resolve === resolveExpresswayIcResolution,
 ) {
   let retryBatchInFlight: Promise<boolean> | null = null;
+  let lastLocalRecoveryEventId: string | undefined;
   return async (limit = 8, _legacyOptions?: { ignorePendingBackoff?: boolean }): Promise<boolean> => {
     const boundedLimit = Number.isFinite(limit) ? Math.min(20, Math.max(1, Math.round(limit))) : 8;
     // All triggers share the same bounded pass. A TOKEN_REFRESHED event raised
@@ -514,8 +558,28 @@ export function createExpresswayIcRetryBatchRunner(
         }
       };
       await Promise.all(Array.from({ length: Math.min(2, pending.length) }, worker));
-      if (isOnline() && pending.length < boundedLimit) {
-        const candidates = await getIcUpstreamRecoveryCandidates(isUsableIcResolutionGeo, boundedLimit - pending.length);
+      const remaining = boundedLimit - pending.length;
+      const candidates = isOnline() && remaining > 0
+        ? await getIcUpstreamRecoveryCandidates(isUsableIcResolutionGeo, remaining) : [];
+      // Reserve the existing one-shot upstream recovery. Local-only work uses
+      // the remaining batch slots, and rotates misses without writing markers.
+      const localLimit = remaining - (candidates.length ? 1 : 0);
+      if (allowOfflineCatalog && localLimit > 0) {
+        const exhausted = await getExhaustedExpresswayEventsForLocalRecovery();
+        const previous = exhausted.findIndex(event => event.id === lastLocalRecoveryEventId);
+        const start = previous < 0 ? 0 : (previous + 1) % exhausted.length;
+        const local = [...exhausted.slice(start), ...exhausted.slice(0, start)].slice(0, localLimit);
+        for (const event of local) {
+          lastLocalRecoveryEventId = event.id;
+          try {
+            const outcome = await resolve({ eventId: event.id, source: 'local-recovery' });
+            if (outcome.status !== 'deferred') updatedAny = true;
+          } catch {
+            // A local miss/deletion leaves the exhausted failure unchanged.
+          }
+        }
+      }
+      if (candidates.length) {
         for (const event of candidates) {
           try {
             const outcome = await resolve({ eventId: event.id, source: 'upstream-recovery' });

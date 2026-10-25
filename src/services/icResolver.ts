@@ -11,7 +11,7 @@ export type IcResult = {
   distanceM: number;
   confidence?: 'estimated';
   candidates?: string[];
-  estimateSource?: 'overpass_nearby' | 'mlit_n06_2025';
+  estimateSource?: 'overpass_nearby' | 'mlit_n06_2025' | 'public_ic_catalog';
   sourceDatasetDate?: string;
   sourceUrls?: string[];
   note?: string;
@@ -139,7 +139,8 @@ export function parseIcResult(value: unknown): IcResult | null {
   const candidates = [...new Set([
     icName, ...(Array.isArray(row.candidates) ? row.candidates as string[] : []),
   ].map(name => name.replace(/[（(]推定(?:候補)?[）)]$/u, '').trim()).filter(Boolean))];
-  const estimateSource = row.estimateSource === 'mlit_n06_2025' ? 'mlit_n06_2025' : 'overpass_nearby';
+  const estimateSource = row.estimateSource === 'public_ic_catalog' ? 'public_ic_catalog'
+    : row.estimateSource === 'mlit_n06_2025' ? 'mlit_n06_2025' : 'overpass_nearby';
   const sourceDatasetDate = typeof row.sourceDatasetDate === 'string'
     && /^\d{4}-\d{2}-\d{2}$/.test(row.sourceDatasetDate) ? row.sourceDatasetDate : undefined;
   return {
@@ -152,7 +153,7 @@ export function parseIcResult(value: unknown): IcResult | null {
     estimateSource,
     ...(sourceDatasetDate ? { sourceDatasetDate } : {}),
     sourceUrls: Array.isArray(row.sourceUrls)
-      ? row.sourceUrls.filter((url): url is string => typeof url === 'string' && /^https:\/\//.test(url)).slice(0, 4)
+      ? row.sourceUrls.filter((url): url is string => typeof url === 'string' && /^https:\/\//.test(url)).slice(0, 8)
       : [],
     note: typeof row.note === 'string' && row.note.trim()
       ? row.note.trim().slice(0, 300)

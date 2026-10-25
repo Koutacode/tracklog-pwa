@@ -1,4 +1,5 @@
 import { IC_CATALOG_ENTRIES, IC_CATALOG_METADATA } from './catalog-data.ts';
+import { IC_SUPPLEMENTAL_ENTRIES, IC_SUPPLEMENTAL_METADATA } from './supplemental-data.ts';
 
 export { IC_CATALOG_METADATA } from './catalog-data.ts';
 
@@ -16,9 +17,9 @@ export type IcCatalogResult = {
   distanceM: number;
   confidence: 'estimated';
   candidates: string[];
-  estimateSource: 'mlit_n06_2025';
+  estimateSource: 'mlit_n06_2025' | 'public_ic_catalog';
   sourceUrls: string[];
-  sourceDatasetDate: '2025-12-31';
+  sourceDatasetDate?: string;
   note: string;
 };
 
@@ -91,7 +92,38 @@ export function resolveIcCatalogCandidates(matches: IcCatalogMatches): IcCatalog
   };
 }
 
+/** Combine all point evidence before overflow checks or display-name deduplication. */
+export function lookupIcCatalogWithSupplement(
+  primaryEntries: readonly IcCatalogEntry[],
+  lat: number,
+  lon: number,
+  context: IcCatalogContext = {},
+): IcCatalogResult | null {
+  const matches = findNearbyIcCatalogCandidates([...primaryEntries, ...IC_SUPPLEMENTAL_ENTRIES], lat, lon, context);
+  const result = resolveIcCatalogCandidates(matches);
+  if (!result) return null;
+  const supplementalIds = new Set<string>(IC_SUPPLEMENTAL_ENTRIES.map(entry => entry[0]));
+  const usedSupplement = IC_SUPPLEMENTAL_METADATA.features.filter(feature =>
+    matches.candidates.some(candidate => candidate.id === feature.id));
+  if (!usedSupplement.length) return result;
+  const hasPrimary = matches.candidates.some(candidate => !supplementalIds.has(candidate.id));
+  // The supplement has a capture date, not the MLIT snapshot date. Do not apply
+  // the nationwide source/date to OSM points or present them as live Overpass data.
+  const { sourceDatasetDate: _snapshotDate, ...base } = result;
+  return {
+    ...base,
+    estimateSource: 'public_ic_catalog',
+    sourceUrls: [...new Set([
+      ...(hasPrimary ? IC_CATALOG_METADATA.sourceUrls : []),
+      ...usedSupplement.map(feature => feature.sourceUrl),
+      IC_SUPPLEMENTAL_METADATA.licenseUrl,
+      IC_SUPPLEMENTAL_METADATA.nameCorroborationUrl,
+    ])],
+    note: `${hasPrimary ? '国土数値情報（2025-12-31）の候補と、' : ''}OpenStreetMap公開ノード（${IC_SUPPLEMENTAL_METADATA.verifiedDate}確認）の近傍候補。${IC_SUPPLEMENTAL_METADATA.attribution} / ODbL。NEXCO資料は施設名・道路の照合のみ。利用した入口・出口・進行方向・現在の供用状況は未確認。`,
+  };
+}
+
 /** Synchronous and offline; uses the saved event fix and never obtains location. */
 export function lookupJapanIcCatalog(lat: number, lon: number, context: IcCatalogContext = {}): IcCatalogResult | null {
-  return resolveIcCatalogCandidates(findNearbyIcCatalogCandidates(IC_CATALOG_ENTRIES, lat, lon, context));
+  return lookupIcCatalogWithSupplement(IC_CATALOG_ENTRIES, lat, lon, context);
 }

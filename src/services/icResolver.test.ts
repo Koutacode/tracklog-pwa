@@ -45,6 +45,17 @@ async function main() {
   assert.equal(catalogCandidate.icName, '合成公的IC（推定）', 'catalog candidates remain visibly estimated for older clients');
   assert.equal(catalogCandidate.estimateSource, 'mlit_n06_2025');
   assert.equal(catalogCandidate.sourceDatasetDate, '2025-12-31');
+  const supplementalUrls = Array.from({ length: 6 }, (_, i) => `https://example.invalid/public-source-${i}`);
+  const supplementalCandidate = parseIcResult({ icName: '合成補完IC', distanceM: 40, confidence: 'estimated',
+    candidates: ['合成補完IC', '別の近傍IC'], estimateSource: 'public_ic_catalog',
+    sourceUrls: supplementalUrls, note: '公開補完候補。© OpenStreetMap contributors / ODbL。確認日と資料日を区別。' })!;
+  assert.equal(supplementalCandidate.estimateSource, 'public_ic_catalog');
+  assert.equal(supplementalCandidate.sourceDatasetDate, undefined);
+  assert.deepEqual(supplementalCandidate.sourceUrls, supplementalUrls, 'mixed-source attribution is not truncated');
+  assert.equal(supplementalCandidate.upstreamResponseObserved, undefined, 'public offline data is not a new upstream receipt');
+  assert.equal(getExpresswayIcDisplay({ icName: supplementalCandidate.icName,
+    icResolveStatus: 'resolved', icNameEstimate: { displayName: supplementalCandidate.icName,
+      candidateNames: supplementalCandidate.candidates, source: supplementalCandidate.estimateSource } }).state, 'estimated');
   const navigatorDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
   Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { onLine: true } });
   let upstreamCalls = 0;

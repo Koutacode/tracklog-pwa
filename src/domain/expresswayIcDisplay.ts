@@ -23,7 +23,7 @@ function estimateNames(value: unknown): string[] {
 function latestCatalogueSupplement(
   extras: Record<string, unknown>,
   estimate: Record<string, unknown>,
-): { names: string[]; datasetDate?: string } | undefined {
+): { names: string[]; datasetDate?: string; label: string } | undefined {
   if (estimate.source !== 'saved_address_official_sources' || !Array.isArray(extras.icNameEstimateHistory)) return;
   let latest: Record<string, unknown> | undefined;
   let latestAt = -Infinity;
@@ -31,7 +31,8 @@ function latestCatalogueSupplement(
     if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
     const candidate = value as Record<string, unknown>;
     const at = Date.parse(text(candidate.estimatedAt) ?? '');
-    if (candidate.source !== 'mlit_n06_2025' || !Number.isFinite(at) || at < latestAt) continue;
+    if ((candidate.source !== 'mlit_n06_2025' && candidate.source !== 'public_ic_catalog')
+      || !Number.isFinite(at) || at < latestAt) continue;
     latest = candidate;
     latestAt = at;
   }
@@ -40,7 +41,8 @@ function latestCatalogueSupplement(
   const names = [...new Set(estimateNames(latest.candidateNames).filter(name => !primaryNames.includes(name)))];
   if (!names.length) return;
   const date = text(latest.sourceDatasetDate);
-  return { names, datasetDate: date && /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : undefined };
+  return { names, datasetDate: date && /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : undefined,
+    label: latest.source === 'mlit_n06_2025' ? '国土数値情報' : '公開地図資料' };
 }
 
 /** Presentation only: never promotes address estimates or alters event data. */
@@ -95,14 +97,14 @@ export function getExpresswayIcDisplay(extras: Record<string, unknown> = {}): Ex
       ? /[（(]推定(?:候補)?[）)]/.test(displayName) ? displayName : `${displayName}（推定候補）`
       : '推定候補あり';
     // The address evidence can identify a specific entrance/exit while the
-    // national catalogue supplies a generic nearby IC. Show both as estimates,
+    // public catalogue supplies a generic nearby IC. Show both as estimates,
     // keeping the latest catalogue candidates separate from the primary name.
     const supplement = activeEstimate && estimate && typeof estimate === 'object' && !Array.isArray(estimate)
       ? latestCatalogueSupplement(extras, estimate as Record<string, unknown>) : undefined;
     const supplementLabel = supplement
-      ? ` / 補助候補: ${supplement.names.join(' / ')}（国土数値情報・推定）` : '';
+      ? ` / 補助候補: ${supplement.names.join(' / ')}（${supplement.label}・推定）` : '';
     const supplementDetail = supplement
-      ? `国土数値情報${supplement.datasetDate ? `（${supplement.datasetDate}時点）` : ''}の補助候補を併記しています。入口・出口・進行方向は未確定です。` : '';
+      ? `${supplement.label}${supplement.datasetDate ? `（${supplement.datasetDate}時点）` : ''}の補助候補を併記しています。入口・出口・進行方向は未確定です。` : '';
     return {
       name: displayName,
       label: `${candidateLabel}${supplementLabel} / ${statusLabel}`,

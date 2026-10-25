@@ -139,3 +139,36 @@ python scripts/build-mlit-ic-catalog.test.py
 python -B scripts/build-derived-ic-catalog.test.py
 node --experimental-strip-types --test shared/ic-catalog/index.test.mjs
 ```
+
+## Reviewed public supplement (2026-10-25)
+
+The original MLIT 2025 Joint GeoJSON was inspected on 2026-10-25 and contains no
+`木更津金田`/`金田` feature in any point type, including the excluded types. The
+observed official ZIP is 8,289,668 bytes, SHA-256
+`742c8785dfb2f900f167972abe00d5c36103365c0f9fb11dc8a883aa358ac23e`.
+This is a source coverage gap, not a reason to silently alter generated MLIT data.
+The generated derivative and its existing hash/count remain unchanged.
+
+`supplemental-data.ts` is a separate, small **ODbL-1.0** public point extract:
+© OpenStreetMap contributors, <https://www.openstreetmap.org/copyright>.
+Redistribution of this supplemental data follows that licence; it is not labelled
+as MLIT data, an official NEXCO coordinate, or a live Overpass response.
+
+The exact public OSM nodes were read on 2026-10-25: node 304034547 version 5 and
+node 447803283 version 7, both updated 2025-12-30T08:05:26Z. Their versioned API
+URLs are retained with the two entries. Both are named 木更津金田IC and tagged
+`highway=motorway_junction`. Separate same-name points are preserved; neither
+claims a chosen gate, entrance/exit, carriageway, travel direction or present
+operation. NEXCO's 2025-08-18 ramp notice corroborates the facility name and road
+only: <https://www.e-nexco.co.jp/pressroom/cms_assets/pressroom/2025/08/18/pdf.pdf>.
+It is historical name evidence, not a current closure notice.
+
+Runtime matching combines nationwide and supplemental points **before** distance,
+identity deduplication and overflow handling. The unchanged 1,200 m boundary and
+12-feature limit apply to the combined set; distinct nearby names remain visible
+alternatives. Results involving the supplement use `public_ic_catalog`, carry
+all matching provider/licence URLs and © OpenStreetMap attribution, and omit a
+single `sourceDatasetDate` rather than applying the MLIT snapshot date to OSM.
+The note records the 2026-10-25 verification date separately.
+No Nominatim request is added to the app. No trip, account or driver data belongs
+in this supplement.

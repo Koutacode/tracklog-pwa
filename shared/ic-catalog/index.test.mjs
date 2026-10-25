@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { findNearbyIcCatalogCandidates, resolveIcCatalogCandidates, lookupJapanIcCatalog } from './index.ts';
+import { findNearbyIcCatalogCandidates, resolveIcCatalogCandidates, lookupJapanIcCatalog, lookupIcCatalogWithSupplement } from './index.ts';
+import { IC_CATALOG_ENTRIES } from './catalog-data.ts';
+import { IC_SUPPLEMENTAL_ENTRIES, IC_SUPPLEMENTAL_METADATA } from './supplemental-data.ts';
 
 // Synthetic positions/names, unrelated to real trips or public catalogue data.
 const point = (id, name, distance, kind = 1) => [id, name, 35 + distance / 6371000 * 180 / Math.PI, 139, kind];
@@ -58,4 +60,59 @@ test('same-name separate public features remain distinct and ordering is determi
   assert.deepEqual(matches.candidates.map(c => c.id), ['a', 'b']);
   assert.equal(matches.totalCandidates, 2);
   assert.deepEqual(resolveIcCatalogCandidates(matches).candidates, ['同名IC']);
+});
+
+// These are public OSM feature positions, not driver/event fixtures.
+test('reviewed supplemental public junctions recover missing Kaneda candidates offline', () => {
+  assert.equal(IC_CATALOG_ENTRIES.some(entry => /木更津金田|金田/.test(entry[1])), false,
+    'the generated MLIT derivative remains unchanged; the omission is explicit');
+  assert.equal(IC_SUPPLEMENTAL_ENTRIES.length, 2);
+  assert.equal(IC_SUPPLEMENTAL_METADATA.license, 'ODbL-1.0');
+  assert.match(IC_SUPPLEMENTAL_METADATA.attribution, /OpenStreetMap contributors/);
+  for (const [id, name, lat, lon] of IC_SUPPLEMENTAL_ENTRIES) {
+    const feature = IC_SUPPLEMENTAL_METADATA.features.find(feature => feature.id === id);
+    const result = lookupJapanIcCatalog(lat, lon, { eventType: 'expressway_start' });
+    assert.deepEqual(result.candidates, [name]);
+    assert.equal(result.confidence, 'estimated');
+    assert.equal(result.estimateSource, 'public_ic_catalog');
+    assert.equal(result.sourceDatasetDate, undefined, 'verification date is not a dataset snapshot');
+    assert.ok(result.sourceUrls.includes(feature.sourceUrl));
+    assert.ok(result.sourceUrls.includes(IC_SUPPLEMENTAL_METADATA.licenseUrl));
+    assert.ok(result.sourceUrls.includes(IC_SUPPLEMENTAL_METADATA.nameCorroborationUrl));
+    assert.match(result.note, /2026-10-25確認/);
+    assert.match(result.note, /ODbL/);
+    assert.match(result.note, /入口・出口・進行方向.*未確認/);
+    assert.equal('upstreamResponseObserved' in result, false);
+    assert.equal('onExpresswayRoad' in result, false);
+  }
+});
+
+test('supplemental lookup uses the same strict distance boundary for each public point', () => {
+  const [id, , lat, lon] = IC_SUPPLEMENTAL_ENTRIES[0];
+  const latitude = lat + 1200.1 / 6371000 * 180 / Math.PI;
+  const matches = findNearbyIcCatalogCandidates(IC_SUPPLEMENTAL_ENTRIES, latitude, lon);
+  assert.equal(matches.candidates.some(candidate => candidate.id === id), false);
+});
+
+test('mixed catalogue evidence retains every nearby distinct name and provenance', () => {
+  const [, , lat, lon] = IC_SUPPLEMENTAL_ENTRIES[0];
+  const result = lookupIcCatalogWithSupplement([['synthetic-mixed', '合成近傍IC', lat, lon, 1]], lat, lon);
+  assert.deepEqual(new Set(result.candidates), new Set(['木更津金田IC', '合成近傍IC']));
+  assert.equal(result.estimateSource, 'public_ic_catalog');
+  assert.equal(result.sourceDatasetDate, undefined);
+  assert.ok(result.sourceUrls.some(url => url.includes('nlftp.mlit.go.jp')));
+  assert.ok(result.sourceUrls.some(url => url.includes('api.openstreetmap.org')));
+  assert.match(result.note, /国土数値情報.*OpenStreetMap/);
+});
+
+test('supplements cannot bypass the combined candidate overflow guard', () => {
+  const [, , lat, lon] = IC_SUPPLEMENTAL_ENTRIES[0];
+  const primary = Array.from({ length: 12 }, (_, i) => [`synthetic-${i}`, `合成${i}IC`, lat, lon, 1]);
+  assert.equal(lookupIcCatalogWithSupplement(primary, lat, lon), null);
+});
+
+test('supplement data contains only public feature facts and licence provenance', () => {
+  const serialized = JSON.stringify(IC_SUPPLEMENTAL_METADATA);
+  assert.doesNotMatch(serialized, /"(?:user|uid|changeset|tripId|eventId|deviceId)"/);
+  assert.equal(new Set(IC_SUPPLEMENTAL_ENTRIES.map(entry => entry[0])).size, 2);
 });
