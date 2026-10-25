@@ -35,6 +35,8 @@ async function run() {
     await act(async () => target.props.onClick());
   };
   await act(async () => { renderer = create(<StoppedView {...base} />); });
+  assert.match(text(renderer.root), /休憩は運行途中の休み.*どちらも運行は終了しません/);
+  assert.equal(renderer.root.findAllByProps({ role: 'status' }).length, 0);
   assert.equal(renderer.root.findByType('details').props.open, false);
   for (const label of ['積込開始', '荷卸開始', '休憩開始', '休息開始', 'その他', 'フェリー乗船', '給油', '音声操作']) {
     await click(label);
@@ -68,10 +70,16 @@ async function run() {
   await update({ workActive: true, ferryActive: true });
   assert.equal(renderer.root.findByType('details').props.open, true, 'a newly started secondary operation reveals its end action');
   await update({ disabled: true, workActive: true, ferryActive: true });
+  assert.match(text(renderer.root.findByProps({ role: 'status' })), /処理・確認が終わるまで/);
   assert.ok(renderer.root.findAllByType('button').every(node => node.props.disabled), 'global operation lock disables every action');
   await update({ canStartLoad: false, canStartUnload: false, canStartBreak: false, canStartRest: false, canStartWork: false, canStartFerry: false });
   for (const label of ['積込開始', '荷卸開始', '休憩開始', '休息開始', 'その他', 'フェリー乗船']) assert.equal(button(label).props.disabled, true);
   assert.doesNotMatch(text(renderer.root.findByType('summary')), /作業中|乗船中/);
+  await update({ restActive: true, ferryActive: true, canStartLoad: false, canStartRest: false });
+  assert.match(text(renderer.root.findByProps({ role: 'status' })), /休息・フェリー乗船中.*終了してから/);
+  assert.equal(button('休息終了').props.disabled, false);
+  assert.equal(button('フェリー下船').props.disabled, false);
+  assert.equal(button('積込開始').props.disabled, true);
   await update({ voiceAvailable: false });
   assert.equal(button('音声利用不可').props.disabled, true);
   await update({ voiceListening: true });

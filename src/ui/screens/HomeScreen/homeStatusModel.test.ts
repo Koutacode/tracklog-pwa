@@ -1,4 +1,8 @@
 import assert from 'node:assert/strict';
+import React from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
+import { MemoryRouter } from 'react-router-dom';
+import RunStatusCard from './RunStatusCard';
 import type { AppEvent } from '../../../domain/types';
 import type { NativeResidentLocationStatus } from '../../../services/nativeResidentLocation';
 import {
@@ -6,6 +10,7 @@ import {
   buildPendingExpresswayKeepDecision,
   selectPendingExpresswayEndPrompt,
   summarizeDiagnostics,
+  summarizeRecordingHealth,
   summarizeExpressway,
   summarizeLocation,
   summarizeRouteTracking,
@@ -356,3 +361,35 @@ assert.deepEqual(keepDecision, {
 });
 
 console.log('homeStatusModel tests passed');
+
+// The summary must never promote an unknown recording state to a healthy one.
+const unknownRecording = summarizeRouteTracking({ tripActive: true, isAndroidNative: true, nativeStatus: null, routeTrackingError: null });
+const pwaRecording = summarizeRouteTracking({ tripActive: true, isAndroidNative: false, nativeStatus: null, routeTrackingError: null });
+const beforeTrip = summarizeRouteTracking({ tripActive: false, isAndroidNative: true, nativeStatus: null, routeTrackingError: null });
+assert.deepEqual(summarizeRecordingHealth(unknownRecording, null), { value: '記録を確認中', tone: 'neutral' });
+assert.deepEqual(summarizeRecordingHealth(pwaRecording, null), { value: '運行中（PWA）', tone: 'neutral' });
+assert.deepEqual(summarizeRecordingHealth(route, null), { value: '記録中', tone: 'success' });
+assert.deepEqual(summarizeRecordingHealth(ongoingQueueFailure, null), { value: '記録を確認', tone: 'error' });
+assert.deepEqual(summarizeRecordingHealth(route, { id: 'geo', label: '位置情報', level: 'error', detail: '許可なし' }), { value: '記録を確認', tone: 'error' });
+const readyDiagnostics = summarizeDiagnostics([{ id: 'geo', label: '位置情報', level: 'ok', detail: '確認済み' }], false);
+function renderRecordingBadge(recording: typeof route, diagnostics = readyDiagnostics) {
+  return renderToStaticMarkup(React.createElement(MemoryRouter, null,
+    React.createElement(RunStatusCard, {
+      route: recording, diagnostics, expressway: summarizeExpressway([], null),
+      location: summarizeLocation(null, null), diagnosticItems: [], isAndroidNative: true,
+      diagnosticsLoading: false, quickSetupRunning: false, quickSetupMessage: null,
+      onRefreshDiagnostics() {}, onQuickSetup() {},
+    })));
+}
+assert.match(renderRecordingBadge(unknownRecording), /… 確認中/);
+assert.match(renderRecordingBadge(route, summarizeDiagnostics([], false)), /… 確認中/);
+assert.match(renderRecordingBadge(route, summarizeDiagnostics([], true)), /… 確認中/);
+assert.match(renderRecordingBadge(beforeTrip), /○ 開始前/);
+assert.match(renderRecordingBadge(pwaRecording), /○ PWA/);
+assert.match(renderRecordingBadge(route), /✓ 記録中/);
+assert.match(renderRecordingBadge(route), /未送信: 3件/);
+assert.match(renderRecordingBadge(ongoingQueueFailure), /! 要確認/);
+for (const recording of [unknownRecording, pwaRecording, beforeTrip, route, ongoingQueueFailure]) {
+  assert.doesNotMatch(renderRecordingBadge(recording), /✓ 正常|記録正常/);
+}
+console.log('recording clarity: unknown, pre-trip, PWA, verified recording, queued points and blockers passed');

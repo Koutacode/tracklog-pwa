@@ -382,6 +382,17 @@ export function summarizeRouteTracking(params: {
   };
 }
 
+/** Report only the recording state that has actually been observed. */
+export function summarizeRecordingHealth(
+  route: RouteTrackingSummary,
+  blockingDiagnostic: StartupDiagnosticItem | null,
+): Pick<HomeStatusSummary, 'value' | 'tone'> {
+  if (route.recordingBlocked || blockingDiagnostic) return { value: '記録を確認', tone: 'error' };
+  if (route.degraded) return { value: '記録に注意', tone: 'warning' };
+  if (route.tone === 'success') return { value: '記録中', tone: 'success' };
+  return { value: route.value === '確認中' ? '記録を確認中' : route.value, tone: route.tone };
+}
+
 function summarizeIcEvent(event: AppEvent, phase: '開始' | '終了'): HomeStatusSummary {
   const display = getExpresswayIcDisplay(event.extras);
   const resolved = display.state === 'resolved' || display.state === 'manual';

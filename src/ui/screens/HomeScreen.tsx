@@ -19,6 +19,7 @@ import {
   findRecordingBlockingDiagnostic,
   selectPendingExpresswayEndPrompt,
   summarizeDiagnostics,
+  summarizeRecordingHealth,
   summarizeExpressway,
   summarizeLocation,
   summarizeRouteTracking,
@@ -825,7 +826,7 @@ export default function HomeScreen() {
   const recordingBlockingDiagnostic = findRecordingBlockingDiagnostic(startupDiagnostics);
   const routeRecordingUnhealthy = routeSummary.recordingBlocked
     || recordingBlockingDiagnostic != null;
-  const routeRecordingDegraded = !routeRecordingUnhealthy && routeSummary.degraded;
+  const recordingHealth = summarizeRecordingHealth(routeSummary, recordingBlockingDiagnostic);
   const routeRecordingCause = routeSummary.recordingBlocked
     ? routeSummary.detail
     : recordingBlockingDiagnostic?.detail ?? '位置記録の端末設定を確認してください。';
@@ -933,9 +934,9 @@ export default function HomeScreen() {
       >
         <header className="home-unified-header">
           <div className="home-unified-header__brand">TrackLog</div>
-          <div className={`home-recording-health home-recording-health--${routeRecordingUnhealthy ? 'error' : routeRecordingDegraded ? 'warning' : routeSummary.tone}`}>
+          <div className={`home-recording-health home-recording-health--${recordingHealth.tone}`}>
             <span aria-hidden="true" />
-            {routeRecordingUnhealthy ? '記録を確認' : routeRecordingDegraded ? '記録に注意' : '記録正常'}
+            {recordingHealth.value}
           </div>
         </header>
 
@@ -1065,6 +1066,10 @@ export default function HomeScreen() {
           voiceResult={voiceResult}
           voiceError={voiceError}
         />
+
+        <Link className="home-record-review" to={`/trip/${tripId}`}>
+          記録を確認・修正<span>IC名・時刻・日報</span>
+        </Link>
 
         <details id="home-more" className="home-detail-drawer">
           <summary>詳細・設定</summary>
