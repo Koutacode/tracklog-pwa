@@ -81,11 +81,11 @@ export function mergeIcMetadata(
   const incomingProvenNewer = options.incomingIsNewer === true || (oldVersion > 0 && nextVersion > oldVersion);
   const oldEstimate = existing.icNameEstimate as IcNameEstimate | undefined;
   const nextEstimate = incoming?.icNameEstimate as IcNameEstimate | undefined;
-  // A national catalogue locates a generic IC, but does not identify the
+  // A public catalogue locates a generic IC, but does not identify the
   // specific entrance/exit or direction represented by address evidence.
   const preserveAddressCandidates = isEstimatedIcName(existing) && isEstimatedIcName(incoming)
     && oldEstimate?.source === 'saved_address_official_sources'
-    && nextEstimate?.source === 'mlit_n06_2025';
+    && (nextEstimate?.source === 'mlit_n06_2025' || nextEstimate?.source === 'public_ic_catalog');
   let keepOldResolution = false;
   if (oldManual) {
     keepOldResolution = nextManual
