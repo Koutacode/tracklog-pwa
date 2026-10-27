@@ -19,6 +19,10 @@
 .trip-history-report__ongoing { display: inline-block; margin-left: 8px; color: #0c7453; }
 .trip-report-chart { padding: 0 20px 18px; }
 .trip-report-chart__summary { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 13px; color: #536a76; font-size: 12px; font-variant-numeric: tabular-nums; }
+.trip-report-chart__views { display: flex; gap: 6px; margin: 0 0 12px; }
+.trip-report-chart__views button { flex: 1; min-height: 44px; padding: 8px 12px; border: 1px solid #aab9c2; border-radius: 8px; background: #fff; color: #334f5d; font: inherit; font-size: 13px; font-weight: 600; cursor: pointer; }
+.trip-report-chart__views button[aria-pressed="true"] { border-color: #0b61bd; background: #0b61bd; color: #fff; }
+.trip-report-chart__views button:focus-visible { outline: 2px solid #142e3b; outline-offset: 2px; }
 /* Keep labels and totals fixed; axis and plot share one horizontal viewport. */
 .trip-report-grid { display: grid; grid-template-columns: 64px minmax(0, 1fr) 52px; align-items: start; }
 .trip-report-grid__fixed { min-width: 0; }
@@ -27,6 +31,10 @@
 .trip-report-grid__scroll { min-width: 0; overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: thin; scrollbar-color: #94a3b8 #f1f5f9; }
 .trip-report-grid__scroll:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; }
 .trip-report-grid__timeline { width: 2304px; min-width: 100%; }
+.trip-report-grid--overview .trip-report-grid__timeline { width: 100%; }
+.trip-report-grid--overview .trip-report-grid__scroll { overflow-x: hidden; }
+.trip-report-grid--overview .trip-report-grid__line:not(.trip-report-grid__line--hour):not(.trip-report-grid__line--row) { stroke-opacity: .2; }
+.trip-report-grid--overview .trip-report-grid__line--hour { stroke-opacity: .6; }
 .trip-report-axis { position: relative; height: 28px; color: #536a76; font-size: 11px; line-height: 18px; }
 .trip-report-axis__hour { position: absolute; top: 0; transform: translateX(-50%); white-space: nowrap; font-variant-numeric: tabular-nums; }
 .trip-report-axis__hour:first-child { transform: none; }
