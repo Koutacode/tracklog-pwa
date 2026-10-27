@@ -143,23 +143,28 @@ export function TripDayReport({ day, km }: { day: HistoryDay; km?: number }) {
 
       <div className="trip-report-chart" aria-label="15分単位の運行時間表">
         <div className="trip-report-chart__summary"><span>15分単位</span><span>合計 {durationLabel(displayTotal)}</span></div>
-        <div className="trip-report-axis" aria-hidden="true">
-          <span>区分</span>
-          <div>{Array.from({ length: 25 }, (_, hour) => (
-            <span key={hour} className={`trip-report-axis__hour${hour % 6 === 0 ? ' trip-report-axis__hour--major' : hour % 3 === 0 ? ' trip-report-axis__hour--middle' : ''}`}
-              style={{ left: `${hour / 24 * 100}%` }}>{String(hour).padStart(2, '0')}</span>
-          ))}</div>
-          <span>合計</span>
-        </div>
+        <p className="trip-report-chart__scroll-hint" id={`history-chart-scroll-${day.dayIndex}`}>左右にスワイプ · 1時間ごと／15分刻み</p>
         <div className="trip-report-grid">
-          <div className="trip-report-grid__labels">
-            {CATEGORIES.map(category => <div key={category.key}>{category.label}</div>)}
+          <div className="trip-report-grid__fixed">
+            <div className="trip-report-grid__heading" aria-hidden="true">区分</div>
+            <div className="trip-report-grid__labels">
+              {CATEGORIES.map(category => <div key={category.key}>{category.label}</div>)}
+            </div>
           </div>
+          <div className="trip-report-grid__scroll" role="region" tabIndex={0}
+            aria-label="時間帯を横スクロール" aria-describedby={`history-chart-scroll-${day.dayIndex}`}>
+            <div className="trip-report-grid__timeline">
+              <div className="trip-report-axis" aria-hidden="true">
+                {Array.from({ length: 25 }, (_, hour) => (
+                  <span key={hour} className="trip-report-axis__hour"
+                    style={{ left: `${hour / 24 * 100}%` }}>{String(hour).padStart(2, '0')}:00</span>
+                ))}
+              </div>
           <svg className="trip-report-grid__plot" viewBox="0 0 1440 210" preserveAspectRatio="none" role="group"
             aria-label={`${day.dateKey}、0時から24時までの走行・作業・休憩・フェリー・休息`}>
             <title>区分ごとの時間帯。区間を選ぶと時刻を表示します。</title>
             {Array.from({ length: 97 }, (_, quarter) => <line key={`v-${quarter}`} x1={quarter * 15} x2={quarter * 15} y1="0" y2="210"
-              className={quarter % 24 === 0 ? 'trip-report-grid__line trip-report-grid__line--major' : quarter % 4 === 0 ? 'trip-report-grid__line trip-report-grid__line--hour' : 'trip-report-grid__line'} />)}
+              className={quarter % 4 === 0 ? 'trip-report-grid__line trip-report-grid__line--hour' : 'trip-report-grid__line'} />)}
             {Array.from({ length: 6 }, (_, row) => <line key={`h-${row}`} x1="0" x2="1440" y1={row * 42} y2={row * 42} className="trip-report-grid__line trip-report-grid__line--row" />)}
             {day.segments.map((segment, index) => {
               if (segment.category == null || segment.endMinute <= segment.startMinute) return null;
@@ -183,9 +188,14 @@ export function TripDayReport({ day, km }: { day: HistoryDay; km?: number }) {
               );
             })}
           </svg>
-          <div className="trip-report-grid__totals">
-            {CATEGORIES.map(category => <div key={category.key} data-category-total={category.key}
-              aria-label={`${category.label}合計 ${durationLabel(day.totals[category.key])}`}>{durationLabel(day.totals[category.key])}</div>)}
+            </div>
+          </div>
+          <div className="trip-report-grid__fixed">
+            <div className="trip-report-grid__heading trip-report-grid__heading--total" aria-hidden="true">合計</div>
+            <div className="trip-report-grid__totals">
+              {CATEGORIES.map(category => <div key={category.key} data-category-total={category.key}
+                aria-label={`${category.label}合計 ${durationLabel(day.totals[category.key])}`}>{durationLabel(day.totals[category.key])}</div>)}
+            </div>
           </div>
         </div>
         <div className="trip-report-chart__selection" aria-live="polite">{activeSegment ? describeSegment(activeSegment) : '区間をタップすると時刻を表示'}</div>

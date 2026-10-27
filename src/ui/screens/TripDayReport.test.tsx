@@ -52,6 +52,13 @@ assert.ok(html.includes('1,234'), 'distance retains Japanese number formatting')
 assert.ok(html.includes('09:00</time>'), 'saved 09:03 displays the nearest quarter hour');
 assert.ok(html.includes('dateTime="2026-10-01T00:03:27.001Z"'), 'the exact saved timestamp is preserved');
 assert.deepEqual(source, before, 'rendering does not modify events, addresses, source extras or graph data');
+assert.equal((html.match(/class="trip-report-axis__hour"/g) ?? []).length, 25, 'every hour from 00:00 through 24:00 is labelled');
+for (let hour = 0; hour <= 24; hour++) assert.ok(html.includes(`>${String(hour).padStart(2, '0')}:00</span>`));
+assert.equal((html.match(/trip-report-grid__line--hour/g) ?? []).length, 25, 'each hour has a major line with three quarter-hour subdivisions');
+assert.ok(html.includes('role="region" tabindex="0" aria-label="時間帯を横スクロール"'), 'the scroll region is keyboard reachable and named');
+assert.ok(html.indexOf('class="trip-report-axis"') > html.indexOf('class="trip-report-grid__scroll"'), 'axis and plot belong to the same scroll viewport');
+assert.ok(html.includes('左右にスワイプ · 1時間ごと／15分刻み'));
+
 
 assert.equal(formatTripDayEventTime(1440), '24:00');
 assert.equal(formatTripDayEventTime(0), '00:00');
