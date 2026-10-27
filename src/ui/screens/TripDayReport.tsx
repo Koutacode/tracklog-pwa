@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { AppEvent } from '../../domain/types';
 import { getExpresswayIcDisplay } from '../../domain/expresswayIcDisplay';
 import type { HistoryDay } from './tripHistoryReport';
@@ -119,6 +119,17 @@ function EventRow({ event, effectiveMinute }: { event: AppEvent; effectiveMinute
 
 export function TripDayReport({ day, km }: { day: HistoryDay; km?: number }) {
   const [selectedSegment, setSelectedSegment] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState(false);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const focusMinute = useRef(day.startMinute);
+  useEffect(() => {
+    const viewport = scrollRef.current;
+    if (!viewport) return;
+    // Keep the selected interval in view after the timeline changes width.
+    viewport.scrollLeft = expanded
+      ? Math.max(0, focusMinute.current / 1440 * viewport.scrollWidth - viewport.clientWidth / 4)
+      : 0;
+  }, [expanded]);
   const displayTotal = CATEGORIES.reduce((sum, category) => sum + (day.totals[category.key] || 0), 0);
   const y = (category: Category) => CATEGORIES.findIndex(item => item.key === category) * 42 + 21;
   const segmentKey = (segment: HistoryDay['segments'][number]) => `${day.dateKey}-${segment.startMinute}-${segment.endMinute}-${segment.category}`;
@@ -127,6 +138,11 @@ export function TripDayReport({ day, km }: { day: HistoryDay; km?: number }) {
     return `${category?.label ?? '未確認'} ${minuteLabel(segment.startMinute)}–${minuteLabel(segment.endMinute)}（${durationLabel(segment.endMinute - segment.startMinute)}）`;
   };
   const activeSegment = day.segments.find(segment => segmentKey(segment) === selectedSegment);
+  const selectSegment = (segment: HistoryDay['segments'][number]) => {
+    setSelectedSegment(segmentKey(segment));
+    focusMinute.current = segment.startMinute;
+    setExpanded(true);
+  };
   const orderedEvents = day.events.map((event, index) => ({ event, index }))
     .sort((a, b) => ((day.effectiveMinutes[a.event.id] ?? Infinity) - (day.effectiveMinutes[b.event.id] ?? Infinity))
       || (Date.parse(a.event.ts) - Date.parse(b.event.ts)) || a.index - b.index);
@@ -143,21 +159,29 @@ export function TripDayReport({ day, km }: { day: HistoryDay; km?: number }) {
 
       <div className="trip-report-chart" aria-label="15分単位の運行時間表">
         <div className="trip-report-chart__summary"><span>15分単位</span><span>合計 {durationLabel(displayTotal)}</span></div>
-        <p className="trip-report-chart__scroll-hint" id={`history-chart-scroll-${day.dayIndex}`}>左右にスワイプ · 1時間ごと／15分刻み</p>
-        <div className="trip-report-grid">
+        <div className="trip-report-chart__views" role="group" aria-label="グラフの表示">
+          <button type="button" aria-pressed={!expanded} aria-controls={`history-chart-${day.dayIndex}`}
+            onClick={() => setExpanded(false)}>全体表示</button>
+          <button type="button" aria-pressed={expanded} aria-controls={`history-chart-${day.dayIndex}`}
+            onClick={() => { focusMinute.current = activeSegment?.startMinute ?? day.startMinute; setExpanded(true); }}>拡大表示</button>
+        </div>
+        <p className="trip-report-chart__scroll-hint" id={`history-chart-scroll-${day.dayIndex}`}>
+          {expanded ? '左右にスワイプ · 1時間ごと／15分刻み' : '24時間を表示 · 区間をタップして拡大'}
+        </p>
+        <div className={`trip-report-grid${expanded ? '' : ' trip-report-grid--overview'}`} id={`history-chart-${day.dayIndex}`}>
           <div className="trip-report-grid__fixed">
             <div className="trip-report-grid__heading" aria-hidden="true">区分</div>
             <div className="trip-report-grid__labels">
               {CATEGORIES.map(category => <div key={category.key}>{category.label}</div>)}
             </div>
           </div>
-          <div className="trip-report-grid__scroll" role="region" tabIndex={0}
-            aria-label="時間帯を横スクロール" aria-describedby={`history-chart-scroll-${day.dayIndex}`}>
+          <div className="trip-report-grid__scroll" ref={scrollRef} role="region" tabIndex={expanded ? 0 : undefined}
+            aria-label={expanded ? '時間帯を横スクロール' : '24時間の全体表示'} aria-describedby={`history-chart-scroll-${day.dayIndex}`}>
             <div className="trip-report-grid__timeline">
               <div className="trip-report-axis" aria-hidden="true">
-                {Array.from({ length: 25 }, (_, hour) => (
+                {Array.from({ length: 25 }, (_, hour) => hour).filter(hour => expanded || hour % 6 === 0).map(hour => (
                   <span key={hour} className="trip-report-axis__hour"
-                    style={{ left: `${hour / 24 * 100}%` }}>{String(hour).padStart(2, '0')}:00</span>
+                    style={{ left: `${hour / 24 * 100}%` }}>{String(hour).padStart(2, '0')}{expanded ? ':00' : ''}</span>
                 ))}
               </div>
           <svg className="trip-report-grid__plot" viewBox="0 0 1440 210" preserveAspectRatio="none" role="group"
@@ -175,8 +199,8 @@ export function TripDayReport({ day, km }: { day: HistoryDay; km?: number }) {
                 <g key={`${segment.startMinute}-${segment.endMinute}-${segment.category}`} className={`trip-report-grid__segment trip-report-color--${segment.category}`}
                   role="button" tabIndex={0} aria-label={description} data-category={segment.category}
                   data-start-minute={segment.startMinute} data-end-minute={segment.endMinute}
-                  onClick={() => setSelectedSegment(segmentKey(segment))} onFocus={() => setSelectedSegment(segmentKey(segment))}
-                  onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setSelectedSegment(segmentKey(segment)); } }}>
+                  onClick={() => selectSegment(segment)} onFocus={() => setSelectedSegment(segmentKey(segment))}
+                  onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); selectSegment(segment); } }}>
                   <title>{description}</title>
                   <rect x={segment.startMinute} y={center - 15} width={segment.endMinute - segment.startMinute} height="30" />
                   {segment.category === 'break' && <line x1={segment.startMinute} x2={segment.endMinute} y1={center} y2={center} className="trip-report-grid__activity-edge" />}
