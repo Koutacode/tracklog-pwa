@@ -19,25 +19,28 @@
 .trip-history-report__ongoing { display: inline-block; margin-left: 8px; color: #0c7453; }
 .trip-report-chart { padding: 0 20px 18px; }
 .trip-report-chart__summary { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 13px; color: #536a76; font-size: 12px; font-variant-numeric: tabular-nums; }
-.trip-report-axis, .trip-report-grid { display: grid; grid-template-columns: 64px minmax(0, 1fr) 52px; }
-.trip-report-axis { margin-bottom: 7px; color: #536a76; font-size: 11px; line-height: 18px; }
-.trip-report-axis > div { position: relative; height: 18px; }
-.trip-report-axis > span:last-child { text-align: right; padding-right: 4px; }
-.trip-report-axis__hour { position: absolute; top: 0; transform: translateX(-50%); display: none; }
-.trip-report-axis__hour--major { display: block; }
+/* Keep labels and totals fixed; axis and plot share one horizontal viewport. */
+.trip-report-grid { display: grid; grid-template-columns: 64px minmax(0, 1fr) 52px; align-items: start; }
+.trip-report-grid__fixed { min-width: 0; }
+.trip-report-grid__heading { height: 28px; color: #536a76; font-size: 11px; line-height: 18px; }
+.trip-report-grid__heading--total { text-align: right; padding-right: 4px; }
+.trip-report-grid__scroll { min-width: 0; overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: thin; scrollbar-color: #94a3b8 #f1f5f9; }
+.trip-report-grid__scroll:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; }
+.trip-report-grid__timeline { width: 2304px; min-width: 100%; }
+.trip-report-axis { position: relative; height: 28px; color: #536a76; font-size: 11px; line-height: 18px; }
+.trip-report-axis__hour { position: absolute; top: 0; transform: translateX(-50%); white-space: nowrap; font-variant-numeric: tabular-nums; }
 .trip-report-axis__hour:first-child { transform: none; }
 .trip-report-axis__hour:last-child { transform: translateX(-100%); }
-.trip-report-grid { border: 1px solid #dbe5e8; border-right: 0; }
-.trip-report-grid__labels, .trip-report-grid__totals { display: grid; grid-template-rows: repeat(5, 42px); font-size: 12px; }
+.trip-report-chart__scroll-hint { margin: -4px 0 10px; color: #536a76; font-size: 11px; line-height: 1.5; }
+.trip-report-grid__labels, .trip-report-grid__totals { display: grid; grid-template-rows: repeat(5, 42px); height: 210px; font-size: 12px; }
 .trip-report-grid__labels > div, .trip-report-grid__totals > div { display: flex; align-items: center; padding: 0 5px; border-bottom: 1px solid #dbe5e8; }
 .trip-report-grid__labels > div:last-child, .trip-report-grid__totals > div:last-child { border-bottom: 0; }
-.trip-report-grid__labels { border-right: 1px solid #dbe5e8; white-space: nowrap; }
-.trip-report-grid__totals { border-left: 1px solid #dbe5e8; border-right: 1px solid #dbe5e8; font-variant-numeric: tabular-nums; font-weight: 650; }
+.trip-report-grid__labels { border-left: 1px solid #dbe5e8; border-right: 1px solid #dbe5e8; box-shadow: inset 0 1px #dbe5e8, inset 0 -1px #dbe5e8; white-space: nowrap; }
+.trip-report-grid__totals { border-left: 1px solid #dbe5e8; border-right: 1px solid #dbe5e8; box-shadow: inset 0 1px #dbe5e8, inset 0 -1px #dbe5e8; font-variant-numeric: tabular-nums; font-weight: 650; }
 .trip-report-grid__totals > div { justify-content: flex-end; }
-.trip-report-grid__plot { width: 100%; height: 210px; overflow: visible; }
-.trip-report-grid__line { stroke: #dbe5e8; stroke-width: .45; stroke-opacity: .65; vector-effect: non-scaling-stroke; }
-.trip-report-grid__line--hour { stroke-width: .65; stroke-opacity: .9; }
-.trip-report-grid__line--major { stroke: #94a3b8; stroke-width: .9; stroke-opacity: .9; }
+.trip-report-grid__plot { display: block; width: 100%; height: 210px; overflow: hidden; }
+.trip-report-grid__line { stroke: #dbe5e8; stroke-width: 1; stroke-opacity: .8; vector-effect: non-scaling-stroke; }
+.trip-report-grid__line--hour { stroke: #94a3b8; stroke-width: 1.2; stroke-opacity: 1; }
 .trip-report-grid__line--row { stroke-width: 1; stroke-opacity: 1; }
 .trip-report-color--drive { color: var(--trip-report-drive); }
 .trip-report-color--work { color: var(--trip-report-work); }
@@ -75,13 +78,12 @@
 .trip-report-events__empty { color: #536a76; font-size: 13px; padding: 12px 0; }
 
 @keyframes trip-report-appear { from { opacity: .6; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
-@media (min-width: 540px) { .trip-report-axis__hour--middle { display: block; } }
-@media (min-width: 780px) { .trip-report-axis__hour { display: block; } .trip-report-events ol { grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 24px; } }
+@media (min-width: 780px) { .trip-report-events ol { grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 24px; } }
 @media (max-width: 380px) {
   .trip-history-report__head { padding: 18px 12px; }
   .trip-report-chart { padding: 0 12px 16px; }
   .trip-report-events { padding: 16px 12px; }
-  .trip-report-axis, .trip-report-grid { grid-template-columns: 52px minmax(0, 1fr) 45px; }
+  .trip-report-grid { grid-template-columns: 52px minmax(0, 1fr) 45px; }
   .trip-report-grid__labels, .trip-report-grid__totals { font-size: 11px; }
   .trip-report-grid__labels > div, .trip-report-grid__totals > div { padding-left: 3px; padding-right: 3px; }
 }
