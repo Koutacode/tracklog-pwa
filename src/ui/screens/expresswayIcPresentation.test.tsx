@@ -10,6 +10,8 @@ import { DailyView, getExpresswaySessions, TimelineView } from './ReportDashboar
 import { buildTripExpresswayHistorySummaries, formatTripExpresswayHistorySummary } from './historyExpresswaySummary';
 import { buildTripDetailLocationInfo } from './tripDetailLocationInfo';
 import { summarizeExpressway } from './HomeScreen/homeStatusModel';
+import { TripDayReport } from './TripDayReport';
+import { buildTripHistoryDays } from './tripHistoryReport';
 
 Object.assign(globalThis, { __APP_VERSION__: '0.0.0-test', __BUILD_DATE__: 'synthetic-test' });
 
@@ -100,7 +102,6 @@ const cases: { name: string; extras: Record<string, unknown>; label: string; sta
 ];
 
 async function main() {
-  const { DayReportSummary } = await import('./TripDetail');
   for (const fixture of cases) {
     const tripId = 'synthetic-presentation-trip';
     const highway: AppEvent = { id: 'synthetic-highway', tripId, type: 'expressway_start',
@@ -129,8 +130,11 @@ async function main() {
     const item = buildTripDetailLocationInfo(timeline).find(value => value.expressway)!;
     assert.equal(item.icDisplay?.label, fixture.label);
     assert.equal(item.address, highway.address, 'address remains alongside the IC state');
-    const standardHtml = renderToStaticMarkup(<DayReportSummary day={day} metrics={metrics}
-      timeline={timeline} dayTimelines={[{ dayIndex: day.dayIndex, timeline }]} />);
+    const historyDay = buildTripHistoryDays(events, '2026-09-01T01:00:00.000Z', tripId)[0]!;
+    const standardHtml = renderToStaticMarkup(<TripDayReport day={historyDay} />);
+    assert.ok(standardHtml.includes('高速入口'), 'app history identifies the IC as an entry');
+    assert.ok(standardHtml.includes(`dateTime="${highway.ts}">09:15</time>`),
+      'app history rounds the IC time without replacing its saved timestamp');
     const reportHtml = renderToStaticMarkup(<DailyView day={day} metrics={metrics}
       expresswaySessions={getExpresswaySessions(trip.days).get(day.dayIndex) ?? []} />);
     const timelineHtml = renderToStaticMarkup(<TimelineView day={day} days={trip.days} />);
@@ -155,6 +159,11 @@ async function main() {
     const paired = buildTripViewModel(tripId, [...events, end]).timeline.find(event => event.title === '高速道路');
     assert.ok(paired?.detail?.includes(`高速開始IC: ${fixture.label} / 高速終了IC: 合成出口IC`),
       'entry and exit are independently represented');
+    const pairedHistory = buildTripHistoryDays([...events, end], '2026-09-01T01:00:00.000Z', tripId)[0]!;
+    const pairedHtml = renderToStaticMarkup(<TripDayReport day={pairedHistory} />);
+    assert.ok(pairedHtml.includes(fixture.label) && pairedHtml.includes('合成出口IC'),
+      'the new app detail keeps independent entry and exit names and states');
+    assert.ok(pairedHtml.includes('高速出口'));
   }
   console.log(`expresswayIcPresentation: ${cases.length} state cases across daily/detail/timeline/history/home/output passed`);
 }

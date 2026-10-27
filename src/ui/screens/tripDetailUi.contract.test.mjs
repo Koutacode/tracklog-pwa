@@ -22,21 +22,12 @@ assert.match(
 assert.doesNotMatch(home, /<Link to="\/report">運行日報<\/Link>/, 'home must not show report navigation');
 assert.doesNotMatch(history, /<Link to="\/report"[^>]*>運行日報<\/Link>/, 'history must not show report navigation');
 assert.doesNotMatch(tripDetail, />\s*TL\s*</, 'trip detail must not show the redundant TL tab');
-assert.match(
-  tripDetail,
-  /項目別時間[\s\S]*?className="trip-day-timeline"[\s\S]*?>時間軸</,
-  'time allocation and timeline must be visible together',
-);
-assert.match(
-  tripDetail,
-  /row\.kind === 'interval' && <time>\{formatted\.endLabel\}<\/time>/,
-  'instant timeline events must not display an artificial end time',
-);
-assert.match(
-  tripDetail,
-  /row\.kind === 'interval' && \([\s\S]*?trip-day-timeline__duration/,
-  'instant timeline events must not display an artificial duration',
-);
+assert.match(tripDetail, /buildTripHistoryDays\(events, new Date\(reportNow\)\.toISOString\(\), tripId\)/,
+  'history uses saved events for its own display model without changing report snapshots');
+assert.match(tripDetail, /<TripDayReport[\s\S]*?day=\{day\}/,
+  'each selected day uses the quarter-hour report');
+assert.match(tripDetail, /詳細・修正を開く/,
+  'original timestamp and IC correction controls remain available');
 assert.match(styles, /\.trip-section\s*\{[^}]*color:\s*#f8fafc;/, 'dark correction cards must set a readable light text color');
 assert.match(styles, /\.trip-item\s*\{[^}]*color:\s*#f8fafc;/, 'dark correction rows must set a readable light text color');
 assert.match(styles, /\.trip-section__note\s*\{[^}]*color:\s*#cbd5e1;/, 'dark card notes must use high-contrast small text');

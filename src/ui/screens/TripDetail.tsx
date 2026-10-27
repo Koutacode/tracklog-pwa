@@ -17,14 +17,6 @@ import {
 import { getReportTrip, saveReportTripSnapshot } from '../../db/reportRepository';
 import type { AppEvent, EventType } from '../../domain/types';
 import {
-  buildReportTripFromAppEvents,
-  computeTripDayMetrics,
-  formatMinutes,
-  projectTripReportTimelines,
-  type ProjectedReportTimelineEvent,
-} from '../../domain/reportLogic';
-import type { DayMetrics, DayRecord } from '../../domain/reportTypes';
-import {
   PERSISTED_TOGGLE_DEFINITIONS,
   resolveTogglePairing,
   type TogglePairingResult,
@@ -44,13 +36,9 @@ import {
   type ExpresswayIcManualSelection,
   type ExpresswayIcNameCandidate,
 } from '../../services/expresswayIcManualEdit';
-import {
-  buildTripDetailWorkTimelineForDay,
-  formatTripDetailWorkTimelineRow,
-  type TripDetailDayTimeline,
-} from './tripDetailTimeline';
-import { buildTripDetailLocationInfo } from './tripDetailLocationInfo';
-import { TripRecordedTimes } from './TripRecordedTimes';
+import { buildTripHistoryDays } from './tripHistoryReport';
+import { TripDayReport } from './TripDayReport';
+import './tripDayReport.css';
 import { commitTripDetailOperationalMutation } from './tripDetailOperationalMutation';
 import { toJapanTimeInput, resolveTripDetailTimeEdit } from './tripDetailTimeInput';
 import { parseFuelInput } from '../components/fuelInput';
@@ -165,123 +153,6 @@ type IcEditState = {
   searching?: boolean;
   message?: string;
 };
-
-function getBusinessMinutes(metrics: DayMetrics) {
-  return metrics.workMinutes + metrics.loadMinutes + metrics.unloadMinutes + metrics.waitMinutes;
-}
-
-export function DayReportSummary({
-  day,
-  metrics,
-  timeline,
-  dayTimelines,
-}: {
-  day: DayRecord;
-  metrics: DayMetrics;
-  timeline: ProjectedReportTimelineEvent[];
-  dayTimelines: TripDetailDayTimeline[];
-}) {
-  const businessMinutes = getBusinessMinutes(metrics);
-  const totalMinutes = metrics.driveMinutes
-    + businessMinutes
-    + metrics.breakMinutes
-    + metrics.ferryMinutes
-    + metrics.restMinutes;
-  const categories = [
-    { label: '運転', minutes: metrics.driveMinutes, tone: 'drive' },
-    { label: '業務', minutes: businessMinutes, tone: 'work' },
-    { label: '休憩', minutes: metrics.breakMinutes, tone: 'break' },
-    { label: 'フェリー', minutes: metrics.ferryMinutes, tone: 'ferry' },
-    { label: '休息', minutes: metrics.restMinutes, tone: 'rest' },
-  ];
-  const workTimeline = buildTripDetailWorkTimelineForDay(dayTimelines, day.dayIndex);
-  const locationInfo = buildTripDetailLocationInfo(timeline);
-
-  return (
-    <section className="trip-day-summary" aria-labelledby={`trip-day-${day.dayIndex}`}>
-      <div className="trip-day-summary__head">
-        <div>
-          <h2 id={`trip-day-${day.dayIndex}`} className="trip-day-summary__title">{day.dayIndex}日目</h2>
-          <div className="trip-day-summary__date">{day.dateKey}</div>
-        </div>
-        <div className="trip-day-summary__distance">{day.km} km</div>
-      </div>
-
-      <TripRecordedTimes events={day.events} />
-
-      <div className="trip-day-report">
-        <h3 className="trip-day-summary__section-title">項目別時間</h3>
-        <div className="trip-day-report__note">15分単位で丸め・日本時間24時締め</div>
-        <div className="trip-day-report__categories">
-          {categories.map(category => (
-            <div key={category.label} className={`trip-day-report__row trip-day-report__row--${category.tone}`}>
-              <span>{category.label}</span>
-              <strong>{formatMinutes(category.minutes)}</strong>
-            </div>
-          ))}
-          <div className="trip-day-report__row trip-day-report__row--total">
-            <span>合計</span>
-            <strong>{formatMinutes(totalMinutes)}</strong>
-          </div>
-        </div>
-      </div>
-
-      <section className="trip-day-timeline" aria-labelledby={`trip-day-timeline-${day.dayIndex}`}>
-        <h3 id={`trip-day-timeline-${day.dayIndex}`} className="trip-day-summary__section-title">時間軸</h3>
-        {workTimeline.length > 0 ? workTimeline.map(row => {
-          const formatted = formatTripDetailWorkTimelineRow(row);
-          return (
-            <div key={row.key} className="trip-day-timeline__item">
-              <div className="trip-day-timeline__times">
-                <time>{formatted.startLabel}</time>
-                {row.kind === 'interval' && <time>{formatted.endLabel}</time>}
-              </div>
-              <div>
-                <div className="trip-day-timeline__label">{row.label}</div>
-                {row.kind === 'interval' && (
-                  <div className="trip-day-timeline__duration">{formatted.durationLabel}</div>
-                )}
-                {row.kind === 'interval' && row.continuesFromPreviousDay && (
-                  <div className="trip-day-timeline__detail">前日から継続（当日は00:00から集計）</div>
-                )}
-                {row.kind === 'interval' && row.continuesToNextDay && (
-                  <div className="trip-day-timeline__detail">翌日へ継続（当日は24:00まで集計）</div>
-                )}
-                {row.detail && <div className="trip-day-timeline__detail">{row.detail}</div>}
-              </div>
-            </div>
-          );
-        }) : (
-          <div className="trip-day-timeline__empty">この日の作業記録はありません</div>
-        )}
-      </section>
-
-      {locationInfo.length > 0 && (
-        <section className="trip-day-locations" aria-labelledby={`trip-day-locations-${day.dayIndex}`}>
-          <h3 id={`trip-day-locations-${day.dayIndex}`} className="trip-day-locations__title">
-            高速道路・地点情報
-          </h3>
-          <div className="trip-day-locations__list">
-            {locationInfo.map(item => (
-              <div key={item.key} className={`trip-day-location${item.expressway ? ' trip-day-location--expressway' : ''}`}>
-                <div className="trip-day-location__head">
-                  <strong>{item.label}</strong>
-                  <time dateTime={item.recordedTs}>{item.time}</time>
-                </div>
-                {item.icDisplay && <div className="trip-day-location__ic">IC: {item.icDisplay.label}</div>}
-                {item.address ? (
-                  <div className="trip-day-location__address">住所: {item.address}</div>
-                ) : item.addressUnavailable && (
-                  <div className="trip-day-location__address">住所未取得</div>
-                )}
-              </div>
-            ))}
-          </div>
-        </section>
-      )}
-    </section>
-  );
-}
 
 type DayGroup<T> = {
   dayIndex: number;
@@ -613,6 +484,7 @@ export default function TripDetail() {
       const model = buildTripViewModel(tripId, events);
       setVm(model);
       setEvents(events);
+      setReportNow(Date.now());
     } catch (e: any) {
       setErr(e?.message ?? '読み込みに失敗しました');
     }
@@ -626,6 +498,7 @@ export default function TripDetail() {
         setErr(null);
         setVm(buildTripViewModel(tripId, nextEvents));
         setEvents(nextEvents);
+        setReportNow(Date.now());
       },
       error: error => setErr(error instanceof Error ? error.message : '読み込みに失敗しました'),
     });
@@ -690,27 +563,10 @@ export default function TripDetail() {
     () => vm ? buildTripReviewChecks(vm, togglePairing) : [],
     [vm, togglePairing],
   );
-  const reportOverview = useMemo(() => {
-    if (!tripId || !vm) return null;
-    const currentTs = new Date(reportNow).toISOString();
-    const trip = buildReportTripFromAppEvents({
-      tripId,
-      events,
-      dayRuns: vm.dayRuns,
-      label: vm.dayRuns[0]?.dateKey ? `${vm.dayRuns[0].dateKey} の運行` : '',
-      currentTs,
-    });
-    const timelines = projectTripReportTimelines(trip.days);
-    return {
-      trip,
-      metrics: computeTripDayMetrics(trip, { currentTs }),
-      timelines,
-      dayTimelines: trip.days.map(day => ({
-        dayIndex: day.dayIndex,
-        timeline: timelines.get(day.dayIndex)?.events ?? [],
-      })),
-    };
-  }, [events, reportNow, tripId, vm]);
+  const historyDays = useMemo(
+    () => tripId ? buildTripHistoryDays(events, new Date(reportNow).toISOString(), tripId) : [],
+    [events, reportNow, tripId],
+  );
 
   useEffect(() => {
     const persistence = createTripDetailReportSnapshotPersistence({
@@ -994,11 +850,11 @@ export default function TripDetail() {
       {!vm && !err && <div>読み込み中…</div>}
       {vm && (
         <>
-          {reportOverview && (
+          {historyDays.length > 0 && (
             <div className="trip-day-summaries">
-              {reportOverview.trip.days.length > 1 && (
+              {historyDays.length > 1 && (
                 <div className="trip-day-selector" role="group" aria-label="表示する運行日">
-                  {reportOverview.trip.days.map((day, index) => (
+                  {historyDays.map((day, index) => (
                     <button
                       key={day.dayIndex}
                       type="button"
@@ -1012,17 +868,15 @@ export default function TripDetail() {
                 </div>
               )}
               {(() => {
-                const safeIndex = Math.min(selectedDayIndex, reportOverview.trip.days.length - 1);
-                const day = reportOverview.trip.days[safeIndex];
-                const metrics = reportOverview.metrics[safeIndex];
-                if (!day || !metrics) return null;
+                const safeIndex = Math.min(selectedDayIndex, historyDays.length - 1);
+                const day = historyDays[safeIndex];
+                if (!day) return null;
+                const distance = vm.dayRuns.find(run => run.dateKey === day.dateKey);
                 return (
-                  <DayReportSummary
-                    key={day.dayIndex}
+                  <TripDayReport
+                    key={day.dateKey}
                     day={day}
-                    metrics={metrics}
-                    timeline={reportOverview.timelines.get(day.dayIndex)?.events ?? []}
-                    dayTimelines={reportOverview.dayTimelines}
+                    km={distance?.km}
                   />
                 );
               })()}
