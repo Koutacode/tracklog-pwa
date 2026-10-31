@@ -287,7 +287,7 @@ public final class ResidentLocationService extends Service {
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
         );
         return new NotificationCompat.Builder(this, CHANNEL_ID)
-                .setSmallIcon(R.mipmap.ic_launcher)
+                .setSmallIcon(R.mipmap.ic_notification_legacy)
                 .setContentTitle(notificationText())
                 .setContentIntent(contentIntent)
                 .setOngoing(true)

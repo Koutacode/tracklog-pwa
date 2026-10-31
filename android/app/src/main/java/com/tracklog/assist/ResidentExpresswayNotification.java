@@ -44,7 +44,7 @@ final class ResidentExpresswayNotification {
         extras.putString(EXTRA_PROMPT_ID, normalizedPromptId);
 
         Notification notification = new NotificationCompat.Builder(appContext, CHANNEL_ID)
-                .setSmallIcon(R.mipmap.ic_launcher)
+                .setSmallIcon(R.mipmap.ic_notification_legacy)
                 .setContentTitle("高速道路を降りましたか？")
                 .setContentText("終了した場合は「終了」、走行中なら「継続」を選んでください。")
                 .setContentIntent(contentIntent)
