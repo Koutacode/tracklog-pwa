@@ -853,7 +853,7 @@ export default function HomeScreen() {
         <div className="start-hero__frame">
           <div className="start-hero__nav">
             <div className="start-hero__brand">
-              <div className="start-hero__brand-mark">TL</div>
+              <div className="start-hero__brand-mark" aria-hidden="true" />
               <div>
                 <div className="start-hero__brand-name">TrackLog</div>
                 <div className="start-hero__brand-sub">運行記録</div>
@@ -933,7 +933,7 @@ export default function HomeScreen() {
         style={homeModalOpen ? { pointerEvents: 'none', userSelect: 'none' } : undefined}
       >
         <header className="home-unified-header">
-          <div className="home-unified-header__brand">TrackLog</div>
+          <div className="home-unified-header__brand"><span className="home-unified-header__emblem" aria-hidden="true" />TrackLog</div>
           <div className={`home-recording-health home-recording-health--${recordingHealth.tone}`}>
             <span aria-hidden="true" />
             {recordingHealth.value}

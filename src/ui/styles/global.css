@@ -6431,3 +6431,34 @@ a:hover {
 .home-bottom-nav { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .home-bottom-nav a { min-width: 0; overflow-wrap: anywhere; }
 .home-runtime-status__header { flex-wrap: wrap; }
+
+/* TORA is decorative; keep operational content above the artwork. */
+.start-hero::before {
+  top: 360px;
+  left: 50%;
+  width: min(100%, 560px);
+  height: min(135vw, 720px);
+  transform: translateX(-50%);
+  background: url('../assets/tora-character.png') no-repeat center top / contain;
+  opacity: 0.3;
+  filter: none;
+}
+
+.start-hero__brand-mark,
+.home-unified-header__emblem {
+  flex: 0 0 auto;
+  background: url('../assets/tora-emblem.png') no-repeat center / contain;
+  box-shadow: none;
+}
+
+.home-unified-header__brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.home-unified-header__emblem {
+  width: 32px;
+  height: 32px;
+}
