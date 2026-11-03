@@ -77,6 +77,13 @@ import {
   findOpenToggleStart,
 } from '../../domain/togglePairing';
 
+function expresswayPromptKey(prompt: PendingExpresswayEndPrompt): string {
+  return JSON.stringify([
+    prompt.tripId, prompt.promptId, prompt.detectedAt,
+    prompt.reason?.nativeDetectionId, prompt.reason?.nativeGeneration,
+  ]);
+}
+
 function fmtDateTime(ts?: string) {
   if (!ts) return '-';
   return new Intl.DateTimeFormat('ja-JP', {
@@ -187,6 +194,10 @@ export default function HomeScreen() {
   const [expresswayEndBusy, setExpresswayEndBusy] = useState(false);
   const [expresswayEndError, setExpresswayEndError] = useState<string | null>(null);
   const [expresswayActionMessage, setExpresswayActionMessage] = useState<string | null>(null);
+  // Suppress only the failed prompt for this mounted screen; never persist a decision.
+  const dismissedExpresswayPrompt = useRef<string | null>(null);
+  const latestExpresswayPrompt = useRef<string | null>(null);
+  const failedExpresswayPrompt = useRef<string | null>(null);
   const canOpenAdmin = useAdminEntryAvailability();
 
   const apkUrlCopyTimer = useRef<number | null>(null);
@@ -299,9 +310,16 @@ export default function HomeScreen() {
           events,
         });
         setPendingExpresswayEndPromptState(currentPrompt);
-        if (currentPrompt && !breakToRestModalOpen) {
-          setExpresswayEndConfirmation(current => current ?? { source: 'automatic' });
-        } else if (!currentPrompt) {
+        const promptKey = currentPrompt ? expresswayPromptKey(currentPrompt) : null;
+        latestExpresswayPrompt.current = promptKey;
+        if (failedExpresswayPrompt.current && failedExpresswayPrompt.current !== promptKey) {
+          failedExpresswayPrompt.current = null;
+          setExpresswayEndError(null);
+        }
+        if (currentPrompt && !breakToRestModalOpen && promptKey !== dismissedExpresswayPrompt.current) {
+          setExpresswayEndConfirmation(current => promptKey === dismissedExpresswayPrompt.current
+            ? current : current ?? { source: 'automatic' });
+        } else if (!currentPrompt || promptKey === dismissedExpresswayPrompt.current) {
           setExpresswayEndConfirmation(current => current?.source === 'automatic' ? null : current);
         }
       } catch {
@@ -420,7 +438,11 @@ export default function HomeScreen() {
         requestRouteTrackingSync();
         setPendingExpresswayEndPromptState(null);
       } catch {
-        setExpresswayEndError('高速道路の継続状態を保存できませんでした。もう一度お試しください。');
+        const failedKey = expresswayPromptKey(pendingPrompt);
+        if (latestExpresswayPrompt.current === failedKey) {
+          failedExpresswayPrompt.current = failedKey;
+          setExpresswayEndError('高速道路の継続状態を保存できませんでした。もう一度お試しください。');
+        }
         setExpresswayEndBusy(false);
         return;
       }
@@ -430,9 +452,19 @@ export default function HomeScreen() {
     setExpresswayEndBusy(false);
   };
 
+  const dismissFailedExpresswayPrompt = () => {
+    if (expresswayEndBusy || operationInProgress || !expresswayEndError || !failedExpresswayPrompt.current) return;
+    dismissedExpresswayPrompt.current = failedExpresswayPrompt.current;
+    failedExpresswayPrompt.current = null;
+    setExpresswayEndConfirmation(null);
+    setExpresswayEndError(null);
+    setExpresswayActionMessage('自動確認を閉じました。状態を確認し、必要なら「高速道路終了」を押してください。');
+  };
+
   const confirmExpresswayEnd = async () => {
     if (!expresswayEndConfirmation || expresswayEndBusy || operationInProgress) return;
     const source = expresswayEndConfirmation.source;
+    const attemptPrompt = pendingExpresswayEndPrompt;
     setExpresswayEndBusy(true);
     setExpresswayEndError(null);
     let completed = false;
@@ -454,7 +486,10 @@ export default function HomeScreen() {
       setExpresswayEndConfirmation(null);
     } else {
       const message = '高速道路の終了を記録できませんでした。通信と位置情報を確認して、もう一度お試しください。';
-      setExpresswayEndError(message);
+      if (attemptPrompt && latestExpresswayPrompt.current === expresswayPromptKey(attemptPrompt)) {
+        failedExpresswayPrompt.current = expresswayPromptKey(attemptPrompt);
+        setExpresswayEndError(message);
+      }
     }
     setExpresswayEndBusy(false);
   };
@@ -1164,6 +1199,7 @@ export default function HomeScreen() {
         errorMessage={expresswayEndError}
         onContinue={() => void continueExpressway()}
         onEnd={() => void confirmExpresswayEnd()}
+        onDismiss={dismissFailedExpresswayPrompt}
       />
 
       <OdoDialog

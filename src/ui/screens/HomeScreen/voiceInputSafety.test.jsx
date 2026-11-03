@@ -31,7 +31,9 @@ Object.assign(globalThis, {
   document: { activeElement: null, visibilityState: 'visible', addEventListener() {}, removeEventListener() {} },
   HTMLElement: class {},
   window: {
-    setTimeout: () => 1, clearTimeout() {}, setInterval: () => 1, clearInterval() {},
+    setTimeout: () => 1, clearTimeout() {},
+    setInterval: (callback, ms) => { const id = ++fixture.intervalSequence; fixture.intervals.set(id, { callback, ms }); return id; },
+    clearInterval: id => fixture.intervals.delete(id),
     addEventListener() {}, removeEventListener() {},
     confirm: () => { throw new Error('Unexpected extra confirmation'); },
   },
@@ -71,8 +73,8 @@ const mocks = {
   'src/services/routeTracking.ts': `export const openNativeSettings=${forbidden};`,
   'src/services/nativeResidentLocation.ts': 'export const getNativeResidentLocationStatus=async()=>null;',
   'src/services/nativeExpresswayPromptDecision.ts': `${accessor}
-    export const commitAutomaticExpresswayEnd=async params=>fixture().automatic.push(['end',params.prompt.tripId]);
-    export const commitAutomaticExpresswayKeep=async params=>fixture().automatic.push(['keep',params.prompt.tripId]);`,
+    export const commitAutomaticExpresswayEnd=async params=>{fixture().automatic.push(['end',params.prompt.tripId]);if(fixture().automaticDeferred)await fixture().automaticDeferred.promise;if(fixture().automaticError)throw fixture().automaticError};
+    export const commitAutomaticExpresswayKeep=async params=>{fixture().automatic.push(['keep',params.prompt.tripId]);if(fixture().automaticDeferred)await fixture().automaticDeferred.promise;if(fixture().automaticError)throw fixture().automaticError;fixture().pendingPrompt=null};`,
   'src/services/nativeExpresswayPrompt.ts': `${accessor}export const cancelNativeExpresswayEndPrompt=async id=>fixture().auxiliary.push(['cancelNativePrompt',id]);`,
   'src/services/startupDiagnostics.ts': 'export const runStartupDiagnostics=async()=>[];',
   'src/services/nativeSetup.ts': `export const checkNativeSetupReadiness=${forbidden},openAppPermissionSettings=${forbidden},openSystemLocationSettings=${forbidden},runNativeSetupStep=${forbidden};`,
@@ -128,6 +130,7 @@ function noActions() {
 function newFixture() {
   const state = {
     calls: [], automatic: [], auxiliary: [], alerts: [], trackingSignals: 0,
+    intervals: new Map(), intervalSequence: 0, automaticError: null, automaticDeferred: null,
     permission: 'granted', requestedPermission: 'granted', permissionRequests: 0,
     providerStarts: 0, providerStops: 0, providerOptions: [], matches: [], startError: null,
     speechDeferred: null, operationDeferred: null, operationResult: true, pendingPrompt: null, breakModal: false,
@@ -382,6 +385,79 @@ async function main() {
     await click(button(renderer, '終了してICを確定'));
     assert.deepEqual(fixture.calls, []);
     assert.deepEqual(fixture.automatic, [['end', 'synthetic-voice-trip']]);
+  });
+  await check('continue_confirmation_then_manual_expressway_end', () => {
+    addExpressway(); fixture.pendingPrompt = { tripId: fixture.manager.tripId, promptId: 'first',
+      detectedAt: new Date().toISOString(), speedKmh: 0, geo: { lat: 10, lng: 20, accuracy: 10 } };
+  }, async ({ renderer }) => {
+    await click(button(renderer, 'まだ高速中'));
+    assert.equal(openDialogs(renderer).length, 0);
+    assert.deepEqual(fixture.automatic, [['keep', 'synthetic-voice-trip']]);
+    const end = renderer.root.findAllByType('button').find(node => text(node).startsWith('高速道路終了'));
+    assert.ok(end); assert.equal(end.props.disabled, false);
+    await click(end);
+    assert.deepEqual(fixture.calls, [['requestExpresswayEnd', 'manual_button']]);
+  });
+  for (const decision of ['まだ高速中', '終了してICを確定']) {
+    await check(`failed_automatic_${decision}_can_return_to_manual_operations`, () => {
+      addExpressway(); fixture.pendingPrompt = { tripId: fixture.manager.tripId, promptId: 'first',
+        detectedAt: new Date().toISOString(), speedKmh: 0, geo: { lat: 10, lng: 20, accuracy: 10 } };
+      fixture.automaticError = new Error('simulated decision failure');
+    }, async ({ renderer }) => {
+      await click(button(renderer, decision));
+      assert.ok(text(renderer.root).includes('保存できませんでした') || text(renderer.root).includes('記録できませんでした'));
+      await click(button(renderer, '確認を閉じて操作に戻る'));
+      assert.equal(openDialogs(renderer).length, 0);
+      assert.deepEqual(fixture.calls, []);
+      assert.deepEqual(fixture.auxiliary, []);
+      assert.equal(fixture.trackingSignals, 0);
+      const poll = [...fixture.intervals.values()].find(entry => entry.ms === 3000);
+      assert.ok(poll, 'prompt polling remains active');
+      await act(async () => { poll.callback(); await flush(); });
+      assert.equal(openDialogs(renderer).length, 0, 'the dismissed prompt does not reopen on polling');
+      const end = renderer.root.findAllByType('button').find(node => text(node).startsWith('高速道路終了'));
+      assert.ok(end); assert.equal(end.props.disabled, false);
+      await click(end);
+      assert.deepEqual(fixture.calls, [['requestExpresswayEnd', 'manual_button']]);
+    });
+  }
+  await check('new_automatic_prompt_is_not_suppressed', () => {
+    addExpressway(); fixture.pendingPrompt = { tripId: fixture.manager.tripId, promptId: 'first',
+      detectedAt: new Date().toISOString(), speedKmh: 0, geo: { lat: 10, lng: 20, accuracy: 10 } };
+    fixture.automaticError = new Error('simulated decision failure');
+  }, async ({ renderer }) => {
+    await click(button(renderer, 'まだ高速中'));
+    await click(button(renderer, '確認を閉じて操作に戻る'));
+    fixture.pendingPrompt = { ...fixture.pendingPrompt, promptId: 'second' };
+    const poll = [...fixture.intervals.values()].find(entry => entry.ms === 3000);
+    await act(async () => { poll.callback(); await flush(); });
+    assert.ok(text(renderer.root).includes('高速道路を降りましたか？'));
+  });
+  await check('new_prompt_clears_old_failure', () => {
+    addExpressway(); fixture.pendingPrompt = { tripId: fixture.manager.tripId, promptId: 'first',
+      detectedAt: new Date().toISOString(), speedKmh: 0, geo: { lat: 10, lng: 20, accuracy: 10 } };
+    fixture.automaticError = new Error('simulated failure');
+  }, async ({ renderer }) => {
+    await click(button(renderer, 'まだ高速中'));
+    fixture.pendingPrompt = { ...fixture.pendingPrompt, promptId: 'second' };
+    const poll = [...fixture.intervals.values()].find(entry => entry.ms === 3000);
+    await act(async () => { poll.callback(); await flush(); });
+    assert.ok(text(renderer.root).includes('高速道路を降りましたか？'));
+    assert.ok(!text(renderer.root).includes('確認を閉じて操作に戻る'));
+  });
+  await check('late_failure_cannot_attach_to_new_prompt', () => {
+    addExpressway(); fixture.pendingPrompt = { tripId: fixture.manager.tripId, promptId: 'first',
+      detectedAt: new Date().toISOString(), speedKmh: 0, geo: { lat: 10, lng: 20, accuracy: 10 } };
+    fixture.automaticDeferred = deferred(); fixture.automaticError = new Error('simulated failure');
+  }, async ({ renderer }) => {
+    let pending;
+    await act(async () => { pending = button(renderer, 'まだ高速中').props.onClick(); await flush(); });
+    fixture.pendingPrompt = { ...fixture.pendingPrompt, promptId: 'second' };
+    const poll = [...fixture.intervals.values()].find(entry => entry.ms === 3000);
+    await act(async () => { poll.callback(); await flush(); });
+    await act(async () => { fixture.automaticDeferred.resolve(); await pending; await flush(); });
+    assert.ok(text(renderer.root).includes('高速道路を降りましたか？'));
+    assert.ok(!text(renderer.root).includes('確認を閉じて操作に戻る'));
   });
 
   const unexpectedWarnings = warnings.filter(message => !message.includes('react-test-renderer is deprecated'));
