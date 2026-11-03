@@ -7,10 +7,11 @@ type ExpresswayEndConfirmDialogProps = {
   errorMessage: string | null;
   onContinue: () => void;
   onEnd: () => void;
+  onDismiss: () => void;
 };
 
 export default function ExpresswayEndConfirmDialog(props: ExpresswayEndConfirmDialogProps) {
-  const { open, busy, detectedAutomatically = false, errorMessage, onContinue, onEnd } = props;
+  const { open, busy, detectedAutomatically = false, errorMessage, onContinue, onEnd, onDismiss } = props;
   const titleId = useId();
   const descriptionId = useId();
   const continueRef = useRef<HTMLButtonElement>(null);
@@ -46,7 +47,7 @@ export default function ExpresswayEndConfirmDialog(props: ExpresswayEndConfirmDi
         onKeyDown={event => {
           if (event.key === 'Escape') {
             event.preventDefault();
-            if (!busy) onContinue();
+            if (!busy) (errorMessage ? onDismiss : onContinue)();
             return;
           }
           if (event.key !== 'Tab') return;
@@ -83,6 +84,7 @@ export default function ExpresswayEndConfirmDialog(props: ExpresswayEndConfirmDi
           <button type="button" className="home-confirm-dialog__end" disabled={busy} onClick={onEnd}>
             {busy ? '終了処理中…' : '終了してICを確定'}
           </button>
+          {errorMessage && <button type="button" disabled={busy} onClick={onDismiss}>確認を閉じて操作に戻る</button>}
         </div>
       </div>
     </div>
