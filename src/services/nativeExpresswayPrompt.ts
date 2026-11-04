@@ -24,9 +24,10 @@ import {
 const ACTION_TYPE_ID = 'tracklog_expressway_end_actions';
 const ACTION_END = 'end_expressway';
 const ACTION_KEEP = 'keep_expressway';
-const CHANNEL_ID = 'tracklog_expressway_alert';
 const EXTRA_KIND = 'expressway_end_prompt_v1';
 const RESIDENT_SERVICE_NOTIFICATION_OWNER = 'resident-service';
+const RESIDENT_CONFIRMATION_NOTIFICATION_ID = 41140;
+const LEGACY_CONFIRMATION_TITLE = 'TrackLog: 高速道路終了確認';
 
 export const NATIVE_EXPRESSWAY_NOTIFICATION_ACTION_TYPE: ActionType = {
   id: ACTION_TYPE_ID,
@@ -36,7 +37,6 @@ export const NATIVE_EXPRESSWAY_NOTIFICATION_ACTION_TYPE: ActionType = {
   ],
 };
 
-let initialized = false;
 let initPromise: Promise<void> | null = null;
 
 function isNative() {
@@ -112,29 +112,23 @@ async function canPersistFailedPromptAction(prompt: PendingExpresswayEndPrompt) 
     }, current);
 }
 
-async function ensureNativePermission(): Promise<boolean> {
-  const current = await LocalNotifications.checkPermissions();
-  if (current.display === 'granted') return true;
-  if (current.display === 'denied') return false;
-  const requested = await LocalNotifications.requestPermissions();
-  return requested.display === 'granted';
-}
+type LegacyCleanupPort = Pick<typeof LocalNotifications, 'getPending' | 'getDeliveredNotifications' | 'cancel'>;
 
-async function setupNativeActionBindings() {
-  try {
-    await LocalNotifications.createChannel({
-      id: CHANNEL_ID,
-      name: '高速道路確認',
-      description: '高速道路終了確認',
-      importance: 5,
-      visibility: 1,
-      vibration: true,
-      lights: true,
-      lightColor: '#f97316',
-    });
-  } catch {
-    // channel may already exist
+/** Retire only this feature's old notifications; never alter the persisted prompt. */
+export async function clearLegacyExpresswayNotifications(port: LegacyCleanupPort = LocalNotifications) {
+  // Retire the known native notification even if the plugin's lists are unavailable.
+  await port.cancel({ notifications: [{ id: RESIDENT_CONFIRMATION_NOTIFICATION_ID }] });
+  const [pending, delivered] = await Promise.all([port.getPending(), port.getDeliveredNotifications()]);
+  const ids = new Set<number>();
+  for (const notification of pending.notifications) {
+    if (notification.extra?.kind === EXTRA_KIND) ids.add(notification.id);
   }
+  for (const notification of delivered.notifications) {
+    // The Android plugin does not expose the custom extra on delivered notifications.
+    if (!notification.tag && notification.id >= 610000 && notification.id < 730000
+        && notification.title === LEGACY_CONFIRMATION_TITLE) ids.add(notification.id);
+  }
+  if (ids.size > 0) await port.cancel({ notifications: [...ids].map(id => ({ id })) });
 }
 
 export async function handleNativeExpresswayPromptNotificationAction(
@@ -236,14 +230,12 @@ export async function handleNativeExpresswayPromptNotificationAction(
 
 export async function initNativeExpresswayPrompt() {
   if (!isNative()) return;
-  if (initialized) return;
   if (initPromise) {
     await initPromise;
     return;
   }
   initPromise = (async () => {
-    await setupNativeActionBindings();
-    initialized = true;
+    await clearLegacyExpresswayNotifications();
   })();
   try {
     await initPromise;
@@ -252,37 +244,9 @@ export async function initNativeExpresswayPrompt() {
   }
 }
 
-export async function showNativeExpresswayEndPrompt(prompt: PendingExpresswayEndPrompt): Promise<boolean> {
-  if (!isNative()) return false;
-  await initNativeExpresswayPrompt();
-  const granted = await ensureNativePermission();
-  if (!granted) return false;
-  const id = toNotificationId(prompt.tripId);
-  await LocalNotifications.schedule({
-    notifications: [
-      {
-        id,
-        title: 'TrackLog: 高速道路終了確認',
-        body: `低速状態を検知しました（${prompt.speedKmh} km/h）。終了か継続かを選択してください。`,
-        actionTypeId: ACTION_TYPE_ID,
-        channelId: CHANNEL_ID,
-        ongoing: true,
-        autoCancel: false,
-        extra: {
-          kind: EXTRA_KIND,
-          tripId: prompt.tripId,
-          promptId: prompt.promptId ?? null,
-          speedKmh: prompt.speedKmh,
-          detectedAt: prompt.detectedAt,
-          lat: prompt.geo.lat,
-          lng: prompt.geo.lng,
-          accuracy: prompt.geo.accuracy ?? null,
-          reason: prompt.reason ?? null,
-        },
-      },
-    ],
-  });
-  return true;
+export async function showNativeExpresswayEndPrompt(_prompt: PendingExpresswayEndPrompt): Promise<boolean> {
+  // The detection processor has already persisted the prompt for the in-app dialog.
+  return false;
 }
 
 export async function cancelNativeExpresswayEndPrompt(tripId?: string) {
