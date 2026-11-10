@@ -321,7 +321,7 @@
 - SHA-256: `1D65B19D44337ACD19DDCBC6874545F8214D16FDE881816A58CB34FEFFEEDB09`
 - Size: `6,020,890 bytes`
 - Release: `https://github.com/Koutacode/tracklog-pwa/releases/tag/v0.1.8`
-- Device install: completed on `SCG34` (`RFCY70L6HTF`) with `adb install -r`
+- Device install: completed on `Android端末` with `adb install -r`
 
 ## 2026-05-16 v0.1.7
 
@@ -351,7 +351,7 @@
 - Version: `versionCode=5` / `versionName=0.1.7`
 - SHA-256: `BBBF4EAAC910E3254F2DD190A82FF255A2E999DAFDE79082A385CAEA060189F0`
 - Size: `6,023,554 bytes`
-- Device install: completed on `SCG34` (`RFCY70L6HTF`) with `adb install -r`
+- Device install: completed on `Android端末` with `adb install -r`
 
 ## 2026-05-16 v0.1.6
 
@@ -383,7 +383,7 @@
 - File: `output/tracklog-assist-debug.apk`
 - Version: `versionCode=4` / `versionName=0.1.6`
 - SHA-256: `5FCB014CE3A563C06928820B5470BC50A856CAA25DE09DB9A67EA01D514FD14A`
-- Device install: completed on `SCG34` (`RFCY70L6HTF`) with `adb install -r`
+- Device install: completed on `Android端末` with `adb install -r`
 
 ## 2026-05-16
 
@@ -414,7 +414,7 @@
 - File: `output/tracklog-assist-debug.apk`
 - Version: `versionCode=3` / `versionName=0.1.5`
 - SHA-256: `69AD1CE468EE1C491FDAE162E6FC0170C2A0D73622B1014AB02A1B75F56FC730`
-- Device install: completed on `SCG34` (`RFCY70L6HTF`) with `adb install -r`
+- Device install: completed on `Android端末` with `adb install -r`
 
 ## 2026-04-25
 
@@ -442,7 +442,7 @@
 - File: `output/tracklog-assist-debug.apk`
 - Version: `versionCode=2` / `versionName=0.1.3`
 - SHA-256: `B654BA7B0F4A76ACCFD67281B3B05F122359DB3DA7AC7122272A0D6EF2B22E97`
-- Device install: completed on `SCG34` (`RFCY70L6HTF`) with `adb install -r`
+- Device install: completed on `Android端末` with `adb install -r`
 
 ## 2026-03-30
 
@@ -455,8 +455,8 @@
 - `表示名` だけではなく `車番・識別名` も未設定なら通常画面へ入れないよう変更
 - `設定 > クラウド同期` の ON/OFF を廃止し、同期は常時有効に固定
 - Dexie hook で `events` / `routePoints` / `reportTrips` の変更を拾い、記録や更新のたびにデバウンス付きで即時同期するよう変更
-- Android 実機 `SCG34` (`RFCY70L6HTF`) で `アンインストール -> 再インストール` を2回実施し、2回目の再インストール後はプロフィール再入力なしでホームへ復帰することを確認
-- Supabase 上の端末一覧は最終的に `android:040861b7b0aaa9e0 / SCG34 メイン端末 / SCG34` の1件へ整理
+- Android実機 で `アンインストール -> 再インストール` を2回実施し、2回目の再インストール後はプロフィール再入力なしでホームへ復帰することを確認
+- Supabase 上の端末一覧を整理した。個別の端末ID・表示名は非公開記録で管理する。
 - Cloudflare Pages を再デプロイし、`https://tracklog-assist.pages.dev/` の本番バンドルを更新
 
 ### 検証
@@ -476,7 +476,7 @@
 
 - File: `output/tracklog-assist-debug-stable-device.apk`
 - SHA-256: `A6CC81E551CC129859A556A8B090999211C576A20B52DB62A802B3C943AA4C20`
-- Device install: completed on `SCG34` (`RFCY70L6HTF`)
+- Device install: completed on `Android端末`
 - Launch check: `am start -W -n com.tracklog.assist/.MainActivity` returned `Status: ok` (`TotalTime: 281ms`)
 
 ## 2026-03-29
@@ -510,7 +510,7 @@
 
 - File: `output/tracklog-assist-debug.apk`
 - SHA-256: `5A96F7E4E8A207AAFEF4E49CBF885EFF899902BB78CAF7259EDE67A2555610C6`
-- Device install: completed on `SCG34` (`RFCY70L6HTF`) with `adb install -r`
+- Device install: completed on `Android端末` with `adb install -r`
 - Launch check: `am start -W -n com.tracklog.assist/.MainActivity` returned `Status: ok` (`TotalTime: 326ms`)
 
 ## 2026-03-21
@@ -532,9 +532,9 @@
 - `npx cap sync android`
 - `gradlew -PtracklogAppBuildDir=build-alt assembleDebug --no-daemon`
 - `adb install -r`
-- 実機 `RFCY70L6HTF` で起動確認。`am start -W -n com.tracklog.assist/.MainActivity` は `Status: ok`。
+- 実機 （識別情報省略） で起動確認。`am start -W -n com.tracklog.assist/.MainActivity` は `Status: ok`。
 - 直後の `logcat` に `FATAL EXCEPTION` / `ANR` なし。
-- ルート画面で `補正完了`、`OSRM経路補完 7 区間 / 生データ 2854 区間` を確認。
+- ルート画面で `補正完了`、経路補完結果 を確認。
 
 ### APK
 
@@ -558,7 +558,7 @@
 - `npm run build`
 - `npx cap sync android`
 - `android\\gradlew.bat -PtracklogAppBuildDir=build-alt assembleDebug --no-daemon`
-- 実機 `SCG34`（`RFCY70L6HTF`）で `ルート表示` を確認し、`記録点: 2855 件 / 補助地点: 94 件 / 日数: 8 日` を表示できることを確認
+- Android実機で `ルート表示` を確認し、記録点・補助地点・日数の集計 を表示できることを確認
 - 実機で `Obsidian送信` を実行し、`AI/Inbox/TrackLog運行記録 2026-03-12 38e18a0d.md` が更新されることを確認
 - 端末保存ノートを pull して、`## 復元用JSON` と `"recordType": "operation_log"` が含まれることを確認
 - `adb install -r android\\app\\build-alt\\outputs\\apk\\debug\\app-debug.apk`
@@ -569,7 +569,7 @@
 
 - File: `output/tracklog-assist-debug.apk`
 - SHA-256: `485E0E10A63425C862EE16C76D6EE2B6B032B61934CBD2EB26747C8520146D49`
-- Device install: completed on `SCG34` (`RFCY70L6HTF`) with `adb install -r`
+- Device install: completed on `Android端末` with `adb install -r`
 - Launch check: `am start -W -n com.tracklog.assist/.MainActivity` returned `Status: ok` (`TotalTime: 342ms`)
 
 ## 2026-03-10
@@ -598,7 +598,7 @@
 
 - File: `output/tracklog-assist-debug.apk`
 - SHA-256: `C04DF56846B589554E158F373A7B3AE300A642B4AB5714504B08B87CCD2F06D3`
-- Device install: completed on `SCG34` (`RFCY70L6HTF`) with `adb install -r`
+- Device install: completed on `Android端末` with `adb install -r`
 - Launch check: `am start -W -n com.tracklog.assist/.MainActivity` returned `Status: ok` (`TotalTime: 284ms`)
 
 ### 日報項目別集計の業務統合
@@ -622,7 +622,7 @@
 
 - File: `output/tracklog-assist-debug.apk`
 - SHA-256: `869AC3DD3932CBCAEF9B76A389977DE532B1FEC35A5843F962B0B3737FDF1D09`
-- Device install: completed on `SCG34` (`RFCY70L6HTF`) with `adb install -r`
+- Device install: completed on `Android端末` with `adb install -r`
 - Launch check: `am start -W -n com.tracklog.assist/.MainActivity` returned `Status: ok` (`TotalTime: 450ms`)
 
 ## 2026-03-09
@@ -657,13 +657,13 @@
 - `npx cap sync android`
 - `android\\gradlew.bat -PtracklogAppBuildDir=build-alt assembleDebug --no-daemon`
 - ローカル検証で、日またぎ休息を含むサンプル日報の各日合計が `24:00` になることを確認
-- 実機 `SCG34` (`RFCY70L6HTF`) で `md.obsidian` パッケージ存在を確認し、`ACTION_SEND` の直接起動が `Status: ok` で解決されることを確認
+- Android実機 で `md.obsidian` パッケージ存在を確認し、`ACTION_SEND` の直接起動が `Status: ok` で解決されることを確認
 
 ### APK
 
 - File: `output/tracklog-assist-debug.apk`
 - SHA-256: `9767767CF5F2867FFD89042017DDDD3BCD1DBCA8415EAD980102B2FF2DB46337`
-- Device install: completed on `SCG34` (`RFCY70L6HTF`) with `adb install -r`
+- Device install: completed on `Android端末` with `adb install -r`
 - Launch check: `am start -W -n com.tracklog.assist/.MainActivity` returned `Status: ok` (`TotalTime: 367ms`)
 - Immediate log check: no `FATAL EXCEPTION` / `ANR in` detected after launch
 - Obsidian direct-share smoke test: `am start -W -a android.intent.action.SEND -t text/plain -p md.obsidian ...` returned `Status: ok`
