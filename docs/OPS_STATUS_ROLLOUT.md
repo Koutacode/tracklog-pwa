@@ -2,7 +2,7 @@
 
 チームリードが、停車中で同期が止まっているときに行う。このリポジトリの作業では適用・デプロイ・秘密の作成をしていない。マイグレーションは列を足さず、既存の行も更新・削除しない。増えるのは部分索引 `idx_trip_headers_active_device`、関数 `tracklog_ops_status(text)`、その関数の実行権限だけである。索引作成で `trip_headers` に短いロックがかかる。
 
-契約は [OPS_STATUS_API.md](OPS_STATUS_API.md)。戻す SQL は `supabase/rollback/20261111120000_tracklog_ops_status_down.sql`（`migrations` の外。自動適用されない）。
+契約は [OPS_STATUS_API.md](OPS_STATUS_API.md)。MCP の `apply_migration` と `deploy_edge_function` に渡す値は [OPS_STATUS_HANDOFF.md](OPS_STATUS_HANDOFF.md)。戻す SQL は `supabase/rollback/20261111120000_tracklog_ops_status_down.sql`（`migrations` の外。自動適用されない）。
 
 `<SUPABASE_PROJECT_REF>` は `supabase/config.toml` の `project_id`。URL は `https://<SUPABASE_PROJECT_REF>.supabase.co/functions/v1/tracklog-ops-status`。
 
