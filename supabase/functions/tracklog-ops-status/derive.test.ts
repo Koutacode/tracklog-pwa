@@ -9,6 +9,7 @@ import {
   buildOpsStatus,
   findSensitive,
   getOpsMunicipality,
+  guardPublic,
   isStale,
   STALE_AFTER_MS,
   toJstIso,
@@ -288,6 +289,73 @@ assert.deepEqual(selection.body.devices, [
 assert.equal(selection.geocode, null);
 assertClean(selection.body, 'selection');
 
+// Digit runs inside real ids match PHONE_RE, which used to fail the public guard.
+const DIGIT_DEVICE = 'a1b2c3d4-0123-4567-8901-23456789abcd';
+const DIGIT_DEVICE_2 = 'ab12c09876543210ef34cd56';
+const ANDROID_DEVICE = 'android:0123456789abcdef';
+const WEB_DEVICE = `web:${DIGIT_DEVICE}`;
+const DIGIT_TRIP = 'trip-0123-4567-8901';
+const PHONE_SHAPE = /(?:\+81|0\d{1,4})-?\d{1,4}-?\d{3,4}/;
+for (const id of [DIGIT_DEVICE, DIGIT_DEVICE_2, ANDROID_DEVICE, WEB_DEVICE, DIGIT_TRIP]) {
+  assert.match(id, PHONE_SHAPE);
+}
+assert.match(CANARY_PHONE, PHONE_SHAPE);
+
+const digitSelection = buildOpsStatus({
+  trip_active: false,
+  selection_required: true,
+  active_count: 5,
+  synced_at: SYNCED,
+  devices: [
+    { device_id: DIGIT_DEVICE, display_name: '運転者A', vehicle_label: '品川800' },
+    { device_id: DIGIT_DEVICE_2, display_name: '運転者B', vehicle_label: null },
+    { device_id: ANDROID_DEVICE, display_name: '運転者C', vehicle_label: null },
+    { device_id: WEB_DEVICE, display_name: null, vehicle_label: null },
+    { device_id: 'device-3', display_name: null, vehicle_label: null },
+  ],
+});
+assert.equal(digitSelection.status, 200);
+assert.deepEqual(digitSelection.body.devices, [
+  { device_id: DIGIT_DEVICE, display_name: '運転者A', vehicle_label: '品川800' },
+  { device_id: DIGIT_DEVICE_2, display_name: '運転者B', vehicle_label: null },
+  { device_id: ANDROID_DEVICE, display_name: '運転者C', vehicle_label: null },
+  { device_id: WEB_DEVICE, display_name: null, vehicle_label: null },
+  { device_id: 'device-3', display_name: null, vehicle_label: null },
+]);
+assert.doesNotThrow(() => guardPublic(digitSelection.body));
+assertClean(digitSelection.body, 'digit-heavy selection');
+
+const digitActive = buildOpsStatus(activePayload([
+  event('0123-4567-8901', 'trip_start', TRIP_START),
+  event('0987-6543-2101', 'expressway_start', '2026-11-11T06:00:00.000Z', {
+    session_key: 'expresswaySessionId',
+    session_id: 'exp-0123-4567-8901',
+    ic_name: '厚木IC',
+  }),
+], { device_id: ANDROID_DEVICE, trip_id: DIGIT_TRIP }));
+assert.equal(digitActive.status, 200);
+assert.equal(digitActive.body.trip_active, true);
+assert.equal(digitActive.body.device_id, ANDROID_DEVICE);
+assert.equal(digitActive.body.trip_id, DIGIT_TRIP);
+assert.doesNotThrow(() => guardPublic(digitActive.body));
+assertClean(digitActive.body, 'digit-heavy active trip');
+
+assert.equal(findSensitive({ note: CANARY_PHONE }), '$.note');
+assert.equal(findSensitive({ display_name: DIGIT_DEVICE }), '$.display_name');
+assert.equal(findSensitive({ device_id: CANARY_EMAIL }), '$.device_id');
+assert.equal(findSensitive({ device_id: CANARY_PHONE }), '$.device_id');
+assert.equal(findSensitive({ trip_id: `trip ${CANARY_LAT}` }), '$.trip_id');
+assert.equal(findSensitive({ trip_id: String(CANARY_LAT) }), '$.trip_id');
+assert.equal(findSensitive({ device_id: `id-${CANARY_LAT}` }), '$.device_id');
+assert.equal(findSensitive({ device_id: DIGIT_DEVICE, latest_lat: 1 }), '$.latest_lat');
+assert.equal(findSensitive({ devices: [{ device_id: DIGIT_DEVICE }] }), null);
+assert.equal(findSensitive({ id: DIGIT_DEVICE }), null);
+assert.equal(findSensitive({ session_id: 'exp-0123-4567-8901' }), null);
+assert.equal(findSensitive({ device_id: ANDROID_DEVICE }), null);
+assert.equal(findSensitive({ device_id: WEB_DEVICE }), null);
+assert.throws(() => guardPublic({ device_id: CANARY_PHONE }), /sensitive_output_blocked/);
+assert.throws(() => guardPublic({ trip_id: String(CANARY_LAT) }), /sensitive_output_blocked/);
+
 const geocodeFallback = buildOpsStatus(activePayload([
   event('start', 'trip_start', TRIP_START, { address: `${CANARY_LAT},${CANARY_LNG}` }),
 ]));
@@ -430,6 +498,44 @@ assert.deepEqual(activeHttp.body.place, { kind: 'ic', name: '厚木IC' });
 assert.equal(activeHttp.response.headers.get('cache-control'), 'no-store');
 assert.equal(activeHttp.response.headers.get('access-control-allow-origin'), null);
 assertClean(activeHttp.body, 'http expressway');
+
+const digitSelectionHttp = await respond(`Bearer ${TOKEN}`, 'https://example.test/tracklog-ops-status', {
+  callStatus: async () => ({
+    trip_active: false,
+    selection_required: true,
+    active_count: 2,
+    synced_at: SYNCED,
+    stale: false,
+    devices: [
+      { device_id: DIGIT_DEVICE, display_name: '運転者A', vehicle_label: null },
+      { device_id: ANDROID_DEVICE, display_name: null, vehicle_label: null },
+    ],
+  }),
+});
+assert.equal(digitSelectionHttp.response.status, 200);
+assert.equal(digitSelectionHttp.body.selection_required, true);
+assert.equal(digitSelectionHttp.body.devices.length, 2);
+assertClean(digitSelectionHttp.body, 'http digit-heavy selection');
+
+const digitActiveHttp = await respond(`Bearer ${TOKEN}`, `https://example.test/tracklog-ops-status?device_id=${encodeURIComponent(ANDROID_DEVICE)}`, {
+  callStatus: async () => activePayload([
+    event('0123-4567-8901', 'trip_start', TRIP_START),
+  ], { device_id: ANDROID_DEVICE, trip_id: DIGIT_TRIP }),
+});
+assert.equal(digitActiveHttp.response.status, 200);
+assert.equal(digitActiveHttp.calls[0], ANDROID_DEVICE);
+assert.equal(digitActiveHttp.body.trip_active, true);
+assert.equal(digitActiveHttp.body.device_id, ANDROID_DEVICE);
+assertClean(digitActiveHttp.body, 'http digit-heavy active trip');
+
+const phoneIdHttp = await respond(`Bearer ${TOKEN}`, 'https://example.test/tracklog-ops-status', {
+  callStatus: async () => activePayload([
+    event('start', 'trip_start', TRIP_START),
+  ], { device_id: CANARY_PHONE }),
+});
+assert.equal(phoneIdHttp.response.status, 500);
+assert.deepEqual(phoneIdHttp.body, { ok: false, error: 'status_unavailable' });
+assertClean(phoneIdHttp.body, 'http phone-shaped device id');
 
 const fallbackHttp = await respond(`Bearer ${TOKEN}`, 'https://example.test/tracklog-ops-status', {
   callStatus: async () => activePayload([event('start', 'trip_start', TRIP_START)]),

@@ -55,9 +55,14 @@ export const STALE_AFTER_MS = 15 * 60 * 1000;
 
 const EMAIL_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
 const PHONE_RE = /(?:\+81|0\d{1,4})-?\d{1,4}-?\d{3,4}/;
+const PHONE_EXACT_RE = new RegExp(`^(?:${PHONE_RE.source})$`);
 const COORD_RE = /-?\d{1,3}\.\d{4,}/;
 const KEY_RE = /lat|lng|lon|geo|phone|mail|odo|coord|accuracy|heading|altitude|speed|postal|town|route|address|extras|token|secret|password|bearer/i;
 const DEVICE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$/;
+const GEO_WORD_RE = /\b(lat|lng|latitude|longitude|geo)\b/i;
+
+/** Identifier fields. A DEVICE_ID_RE value skips the unanchored phone scan only. */
+const ID_KEYS: ReadonlySet<string> = new Set(['device_id', 'trip_id', 'id', 'session_id']);
 
 export type OpsPlace = {
   kind: 'ic' | 'municipality';
@@ -125,6 +130,10 @@ export function getOpsMunicipality(address: string | undefined): string | undefi
   return district ? prefecture + district[1] : undefined;
 }
 
+function isDeviceShapedId(key: string, value: unknown): value is string {
+  return ID_KEYS.has(key) && typeof value === 'string' && DEVICE_ID_RE.test(value);
+}
+
 export function findSensitive(value: unknown, path = '$'): string | null {
   if (value == null) return null;
   if (typeof value === 'number') {
@@ -134,7 +143,7 @@ export function findSensitive(value: unknown, path = '$'): string | null {
   if (typeof value === 'boolean') return null;
   if (typeof value === 'string') {
     if (EMAIL_RE.test(value) || PHONE_RE.test(value) || COORD_RE.test(value)) return path;
-    if (/\b(lat|lng|latitude|longitude|geo)\b/i.test(value)) return path;
+    if (GEO_WORD_RE.test(value)) return path;
     return null;
   }
   if (Array.isArray(value)) {
@@ -147,6 +156,14 @@ export function findSensitive(value: unknown, path = '$'): string | null {
   if (typeof value === 'object') {
     for (const [key, child] of Object.entries(value)) {
       if (KEY_RE.test(key)) return `${path}.${key}`;
+      // UUIDs and android:/web: ids contain digit runs that match PHONE_RE.
+      // The id itself is still rejected when it is a phone, email, or coordinate.
+      if (isDeviceShapedId(key, child)) {
+        if (EMAIL_RE.test(child) || PHONE_EXACT_RE.test(child) || COORD_RE.test(child) || GEO_WORD_RE.test(child)) {
+          return `${path}.${key}`;
+        }
+        continue;
+      }
       const found = findSensitive(child, `${path}.${key}`);
       if (found) return found;
     }
