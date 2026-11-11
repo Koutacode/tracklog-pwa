@@ -541,3 +541,26 @@ export function applyCoarsePlace(
   if (!name) return body;
   return { ...body, place: { kind: 'municipality', name } };
 }
+
+/**
+ * Closed-trip report. Refuses anything that is not closed: true, so an active
+ * trip payload cannot be turned into segments. Device id and coordinates are
+ * never copied onto the result.
+ */
+export function buildClosedTripReport(raw: unknown): Record<string, unknown> {
+  const payload = record(raw);
+  if (!payload || payload.closed !== true) return { closed: false };
+  const tripId = textOrNull(payload.trip_id);
+  const started = textOrNull(payload.trip_started_at);
+  if (!tripId || !DEVICE_ID_RE.test(tripId) || !started || !Number.isFinite(Date.parse(started))) {
+    throw new Error('invalid_status_payload');
+  }
+  const ended = textOrNull(payload.trip_ended_at);
+  return {
+    closed: true,
+    trip_id: tripId,
+    trip_started_at: toJstIso(started),
+    trip_ended_at: ended && Number.isFinite(Date.parse(ended)) ? toJstIso(ended) : null,
+    segments: buildIntervals(readEvents(payload.events)).map(toPublicEvent),
+  };
+}

@@ -244,4 +244,4 @@ curl -sS \
   "https://<SUPABASE_PROJECT_REF>.supabase.co/functions/v1/tracklog-ops-status"
 ```
 
-運転者アプリと APK の挙動はこの API では変わらない。
+運転者アプリと APK の挙動はこの API では変わらない。終わった便の区間は別関数 `tracklog-ops-closed-trip` で、説明は [OPS_CLOSED_TRIP.md](OPS_CLOSED_TRIP.md)。
