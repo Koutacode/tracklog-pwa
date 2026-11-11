@@ -286,10 +286,10 @@ async function main() {
 
   const liveIndex = await readFile(new URL('../tracklog-ops-status/index.ts', import.meta.url), 'utf8');
   assert.doesNotMatch(liveIndex, /tracklog_ops_closed_trip/);
-  const migration = await readFile(new URL('../../migrations/20261111144500_tracklog_ops_closed_trip.sql', import.meta.url), 'utf8');
+  const migration = await readFile(new URL('../../migrations/20261111222034_tracklog_ops_closed_trip.sql', import.meta.url), 'utf8');
   assert.doesNotMatch(migration, /\b(?:alter table|add column|create table|insert|update|delete|truncate)\b/i);
   assert.doesNotMatch(migration, /device_id|driver_phone|driver_email|odo_start|trip_route_points|latest_lat/);
-  const rollback = await readFile(new URL('../../rollback/20261111144500_tracklog_ops_closed_trip_down.sql', import.meta.url), 'utf8');
+  const rollback = await readFile(new URL('../../rollback/20261111222034_tracklog_ops_closed_trip_down.sql', import.meta.url), 'utf8');
   assert.match(rollback, /drop function if exists public\.tracklog_ops_closed_trip\(text\)/);
   assert.match(rollback, /drop function if exists public\.tracklog_ops_closed_day\(text\)/);
   assert.doesNotMatch(rollback, /drop table|trip_headers|trip_events/i);

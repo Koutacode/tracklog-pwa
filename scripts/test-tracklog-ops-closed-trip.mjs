@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { PGlite } from '@electric-sql/pglite';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const MIGRATION = path.join(ROOT, 'supabase', 'migrations', '20261111144500_tracklog_ops_closed_trip.sql');
+const MIGRATION = path.join(ROOT, 'supabase', 'migrations', '20261111222034_tracklog_ops_closed_trip.sql');
 const PHONE = '090-5555-0199';
 const EMAIL = 'ops-canary@example.test';
 const LAT = 12.345678;
