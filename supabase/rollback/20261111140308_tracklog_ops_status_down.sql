@@ -1,7 +1,7 @@
 -- Draft down migration for tracklog_ops_status.
 -- Not in supabase/migrations, so it does not auto-apply.
 -- Drops only the function and partial index added by
--- supabase/migrations/20261111120000_tracklog_ops_status.sql.
+-- supabase/migrations/20261111140308_tracklog_ops_status.sql.
 -- No table, column, or row is changed.
 
 do $$
