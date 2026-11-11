@@ -1,5 +1,5 @@
 -- Restores tracklog_ops_status to the body from
--- supabase/migrations/20261111120000_tracklog_ops_status.sql.
+-- supabase/migrations/20261111140308_tracklog_ops_status.sql.
 -- Does not drop the index and does not change rows.
 
 create or replace function public.tracklog_ops_status(_device_id text default null)

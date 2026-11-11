@@ -7,7 +7,7 @@ import { PGlite } from '@electric-sql/pglite';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const MIGRATION_PATH = path.join(ROOT, 'supabase', 'migrations', '20261111140308_tracklog_ops_status.sql');
-const SEEN_MIGRATION_PATH = path.join(ROOT, 'supabase', 'migrations', '20261111150000_tracklog_ops_status_last_confirmed.sql');
+const SEEN_MIGRATION_PATH = path.join(ROOT, 'supabase', 'migrations', '20261111222553_tracklog_ops_status_last_confirmed.sql');
 
 const PHONE = '090-5555-0199';
 const EMAIL = 'ops-canary@example.test';

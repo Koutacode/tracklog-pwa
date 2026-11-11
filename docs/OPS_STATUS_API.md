@@ -260,7 +260,7 @@ curl -sS \
 | 引数 | 値 |
 | --- | --- |
 | `name` | `tracklog_ops_status_last_confirmed` |
-| `query` | `supabase/migrations/20261111150000_tracklog_ops_status_last_confirmed.sql` の全文 |
+| `query` | `supabase/migrations/20261111222553_tracklog_ops_status_last_confirmed.sql` の全文 |
 
 `deploy_edge_function`
 
@@ -283,4 +283,4 @@ curl -sS \
 
 確認は、トークン無しが 401、正しいトークンが 200 で、`jq 'keys'` に `last_confirmed_at` と `synced_at` があること。値は画面に出さなくてよい。
 
-戻すときは `supabase/rollback/20261111150000_tracklog_ops_status_last_confirmed_down.sql` を SQL Editor で実行し、デプロイ前の関数ソースを同じ `deploy_edge_function` で戻す。索引と行データは残る。
+戻すときは `supabase/rollback/20261111222553_tracklog_ops_status_last_confirmed_down.sql` を SQL Editor で実行し、デプロイ前の関数ソースを同じ `deploy_edge_function` で戻す。索引と行データは残る。
