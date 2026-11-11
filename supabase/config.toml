@@ -11,3 +11,12 @@ verify_jwt = true
 
 [functions.tracklog-location]
 verify_jwt = true
+
+# Ops reader uses its own bearer token. A Supabase JWT must not be required,
+# and anon / driver / admin / service_role tokens are rejected in the function.
+[functions.tracklog-ops-status]
+verify_jwt = false
+
+# Closed-trip segment report. Same ops-reader token, JWT verification off.
+[functions.tracklog-ops-closed-trip]
+verify_jwt = false
