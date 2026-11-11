@@ -128,6 +128,35 @@ try {
   assert.equal(String(before.trips), String(after.trips));
   assert.equal(String(before.events), String(after.events));
 
+  await db.query(
+    `insert into public.trip_headers (trip_id, device_id, start_ts, end_ts, status, odo_start)
+     values ('active-same-day', 'device-1', '2026-11-11T01:00:00Z', null, 'active', 1),
+            ('spans-midnight', 'device-1', '2026-11-11T10:00:00Z', '2026-11-12T02:00:00Z', 'closed', 1)`,
+  );
+  await db.query(
+    `insert into public.trip_events (id, trip_id, device_id, type, ts, address, geo, extras)
+     values ('span-start', 'spans-midnight', 'device-1', 'boarding', '2026-11-11T10:00:00Z',
+             '神奈川県横須賀市平成町', $1::jsonb, '{"ferrySessionId":"ferry-span"}'::jsonb)`,
+    [JSON.stringify({ lat: LAT, lng: LNG })],
+  );
+  const day = await db.query(`select public.tracklog_ops_closed_day('2026-11-11') as payload`);
+  const dayPayload = payloadOf(day.rows[0].payload);
+  const ids = dayPayload.trips.map(trip => trip.trip_id);
+  assert.equal(ids.includes(TRIP), true);
+  assert.equal(ids.includes('spans-midnight'), true);
+  assert.equal(ids.includes('active-same-day'), false);
+  assert.equal(Object.hasOwn(dayPayload, 'device_id'), false);
+  assert.doesNotMatch(JSON.stringify(dayPayload), /12\.345678|090-5555-0199|device-1|route-point/);
+  const nextDay = payloadOf((await db.query(`select public.tracklog_ops_closed_day('2026-11-12') as payload`)).rows[0].payload);
+  assert.deepEqual(nextDay.trips.map(trip => trip.trip_id), ['spans-midnight']);
+  let invalid = false;
+  try {
+    await db.query(`select public.tracklog_ops_closed_day('2026-02-31')`);
+  } catch (error) {
+    invalid = error.code === '22023';
+  }
+  assert.equal(invalid, true);
+
   console.log('tracklog-ops-closed-trip sql: closed-only read and privilege checks passed');
 } catch (error) {
   console.error(error);

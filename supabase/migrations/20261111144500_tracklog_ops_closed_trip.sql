@@ -117,3 +117,142 @@ grant execute on function public.tracklog_ops_closed_trip(text) to service_role;
 
 comment on function public.tracklog_ops_closed_trip(text) is
   'Read-only segment list for one closed trip. service_role only. Does not write.';
+
+-- One Japan calendar day. A closed trip is included when its start/end overlaps
+-- that day, including a trip that began the day before. At most 20 trips.
+create or replace function public.tracklog_ops_closed_day(_day text)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = pg_catalog, public
+set statement_timeout = '3s'
+as $$
+declare
+  v_day text := nullif(btrim(coalesce(_day, '')), '');
+  v_start timestamptz;
+  v_end timestamptz;
+  v_count integer := 0;
+  v_trips jsonb := '[]'::jsonb;
+  v_trip record;
+  v_events jsonb;
+begin
+  if coalesce(auth.role(), '') is distinct from 'service_role' then
+    raise exception 'tracklog_ops_closed_day requires service_role' using errcode = '42501';
+  end if;
+
+  if v_day is null or v_day !~ '^\d{4}-\d{2}-\d{2}$' then
+    raise exception 'invalid date' using errcode = '22023';
+  end if;
+
+  begin
+    v_start := (v_day || ' 00:00:00+09')::timestamptz;
+  exception
+    when datetime_field_overflow or invalid_datetime_format then
+      raise exception 'invalid date' using errcode = '22023';
+  end;
+  v_end := v_start + interval '1 day';
+  if to_char(v_start at time zone 'Asia/Tokyo', 'YYYY-MM-DD') is distinct from v_day then
+    raise exception 'invalid date' using errcode = '22023';
+  end if;
+
+  select count(*)::integer
+    into v_count
+  from public.trip_headers trip
+  where trip.status = 'closed'
+    and trip.start_ts < v_end
+    and coalesce(trip.end_ts, trip.start_ts) >= v_start;
+
+  if v_count > 20 then
+    return jsonb_build_object('date', v_day, 'too_many', true, 'trip_count', v_count);
+  end if;
+
+  for v_trip in
+    select trip.trip_id, trip.start_ts, trip.end_ts
+    from public.trip_headers trip
+    where trip.status = 'closed'
+      and trip.start_ts < v_end
+      and coalesce(trip.end_ts, trip.start_ts) >= v_start
+    order by trip.start_ts, trip.trip_id
+  loop
+    select coalesce(jsonb_agg(
+      jsonb_build_object(
+        'id', src.id,
+        'type', src.type,
+        'ts', to_char(src.ts at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+        'address', src.address,
+        'ic_name', src.ic_name,
+        'session_key', src.session_key,
+        'session_id', case
+          when src.session_key is null then null
+          when jsonb_typeof(src.extras -> src.session_key) = 'string'
+            then nullif(btrim(src.extras ->> src.session_key), '')
+          else null
+        end,
+        'auto_reason', case
+          when jsonb_typeof(src.extras -> 'autoReason') = 'string'
+            then nullif(btrim(src.extras ->> 'autoReason'), '')
+          else null
+        end
+      )
+      order by src.ts, src.id
+    ), '[]'::jsonb)
+      into v_events
+    from (
+      select
+        event.id,
+        event.type,
+        event.ts,
+        left(nullif(btrim(event.address), ''), 500) as address,
+        event.extras,
+        case
+          when jsonb_typeof(event.extras -> 'icName') = 'string'
+            then nullif(btrim(event.extras ->> 'icName'), '')
+          else null
+        end as ic_name,
+        case event.type
+          when 'rest_start' then 'restSessionId'
+          when 'rest_end' then 'restSessionId'
+          when 'break_start' then 'breakSessionId'
+          when 'break_end' then 'breakSessionId'
+          when 'load_start' then 'loadSessionId'
+          when 'load_end' then 'loadSessionId'
+          when 'unload_start' then 'unloadSessionId'
+          when 'unload_end' then 'unloadSessionId'
+          when 'boarding' then 'ferrySessionId'
+          when 'disembark' then 'ferrySessionId'
+          when 'work_start' then 'workSessionId'
+          when 'work_end' then 'workSessionId'
+          when 'expressway_start' then 'expresswaySessionId'
+          when 'expressway_end' then 'expresswaySessionId'
+          when 'wait_start' then 'waitSessionId'
+          when 'wait_end' then 'waitSessionId'
+          when 'drive_start' then 'driveSessionId'
+          when 'drive_end' then 'driveSessionId'
+          else null
+        end as session_key
+      from public.trip_events event
+      where event.trip_id = v_trip.trip_id
+    ) src;
+
+    v_trips := v_trips || jsonb_build_array(jsonb_build_object(
+      'closed', true,
+      'trip_id', v_trip.trip_id,
+      'trip_started_at', to_char(v_trip.start_ts at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+      'trip_ended_at', case
+        when v_trip.end_ts is null then null
+        else to_char(v_trip.end_ts at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+      end,
+      'events', v_events
+    ));
+  end loop;
+
+  return jsonb_build_object('date', v_day, 'trips', v_trips);
+end;
+$$;
+
+revoke all on function public.tracklog_ops_closed_day(text) from public, anon, authenticated;
+grant execute on function public.tracklog_ops_closed_day(text) to service_role;
+
+comment on function public.tracklog_ops_closed_day(text) is
+  'Read-only closed trips overlapping one JST day. service_role only. Does not write.';
