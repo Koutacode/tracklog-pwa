@@ -120,7 +120,7 @@ Authorization: Bearer dummy-ops-token
 ### psql（supabase CLI は使わない）
 
 ```bash
-psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f supabase/migrations/20261111144500_tracklog_ops_closed_trip.sql
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f supabase/migrations/20261111222034_tracklog_ops_closed_trip.sql
 ```
 
 `DATABASE_URL` は所有者の接続文字列。この文書には書かない。
@@ -132,7 +132,7 @@ psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f supabase/migrations/20261111144500_tr
 | 引数 | 値 |
 | --- | --- |
 | `name` | `tracklog_ops_closed_trip` |
-| `query` | `supabase/migrations/20261111144500_tracklog_ops_closed_trip.sql` の全文 |
+| `query` | `supabase/migrations/20261111222034_tracklog_ops_closed_trip.sql` の全文 |
 
 psql のメタコマンドは無い。`CREATE INDEX CONCURRENTLY` も無い。列も行も変えない。
 
@@ -184,7 +184,7 @@ select to_regprocedure('public.tracklog_ops_closed_trip(text)') is not null as f
 データベースから関数だけ外す:
 
 ```bash
-psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f supabase/rollback/20261111144500_tracklog_ops_closed_trip_down.sql
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f supabase/rollback/20261111222034_tracklog_ops_closed_trip_down.sql
 ```
 
 このファイルは `migrations` の外なので自動では走らない。消えるのは `tracklog_ops_closed_trip` と `tracklog_ops_closed_day` だけ。
