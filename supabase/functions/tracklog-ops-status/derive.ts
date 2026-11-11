@@ -541,3 +541,142 @@ export function applyCoarsePlace(
   if (!name) return body;
   return { ...body, place: { kind: 'municipality', name } };
 }
+
+function rangesOverlap(
+  leftStart: number,
+  leftEnd: number | null,
+  rightStart: number,
+  rightEnd: number | null,
+): boolean {
+  if (leftEnd == null && rightEnd == null) return leftStart === rightStart;
+  if (leftEnd == null) return rightEnd != null && leftStart >= rightStart && leftStart < rightEnd;
+  if (rightEnd == null) return leftEnd != null && rightStart >= leftStart && rightStart < leftEnd;
+  return leftStart < rightEnd && rightStart < leftEnd;
+}
+
+/** Time inside the trip that no finished interval covers. Open intervals do not cover time. */
+function uncoveredRanges(
+  windowStart: number,
+  windowEnd: number,
+  ranges: ReadonlyArray<{ startMs: number; endMs: number }>,
+): Array<{ startMs: number; endMs: number }> {
+  if (!Number.isFinite(windowStart) || !Number.isFinite(windowEnd) || windowEnd <= windowStart) return [];
+  const sorted = ranges
+    .filter(range => range.endMs > range.startMs)
+    .sort((left, right) => left.startMs - right.startMs || left.endMs - right.endMs);
+  const gaps: Array<{ startMs: number; endMs: number }> = [];
+  let cursor = windowStart;
+  for (const range of sorted) {
+    const start = Math.max(range.startMs, windowStart);
+    const end = Math.min(range.endMs, windowEnd);
+    if (end <= cursor) continue;
+    if (start > cursor) gaps.push({ startMs: cursor, endMs: Math.min(start, windowEnd) });
+    cursor = Math.max(cursor, end);
+    if (cursor >= windowEnd) return gaps;
+  }
+  if (cursor < windowEnd) gaps.push({ startMs: cursor, endMs: windowEnd });
+  return gaps;
+}
+
+/**
+ * Closed-trip intervals for the daily report.
+ * Ferry stays its own kind, times stay raw, and gaps or overlaps are listed
+ * instead of being rounded or merged into a 24:00 total.
+ */
+function hitsWindow(
+  startMs: number,
+  endMs: number | null,
+  window: { startMs: number; endMs: number },
+): boolean {
+  const end = endMs ?? Number.POSITIVE_INFINITY;
+  return startMs < window.endMs && end > window.startMs;
+}
+
+export function jstDayWindow(date: string): { startMs: number; endMs: number } | null {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return null;
+  const startMs = Date.parse(`${date}T00:00:00+09:00`);
+  if (!Number.isFinite(startMs)) return null;
+  if (getJstDateInfo(new Date(startMs).toISOString()).dateKey !== date) return null;
+  return { startMs, endMs: startMs + 86_400_000 };
+}
+
+export function buildClosedTripReport(
+  raw: unknown,
+  day?: { startMs: number; endMs: number },
+): Record<string, unknown> {
+  const payload = record(raw);
+  if (!payload || payload.closed !== true) return { closed: false };
+  const tripId = textOrNull(payload.trip_id);
+  const started = textOrNull(payload.trip_started_at);
+  const startedMs = started ? Date.parse(started) : Number.NaN;
+  if (!tripId || !DEVICE_ID_RE.test(tripId) || !started || !Number.isFinite(startedMs)) {
+    throw new Error('invalid_status_payload');
+  }
+  const ended = textOrNull(payload.trip_ended_at);
+  const endedMs = ended ? Date.parse(ended) : Number.NaN;
+  const intervals = buildIntervals(readEvents(payload.events))
+    .filter(item => !item.point)
+    .filter(item => !day || hitsWindow(item.startMs, item.endMs, day))
+    .sort((left, right) => left.startMs - right.startMs
+      || (left.endMs ?? Number.MAX_SAFE_INTEGER) - (right.endMs ?? Number.MAX_SAFE_INTEGER)
+      || left.kind.localeCompare(right.kind));
+  const segments = intervals.map((item, index) => ({
+    kind: item.kind,
+    label: item.label,
+    start_at: toJstIso(new Date(item.startMs).toISOString()),
+    end_at: item.endMs == null ? null : toJstIso(new Date(item.endMs).toISOString()),
+    place: item.place,
+    overlaps: intervals.some((other, otherIndex) => otherIndex !== index && rangesOverlap(
+      item.startMs,
+      item.endMs,
+      other.startMs,
+      other.endMs,
+    )),
+  }));
+  const gapStart = day ? Math.max(startedMs, day.startMs) : startedMs;
+  const gapEnd = Number.isFinite(endedMs)
+    ? (day ? Math.min(endedMs, day.endMs) : endedMs)
+    : Number.NaN;
+  const gaps = Number.isFinite(gapEnd)
+    ? uncoveredRanges(
+      gapStart,
+      gapEnd,
+      intervals.flatMap(item => item.endMs == null ? [] : [{ startMs: item.startMs, endMs: item.endMs }]),
+    ).map(gap => ({
+      start_at: toJstIso(new Date(gap.startMs).toISOString()),
+      end_at: toJstIso(new Date(gap.endMs).toISOString()),
+    }))
+    : [];
+  return {
+    closed: true,
+    trip_id: tripId,
+    trip_started_at: toJstIso(started),
+    trip_ended_at: Number.isFinite(endedMs) ? toJstIso(ended as string) : null,
+    segments,
+    gaps,
+  };
+}
+
+/** One JST calendar day of closed trips. At most 20 trips; the SQL enforces the same cap. */
+export function buildClosedDayReport(raw: unknown): Record<string, unknown> {
+  const payload = record(raw);
+  const date = textOrNull(payload?.date);
+  const day = date ? jstDayWindow(date) : null;
+  if (!payload || !date || !day) throw new Error('invalid_status_payload');
+  if (payload.too_many === true) {
+    const count = Number(payload.trip_count);
+    return {
+      date,
+      too_many: true,
+      trip_count: Number.isInteger(count) && count >= 0 && count <= 10000 ? count : 21,
+    };
+  }
+  const trips = Array.isArray(payload.trips) ? payload.trips : [];
+  if (trips.length > 20) throw new Error('invalid_status_payload');
+  return {
+    date,
+    trips: trips
+      .map(trip => buildClosedTripReport(trip, day))
+      .filter(trip => trip.closed === true),
+  };
+}
