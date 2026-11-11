@@ -542,25 +542,92 @@ export function applyCoarsePlace(
   return { ...body, place: { kind: 'municipality', name } };
 }
 
+function rangesOverlap(
+  leftStart: number,
+  leftEnd: number | null,
+  rightStart: number,
+  rightEnd: number | null,
+): boolean {
+  if (leftEnd == null && rightEnd == null) return leftStart === rightStart;
+  if (leftEnd == null) return rightEnd != null && leftStart >= rightStart && leftStart < rightEnd;
+  if (rightEnd == null) return leftEnd != null && rightStart >= leftStart && rightStart < leftEnd;
+  return leftStart < rightEnd && rightStart < leftEnd;
+}
+
+/** Time inside the trip that no finished interval covers. Open intervals do not cover time. */
+function uncoveredRanges(
+  windowStart: number,
+  windowEnd: number,
+  ranges: ReadonlyArray<{ startMs: number; endMs: number }>,
+): Array<{ startMs: number; endMs: number }> {
+  if (!Number.isFinite(windowStart) || !Number.isFinite(windowEnd) || windowEnd <= windowStart) return [];
+  const sorted = ranges
+    .filter(range => range.endMs > range.startMs)
+    .sort((left, right) => left.startMs - right.startMs || left.endMs - right.endMs);
+  const gaps: Array<{ startMs: number; endMs: number }> = [];
+  let cursor = windowStart;
+  for (const range of sorted) {
+    const start = Math.max(range.startMs, windowStart);
+    const end = Math.min(range.endMs, windowEnd);
+    if (end <= cursor) continue;
+    if (start > cursor) gaps.push({ startMs: cursor, endMs: Math.min(start, windowEnd) });
+    cursor = Math.max(cursor, end);
+    if (cursor >= windowEnd) return gaps;
+  }
+  if (cursor < windowEnd) gaps.push({ startMs: cursor, endMs: windowEnd });
+  return gaps;
+}
+
 /**
- * Closed-trip report. Refuses anything that is not closed: true, so an active
- * trip payload cannot be turned into segments. Device id and coordinates are
- * never copied onto the result.
+ * Closed-trip intervals for the daily report.
+ * Ferry stays its own kind, times stay raw, and gaps or overlaps are listed
+ * instead of being rounded or merged into a 24:00 total.
  */
 export function buildClosedTripReport(raw: unknown): Record<string, unknown> {
   const payload = record(raw);
   if (!payload || payload.closed !== true) return { closed: false };
   const tripId = textOrNull(payload.trip_id);
   const started = textOrNull(payload.trip_started_at);
-  if (!tripId || !DEVICE_ID_RE.test(tripId) || !started || !Number.isFinite(Date.parse(started))) {
+  const startedMs = started ? Date.parse(started) : Number.NaN;
+  if (!tripId || !DEVICE_ID_RE.test(tripId) || !started || !Number.isFinite(startedMs)) {
     throw new Error('invalid_status_payload');
   }
   const ended = textOrNull(payload.trip_ended_at);
+  const endedMs = ended ? Date.parse(ended) : Number.NaN;
+  const intervals = buildIntervals(readEvents(payload.events))
+    .filter(item => !item.point)
+    .sort((left, right) => left.startMs - right.startMs
+      || (left.endMs ?? Number.MAX_SAFE_INTEGER) - (right.endMs ?? Number.MAX_SAFE_INTEGER)
+      || left.kind.localeCompare(right.kind));
+  const segments = intervals.map((item, index) => ({
+    kind: item.kind,
+    label: item.label,
+    start_at: toJstIso(new Date(item.startMs).toISOString()),
+    end_at: item.endMs == null ? null : toJstIso(new Date(item.endMs).toISOString()),
+    place: item.place,
+    overlaps: intervals.some((other, otherIndex) => otherIndex !== index && rangesOverlap(
+      item.startMs,
+      item.endMs,
+      other.startMs,
+      other.endMs,
+    )),
+  }));
+  const gaps = Number.isFinite(endedMs)
+    ? uncoveredRanges(
+      startedMs,
+      endedMs,
+      intervals.flatMap(item => item.endMs == null ? [] : [{ startMs: item.startMs, endMs: item.endMs }]),
+    ).map(gap => ({
+      start_at: toJstIso(new Date(gap.startMs).toISOString()),
+      end_at: toJstIso(new Date(gap.endMs).toISOString()),
+    }))
+    : [];
   return {
     closed: true,
     trip_id: tripId,
     trip_started_at: toJstIso(started),
-    trip_ended_at: ended && Number.isFinite(Date.parse(ended)) ? toJstIso(ended) : null,
-    segments: buildIntervals(readEvents(payload.events)).map(toPublicEvent),
+    trip_ended_at: Number.isFinite(endedMs) ? toJstIso(ended as string) : null,
+    segments,
+    gaps,
   };
 }

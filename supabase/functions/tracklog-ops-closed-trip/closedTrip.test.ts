@@ -65,6 +65,15 @@ const closedPayload = {
       session_key: 'restSessionId',
       session_id: 'rest-1',
     }),
+    event('ferry', 'boarding', '2026-11-11T03:30:00.000Z', {
+      session_key: 'ferrySessionId',
+      session_id: 'ferry-1',
+      address: '神奈川県横須賀市平成町1丁目',
+    }),
+    event('ferry-end', 'disembark', '2026-11-11T06:07:00.000Z', {
+      session_key: 'ferrySessionId',
+      session_id: 'ferry-1',
+    }),
     event('exp', 'expressway_start', '2026-11-11T07:00:00.000Z', {
       session_key: 'expresswaySessionId',
       session_id: 'exp-1',
@@ -86,13 +95,30 @@ assert.equal(report.trip_started_at, '2026-11-11T00:00:00.000+09:00');
 assert.equal(report.trip_ended_at, '2026-11-11T21:00:00.000+09:00');
 assert.equal(toJstIso('2026-11-11T06:07:00.000Z'), '2026-11-11T15:07:00.000+09:00');
 const segments = report.segments as Array<Record<string, unknown>>;
+assert.deepEqual(segments.map(item => item.kind), ['rest', 'ferry', 'expressway']);
 const rest = segments.find(item => item.kind === 'rest');
+const ferry = segments.find(item => item.kind === 'ferry');
 const expressway = segments.find(item => item.kind === 'expressway');
 assert.equal(rest?.start_at, '2026-11-11T12:00:00.000+09:00');
 assert.equal(rest?.end_at, '2026-11-11T15:07:00.000+09:00');
+assert.equal(rest?.overlaps, true);
 assert.deepEqual(rest?.place, { kind: 'municipality', name: '神奈川県横須賀市' });
+assert.equal(ferry?.kind, 'ferry');
+assert.equal(ferry?.label, 'フェリー');
+assert.equal(ferry?.start_at, '2026-11-11T12:30:00.000+09:00');
+assert.equal(ferry?.end_at, '2026-11-11T15:07:00.000+09:00');
+assert.equal(ferry?.overlaps, true);
 assert.equal(expressway?.end_at, '2026-11-11T17:00:00.000+09:00');
+assert.equal(expressway?.overlaps, false);
 assert.deepEqual(expressway?.place, { kind: 'ic', name: '厚木IC' });
+assert.deepEqual(report.gaps, [
+  { start_at: '2026-11-11T00:00:00.000+09:00', end_at: '2026-11-11T12:00:00.000+09:00' },
+  { start_at: '2026-11-11T15:07:00.000+09:00', end_at: '2026-11-11T16:00:00.000+09:00' },
+  { start_at: '2026-11-11T17:00:00.000+09:00', end_at: '2026-11-11T21:00:00.000+09:00' },
+]);
+assert.equal(JSON.stringify(report).includes('15:00:00.000+09:00'), false);
+assert.equal(JSON.stringify(report).includes('15:15:00.000+09:00'), false);
+assert.equal(JSON.stringify(report).includes('minutes'), false);
 assert.equal(JSON.stringify(report).includes('平成町'), false);
 assert.equal(JSON.stringify(report).includes('酒井'), false);
 assertClean(report, 'closed report');

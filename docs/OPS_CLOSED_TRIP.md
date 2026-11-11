@@ -1,6 +1,6 @@
 # 終わった便の区間
 
-運行係が日報を作るための読み取りです。終わった便を `trip_id` で1回指定し、区間の種類・開始・終了・地名だけを返します。運行中の便は返しません。座標、ルート、端末IDは出しません。時刻は日本時間のまま、15分には丸めません。日報側で15分単位に揃えてください。
+運行係が日報を作るための読み取りです。終わった便を `trip_id` で1回指定し、区間の種類・開始・終了・地名を返します。フェリーは休息にまとめず、`kind` は `ferry` のままです。休息として数えるのは日報側です。時刻は日本時間の生の値で、15分には丸めません。1日を24:00に合わせる合計もしません。運行中の便は返しません。座標、ルート、端末IDは出しません。
 
 運行中の `tracklog-ops-status` の応答はそのままです。合言葉は同じ `TRACKLOG_OPS_STATUS_TOKEN_SHA256` です。この作業では本番への適用とデプロイをしていません。
 
@@ -27,8 +27,21 @@ Authorization: Bearer dummy-ops-token
       "label": "休息",
       "start_at": "2026-11-11T12:00:00.000+09:00",
       "end_at": "2026-11-11T15:07:00.000+09:00",
-      "place": { "kind": "municipality", "name": "神奈川県横須賀市" }
+      "place": { "kind": "municipality", "name": "神奈川県横須賀市" },
+      "overlaps": true
+    },
+    {
+      "kind": "ferry",
+      "label": "フェリー",
+      "start_at": "2026-11-11T12:30:00.000+09:00",
+      "end_at": "2026-11-11T15:07:00.000+09:00",
+      "place": { "kind": "municipality", "name": "神奈川県横須賀市" },
+      "overlaps": true
     }
+  ],
+  "gaps": [
+    { "start_at": "2026-11-11T00:00:00.000+09:00", "end_at": "2026-11-11T12:00:00.000+09:00" },
+    { "start_at": "2026-11-11T15:07:00.000+09:00", "end_at": "2026-11-11T21:00:00.000+09:00" }
   ]
 }
 ```
@@ -49,8 +62,14 @@ Authorization: Bearer dummy-ops-token
 | `segments[].kind` | string | `rest` `break` `load` `unload` `work` `ferry` `expressway` `wait` `drive` `trip_start` `trip_end` `refuel` `point_mark` |
 | `segments[].label` | string | 休息、休憩、積込、荷卸、その他作業、フェリー、高速道路、待機、走行、運行開始、運行終了、給油、地点記録 |
 | `segments[].start_at` | string | 開始。日本時間 |
-| `segments[].end_at` | string または null | 区間の終了。進行のまま終わった記録は null。点の出来事（運行開始・終了、給油、地点記録）にはこの項目が無い |
+| `segments[].end_at` | string または null | 区間の終了。終了記録が無いときは null。点の出来事は `segments` に入れない |
 | `segments[].place` | object または null | `kind` は `ic` または `municipality`。`name` は IC 名、または都道府県＋市区町村。町名と番地は捨てる |
+| `segments[].overlaps` | boolean | 他の区間と時間が重なるとき true。フェリーと休息が重なっても、どちらも残す |
+| `gaps` | array | 便の開始から終了までで、終了時刻のある区間が覆っていない時間。`start_at` と `end_at` だけ。種類は付けない |
+| `gaps[].start_at` | string | 穴の開始。日本時間の生の時刻 |
+| `gaps[].end_at` | string | 穴の終了。日本時間の生の時刻 |
+
+`segments` は開始時刻の順です。同じ開始時刻は終了が早い順、その次に `kind` です。穴と重なりは消さず、丸めもしません。走行へ割り当てるかどうかは日報側で決めます。便の終了時刻が無いときは `gaps` は空です。
 
 合言葉が違う、または無いときは 401。`trip_id` が無い、または形式が違うときは 400。
 
