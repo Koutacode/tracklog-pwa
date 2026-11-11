@@ -224,6 +224,7 @@ assert.equal(concurrent.body.trip_id, 'trip-ferry-1');
 assert.equal(concurrent.body.trip_started_at, toJstIso(TRIP_START));
 assert.deepEqual(concurrent.body.leg, { day_index: 2, date: '2026-11-12' });
 assert.equal(concurrent.body.stale, false);
+assert.equal(concurrent.body.last_confirmed_at, toJstIso(SEEN_FRESH));
 assert.deepEqual(concurrent.body.place, { kind: 'municipality', name: '神奈川県横須賀市' });
 const tripEvents = concurrent.body.trip_events as Array<Record<string, unknown>>;
 const todayEvents = concurrent.body.events_today as Array<Record<string, unknown>>;
@@ -247,13 +248,17 @@ assertClean(concurrent.body, 'ferry rest expressway');
 const stale = buildOpsStatus(activePayload(driving, { seen_at: '2026-11-12T00:30:00.000Z' }));
 assert.equal(stale.body.stale, true);
 assert.equal(stale.body.state, '走行');
+assert.equal(stale.body.last_confirmed_at, '2026-11-12T09:30:00.000+09:00');
+assert.equal(findSensitive(stale.body.last_confirmed_at), null);
 assertClean(stale.body, 'stale');
 
 const closed = buildOpsStatus({
   trip_active: false,
   synced_at: SYNCED,
+  seen_at: '2026-11-11T14:45:00.000Z',
   stale: true,
   trip_id: 'leftover-trip',
+  device_id: 'android:device-secret-0199',
   latest_trip_id: 'leftover-trip',
   latest_lat: CANARY_LAT,
   latest_lng: CANARY_LNG,
@@ -263,7 +268,11 @@ const closed = buildOpsStatus({
   _reverse_geocode: { lat: CANARY_LAT, lng: CANARY_LNG },
   events: ferryRest,
 });
-assert.deepEqual(Object.keys(closed.body).sort(), ['stale', 'synced_at', 'trip_active']);
+assert.deepEqual(Object.keys(closed.body).sort(), ['last_confirmed_at', 'stale', 'synced_at', 'trip_active']);
+assert.equal(closed.body.last_confirmed_at, '2026-11-11T23:45:00.000+09:00');
+assert.equal(findSensitive(closed.body.last_confirmed_at), null);
+assert.equal(String(closed.body.last_confirmed_at).includes(String(CANARY_LAT)), false);
+assert.equal(String(closed.body.last_confirmed_at).includes('device-secret'), false);
 assert.equal(closed.body.trip_active, false);
 assert.equal(closed.body.stale, false);
 assert.equal(closed.geocode, null);
@@ -471,6 +480,7 @@ assert.equal(inactive.response.status, 200);
 assert.deepEqual(inactive.body, {
   trip_active: false,
   synced_at: toJstIso(SYNCED),
+  last_confirmed_at: null,
   stale: false,
 });
 assert.equal(inactive.calls.length, 1);

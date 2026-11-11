@@ -7,6 +7,7 @@ import { PGlite } from '@electric-sql/pglite';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const MIGRATION_PATH = path.join(ROOT, 'supabase', 'migrations', '20261111120000_tracklog_ops_status.sql');
+const SEEN_MIGRATION_PATH = path.join(ROOT, 'supabase', 'migrations', '20261111150000_tracklog_ops_status_last_confirmed.sql');
 
 const PHONE = '090-5555-0199';
 const EMAIL = 'ops-canary@example.test';
@@ -152,6 +153,7 @@ try {
   await db.exec(BASELINE_SQL);
   const migration = await readFile(MIGRATION_PATH, 'utf8');
   await db.exec(migration);
+  await db.exec(await readFile(SEEN_MIGRATION_PATH, 'utf8'));
 
   await check('function is security definer and hidden from anon and authenticated', async () => {
     const meta = (await db.query(`
@@ -189,7 +191,7 @@ try {
     await setRole('service_role');
     const empty = await callStatus(null);
     assert.equal(empty.trip_active, false);
-    assert.deepEqual(Object.keys(empty).sort(), ['stale', 'synced_at', 'trip_active']);
+    assert.deepEqual(Object.keys(empty).sort(), ['seen_at', 'stale', 'synced_at', 'trip_active']);
     await db.exec('reset role');
   });
 
@@ -219,7 +221,7 @@ try {
     );
     const before = await counts();
     const payload = await callStatus(null);
-    assert.deepEqual(Object.keys(payload).sort(), ['stale', 'synced_at', 'trip_active']);
+    assert.deepEqual(Object.keys(payload).sort(), ['seen_at', 'stale', 'synced_at', 'trip_active']);
     assert.equal(payload.trip_active, false);
     assert.equal(payload.stale, false);
     const text = JSON.stringify(payload);
@@ -307,7 +309,7 @@ try {
 
   await check('requesting a device without an active trip does not reveal another device', async () => {
     const payload = await callStatus('device-closed');
-    assert.deepEqual(Object.keys(payload).sort(), ['stale', 'synced_at', 'trip_active']);
+    assert.deepEqual(Object.keys(payload).sort(), ['seen_at', 'stale', 'synced_at', 'trip_active']);
     assert.equal(payload.trip_active, false);
     assert.doesNotMatch(JSON.stringify(payload), /trip-active|device-active|12\.345678/);
   });

@@ -46,11 +46,12 @@ GET /functions/v1/tracklog-ops-status?device_id=<DEVICE_ID>
 {
   "trip_active": false,
   "synced_at": "2026-11-12T10:00:00.000+09:00",
+  "last_confirmed_at": "2026-11-12T09:40:00.000+09:00",
   "stale": false
 }
 ```
 
-この形に `trip_id` は含まれない。`stale` は常に `false`（生きた運行が無いので、古い心拍は状態の古さではない）。
+この形に `trip_id` は含まれない。`stale` は常に `false`（生きた運行が無いので、古い心拍は状態の古さではない）。`last_confirmed_at` は、指定した端末があればその端末、無ければ全端末のうち、`last_seen_at` と `latest_location_at` の新しい方。時刻が無ければ `null`。
 
 ### 運行が複数で端末未指定（HTTP 200）
 
@@ -65,11 +66,12 @@ GET /functions/v1/tracklog-ops-status?device_id=<DEVICE_ID>
     { "device_id": "device-1", "display_name": "運転者A", "vehicle_label": "品川800" }
   ],
   "synced_at": "2026-11-12T10:00:00.000+09:00",
+  "last_confirmed_at": "2026-11-12T09:40:00.000+09:00",
   "stale": false
 }
 ```
 
-`display_name` または `vehicle_label` がメールアドレス、電話番号、座標のように見える場合は `null` にする。電話番号・メールアドレスの列は読まない。
+`display_name` または `vehicle_label` がメールアドレス、電話番号、座標のように見える場合は `null` にする。電話番号・メールアドレスの列は読まない。`last_confirmed_at` は、進行中の端末のうち新しい確認時刻。
 
 端末を指定したあとの呼び出しは、その端末の進行中の運行だけを見る。他の端末が運行中でも混ぜない。
 
@@ -114,6 +116,7 @@ GET /functions/v1/tracklog-ops-status?device_id=<DEVICE_ID>
   ],
   "leg": { "day_index": 2, "date": "2026-11-12" },
   "synced_at": "2026-11-12T10:00:00.000+09:00",
+  "last_confirmed_at": "2026-11-12T09:50:00.000+09:00",
   "stale": false
 }
 ```
@@ -130,7 +133,9 @@ GET /functions/v1/tracklog-ops-status?device_id=<DEVICE_ID>
 | `events_today` | `synced_at` の日本時間の暦日と重なるもの。日をまたぐフェリーは当日分にも残る。 |
 | `leg.day_index` | 運行開始日を 1 とする日本時間の日数。距離やオドメーターではない。 |
 | `leg.date` | `synced_at` の日本時間の日付 `YYYY-MM-DD`。 |
-| `stale` | 端末の `last_seen_at` と `latest_location_at` の新しい方が、`synced_at` より 15 分を超えて古い、または両方無い。ちょうど 15 分は古くない。 |
+| `synced_at` | この応答を作ったサーバー時刻（`now()`）。端末が同期した時刻ではない。日本時間。 |
+| `last_confirmed_at` | 端末の `last_seen_at` と `latest_location_at` のうち新しい方。時刻だけを日本時間で返す。無ければ `null`。座標も端末IDも含まない。 |
+| `stale` | `last_confirmed_at` が `synced_at` より 15 分を超えて古い、または確認時刻が無い。ちょうど 15 分は古くない。運行が無いときの `stale` は常に `false`。 |
 
 ### 見出しの状態
 
@@ -245,3 +250,37 @@ curl -sS \
 ```
 
 運転者アプリと APK の挙動はこの API では変わらない。
+
+## last_confirmed_at を足すとき
+
+既に `tracklog-ops-status` が出ている環境へ、確認時刻だけを足す。列も行も変えない。秘密は今の `TRACKLOG_OPS_STATUS_TOKEN_SHA256` のまま。
+
+`apply_migration`
+
+| 引数 | 値 |
+| --- | --- |
+| `name` | `tracklog_ops_status_last_confirmed` |
+| `query` | `supabase/migrations/20261111150000_tracklog_ops_status_last_confirmed.sql` の全文 |
+
+`deploy_edge_function`
+
+| 引数 | 値 |
+| --- | --- |
+| `name` | `tracklog-ops-status` |
+| `entrypoint_path` | `supabase/functions/tracklog-ops-status/index.ts` |
+| `verify_jwt` | `false` |
+| `import_map_path` | 渡さない |
+
+`files[].name` は次の7つ。
+
+1. `supabase/functions/tracklog-ops-status/index.ts`
+2. `supabase/functions/tracklog-ops-status/handler.ts`
+3. `supabase/functions/tracklog-ops-status/auth.ts`
+4. `supabase/functions/tracklog-ops-status/geocode.ts`
+5. `supabase/functions/tracklog-ops-status/derive.ts`
+6. `src/domain/jst.ts`
+7. `src/domain/togglePairing.ts`
+
+確認は、トークン無しが 401、正しいトークンが 200 で、`jq 'keys'` に `last_confirmed_at` と `synced_at` があること。値は画面に出さなくてよい。
+
+戻すときは `supabase/rollback/20261111150000_tracklog_ops_status_last_confirmed_down.sql` を SQL Editor で実行し、デプロイ前の関数ソースを同じ `deploy_edge_function` で戻す。索引と行データは残る。
