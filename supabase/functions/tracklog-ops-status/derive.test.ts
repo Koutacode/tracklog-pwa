@@ -483,6 +483,12 @@ assert.match(migrationSource, /grant execute on function public\.tracklog_ops_st
 assert.match(migrationSource, /revoke all on function public\.tracklog_ops_status\(text\) from public, anon, authenticated/);
 assert.doesNotMatch(migrationSource, /trip_route_points|driver_phone|driver_email|odo_start|odo_end|total_km|last_leg_km/);
 assert.doesNotMatch(migrationSource, /\b(?:insert|update|delete|truncate|merge)\b/i);
+assert.doesNotMatch(migrationSource, /\b(?:alter table|add column|create table)\b/i);
+const rollbackSource = await readFile(new URL('../../rollback/20261111120000_tracklog_ops_status_down.sql', import.meta.url), 'utf8');
+assert.match(rollbackSource, /drop function if exists public\.tracklog_ops_status\(text\)/);
+assert.match(rollbackSource, /drop index if exists public\.idx_trip_headers_active_device/);
+assert.doesNotMatch(rollbackSource, /\b(?:alter table|add column|create table|insert|update|delete from|truncate)\b/i);
+assert.doesNotMatch(rollbackSource, /drop table/i);
 
 console.log('tracklog-ops-status: state, coarsening, auth, and leak assertions passed');
 }

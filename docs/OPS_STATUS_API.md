@@ -227,7 +227,7 @@ supabase secrets set TRACKLOG_OPS_STATUS_TOKEN_SHA256="$HASH" --project-ref <SUP
 
 ハッシュは 64 桁の 16 進数。改行を含めない（`printf '%s'`）。サーバーが保存するのはこのハッシュだけ。
 
-反映は次の順。いずれもこの変更の作成時には実行していない。
+反映の順番、Dashboard の操作、スモークテスト、キルスイッチは [OPS_STATUS_ROLLOUT.md](OPS_STATUS_ROLLOUT.md)。いずれもこの変更の作成時には実行していない。
 
 1. マイグレーション `supabase/migrations/20261111120000_tracklog_ops_status.sql` を適用する。`tracklog_ops_status(text)` は `SECURITY DEFINER` の読み取り関数で、`service_role` だけが実行できる。`anon` と `authenticated` からは外してある。適用時、進行中の運行を引く部分索引の作成で `trip_headers` に短いロックがかかる。
 2. 関数をデプロイする。`config.toml` の `verify_jwt = false` を必ず使う。ゲートウェイが専用トークンを JWT として拒否しないため。
