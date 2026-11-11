@@ -9,7 +9,7 @@ SQL と関数の本文は、この手順書を含む PR #55 の head コミッ�
 | 引数 | 値 |
 | --- | --- |
 | `name` | `tracklog_ops_status` |
-| `query` | `supabase/migrations/20261111120000_tracklog_ops_status.sql` の全文 |
+| `query` | `supabase/migrations/20261111140308_tracklog_ops_status.sql` の全文 |
 
 このファイルはそのまま 1 回の `query` で実行できる。`\i` などの psql メタコマンドは無い。`CREATE INDEX` は `CONCURRENTLY` ではないので、ツールがトランザクションで包んでも通る。列の追加も、行の更新・削除も無い。
 

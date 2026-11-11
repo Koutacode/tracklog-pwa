@@ -234,7 +234,7 @@ supabase secrets set TRACKLOG_OPS_STATUS_TOKEN_SHA256="$HASH" --project-ref <SUP
 
 反映の順番、Dashboard の操作、スモークテスト、キルスイッチは [OPS_STATUS_ROLLOUT.md](OPS_STATUS_ROLLOUT.md)。いずれもこの変更の作成時には実行していない。
 
-1. マイグレーション `supabase/migrations/20261111120000_tracklog_ops_status.sql` を適用する。`tracklog_ops_status(text)` は `SECURITY DEFINER` の読み取り関数で、`service_role` だけが実行できる。`anon` と `authenticated` からは外してある。適用時、進行中の運行を引く部分索引の作成で `trip_headers` に短いロックがかかる。
+1. マイグレーション `supabase/migrations/20261111140308_tracklog_ops_status.sql` を適用する。`tracklog_ops_status(text)` は `SECURITY DEFINER` の読み取り関数で、`service_role` だけが実行できる。`anon` と `authenticated` からは外してある。適用時、進行中の運行を引く部分索引の作成で `trip_headers` に短いロックがかかる。
 2. 関数をデプロイする。`config.toml` の `verify_jwt = false` を必ず使う。ゲートウェイが専用トークンを JWT として拒否しないため。
 
 ```bash
@@ -249,7 +249,7 @@ curl -sS \
   "https://<SUPABASE_PROJECT_REF>.supabase.co/functions/v1/tracklog-ops-status"
 ```
 
-運転者アプリと APK の挙動はこの API では変わらない。
+運転者アプリと APK の挙動はこの API では変わらない。終わった便の区間は別関数 `tracklog-ops-closed-trip` で、説明は [OPS_CLOSED_TRIP.md](OPS_CLOSED_TRIP.md)。
 
 ## last_confirmed_at を足すとき
 

@@ -2,7 +2,7 @@
 
 チームリードが、停車中で同期が止まっているときに行う。このリポジトリの作業では適用・デプロイ・秘密の作成をしていない。マイグレーションは列を足さず、既存の行も更新・削除しない。増えるのは部分索引 `idx_trip_headers_active_device`、関数 `tracklog_ops_status(text)`、その関数の実行権限だけである。索引作成で `trip_headers` に短いロックがかかる。
 
-契約は [OPS_STATUS_API.md](OPS_STATUS_API.md)。MCP の `apply_migration` と `deploy_edge_function` に渡す値は [OPS_STATUS_HANDOFF.md](OPS_STATUS_HANDOFF.md)。戻す SQL は `supabase/rollback/20261111120000_tracklog_ops_status_down.sql`（`migrations` の外。自動適用されない）。
+契約は [OPS_STATUS_API.md](OPS_STATUS_API.md)。MCP の `apply_migration` と `deploy_edge_function` に渡す値は [OPS_STATUS_HANDOFF.md](OPS_STATUS_HANDOFF.md)。戻す SQL は `supabase/rollback/20261111140308_tracklog_ops_status_down.sql`（`migrations` の外。自動適用されない）。
 
 `<SUPABASE_PROJECT_REF>` は `supabase/config.toml` の `project_id`。URL は `https://<SUPABASE_PROJECT_REF>.supabase.co/functions/v1/tracklog-ops-status`。
 
@@ -40,9 +40,9 @@ CLI: `supabase secrets set TRACKLOG_OPS_STATUS_TOKEN_SHA256="$HASH" --project-re
 
 ## 3. マイグレーション
 
-SQL Editor に `supabase/migrations/20261111120000_tracklog_ops_status.sql` の全文を貼って Run。
+SQL Editor に `supabase/migrations/20261111140308_tracklog_ops_status.sql` の全文を貼って Run。
 
-CLI（このファイルだけ）: `supabase db query --linked -f supabase/migrations/20261111120000_tracklog_ops_status.sql`
+CLI（このファイルだけ）: `supabase db query --linked -f supabase/migrations/20261111140308_tracklog_ops_status.sql`
 
 確認:
 
@@ -89,4 +89,4 @@ python3 -c "import json; b=json.load(open('/tmp/ops-body.json')); assert b.get('
 - 401 にする: Secrets の `TRACKLOG_OPS_STATUS_TOKEN_SHA256` を、1Password のトークンとは別の 64 桁ハッシュに差し替える。今のトークンはすべて 401 になる。
 - 秘密を消すと 503（`ops_reader_not_configured`）になる。401 にはならない。どちらも行データは変わらない。
 
-関数ごと止める: Dashboard で `tracklog-ops-status` を無効化または削除し、秘密を消す。データベース側は SQL Editor で `supabase/rollback/20261111120000_tracklog_ops_status_down.sql` を実行する。消えるのはその関数と部分索引だけ。
+関数ごと止める: Dashboard で `tracklog-ops-status` を無効化または削除し、秘密を消す。データベース側は SQL Editor で `supabase/rollback/20261111140308_tracklog_ops_status_down.sql` を実行する。消えるのはその関数と部分索引だけ。
