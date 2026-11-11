@@ -4,10 +4,14 @@
 
 do $$
 begin
+  if to_regprocedure('public.tracklog_ops_closed_day(text)') is not null then
+    revoke all on function public.tracklog_ops_closed_day(text) from public, anon, authenticated, service_role;
+  end if;
   if to_regprocedure('public.tracklog_ops_closed_trip(text)') is not null then
     revoke all on function public.tracklog_ops_closed_trip(text) from public, anon, authenticated, service_role;
   end if;
 end;
 $$;
 
+drop function if exists public.tracklog_ops_closed_day(text);
 drop function if exists public.tracklog_ops_closed_trip(text);

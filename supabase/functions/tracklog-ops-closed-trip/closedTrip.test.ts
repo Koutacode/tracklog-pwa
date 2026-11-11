@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
 import { sha256Hex } from '../tracklog-ops-status/auth.ts';
-import { buildClosedTripReport, findSensitive, toJstIso } from '../tracklog-ops-status/derive.ts';
+import { buildClosedDayReport, buildClosedTripReport, findSensitive, toJstIso } from '../tracklog-ops-status/derive.ts';
 import { handleClosedTrip } from './handler.ts';
 
 const TOKEN = 'tracklog-ops-reader-test-token-0123456789';
@@ -138,6 +138,61 @@ assertClean(active, 'active refused');
 const missing = buildClosedTripReport({ closed: false });
 assert.deepEqual(missing, { closed: false });
 
+const spanning = {
+  closed: true,
+  trip_id: TRIP_ID,
+  trip_started_at: '2026-11-10T15:00:00.000Z',
+  trip_ended_at: '2026-11-11T18:00:00.000Z',
+  device_id: DEVICE_ID,
+  latest_lat: CANARY_LAT,
+  events: [
+    event('early', 'load_start', '2026-11-11T00:00:00.000Z', {
+      session_key: 'loadSessionId',
+      session_id: 'load-1',
+      address: '東京都千代田区丸の内一丁目',
+    }),
+    event('early-end', 'load_end', '2026-11-11T02:00:00.000Z', {
+      session_key: 'loadSessionId',
+      session_id: 'load-1',
+    }),
+    event('overnight', 'rest_start', '2026-11-11T14:00:00.000Z', {
+      session_key: 'restSessionId',
+      session_id: 'rest-span',
+      address: '神奈川県横須賀市平成町',
+    }),
+    event('overnight-end', 'rest_end', '2026-11-11T16:00:00.000Z', {
+      session_key: 'restSessionId',
+      session_id: 'rest-span',
+    }),
+    event('next', 'work_start', '2026-11-11T20:00:00.000Z', {
+      session_key: 'workSessionId',
+      session_id: 'work-1',
+    }),
+    event('next-end', 'work_end', '2026-11-11T21:00:00.000Z', {
+      session_key: 'workSessionId',
+      session_id: 'work-1',
+    }),
+  ],
+};
+const dayOne = buildClosedDayReport({ date: '2026-11-11', trips: [spanning, { closed: false, trip_id: TRIP_ID, device_id: DEVICE_ID }] });
+const dayTwo = buildClosedDayReport({ date: '2026-11-12', trips: [spanning] });
+const firstTrips = dayOne.trips as Array<Record<string, unknown>>;
+const secondTrips = dayTwo.trips as Array<Record<string, unknown>>;
+assert.equal(firstTrips.length, 1);
+assert.deepEqual(
+  (firstTrips[0].segments as Array<Record<string, unknown>>).map(item => item.kind),
+  ['load', 'rest'],
+);
+assert.equal((firstTrips[0].segments as Array<Record<string, unknown>>)[1].end_at, '2026-11-12T01:00:00.000+09:00');
+assert.deepEqual(
+  (secondTrips[0].segments as Array<Record<string, unknown>>).map(item => item.kind),
+  ['rest', 'work'],
+);
+assert.equal((secondTrips[0].segments as Array<Record<string, unknown>>)[0].start_at, '2026-11-11T23:00:00.000+09:00');
+assertClean(dayOne, 'day one');
+assertClean(dayTwo, 'day two');
+assert.throws(() => buildClosedDayReport({ date: '2026-02-31', trips: [] }), /invalid_status_payload/);
+
 async function main() {
   const tokenHash = await sha256Hex(TOKEN);
   const calls: string[] = [];
@@ -152,6 +207,7 @@ async function main() {
         calls.push(tripId);
         return closedPayload;
       },
+      callClosedDay: async () => { throw new Error('day lookup was not requested'); },
     },
   );
   const body = await response.json();
@@ -174,6 +230,7 @@ async function main() {
         latest_lat: CANARY_LAT,
         events: closedPayload.events,
       }),
+      callClosedDay: async () => { throw new Error('day lookup was not requested'); },
     },
   );
   assert.equal(refused.status, 200);
@@ -181,16 +238,51 @@ async function main() {
 
   const anonymous = await handleClosedTrip(
     new Request(`https://example.test/tracklog-ops-closed-trip?trip_id=${TRIP_ID}`),
-    { tokenHash, databaseConfigured: true, callClosedTrip: async () => closedPayload },
+    { tokenHash, databaseConfigured: true, callClosedTrip: async () => closedPayload, callClosedDay: async () => closedPayload },
   );
   assert.equal(anonymous.status, 401);
   const wrongKey = await handleClosedTrip(
     new Request(`https://example.test/tracklog-ops-closed-trip?trip_id=${TRIP_ID}`, {
       headers: { Authorization: 'Bearer anon-key-placeholder-not-real' },
     }),
-    { tokenHash, databaseConfigured: true, callClosedTrip: async () => closedPayload },
+    { tokenHash, databaseConfigured: true, callClosedTrip: async () => closedPayload, callClosedDay: async () => closedPayload },
   );
   assert.equal(wrongKey.status, 401);
+
+  const dayCalls: string[] = [];
+  const byDate = await handleClosedTrip(
+    new Request('https://example.test/tracklog-ops-closed-trip?date=2026-11-11', {
+      headers: { Authorization: `Bearer ${TOKEN}` },
+    }),
+    {
+      tokenHash,
+      databaseConfigured: true,
+      callClosedTrip: async () => { throw new Error('trip lookup was not requested'); },
+      callClosedDay: async date => {
+        dayCalls.push(date);
+        return { date, trips: [spanning] };
+      },
+    },
+  );
+  assert.equal(byDate.status, 200);
+  assert.deepEqual(dayCalls, ['2026-11-11']);
+  const dated = await byDate.json();
+  assert.equal(dated.date, '2026-11-11');
+  assertClean(dated, 'http day');
+  const both = await handleClosedTrip(
+    new Request(`https://example.test/tracklog-ops-closed-trip?trip_id=${TRIP_ID}&date=2026-11-11`, {
+      headers: { Authorization: `Bearer ${TOKEN}` },
+    }),
+    { tokenHash, databaseConfigured: true, callClosedTrip: async () => closedPayload, callClosedDay: async () => ({ date: '2026-11-11', trips: [] }) },
+  );
+  assert.equal(both.status, 400);
+  const badDate = await handleClosedTrip(
+    new Request('https://example.test/tracklog-ops-closed-trip?date=2026-02-31', {
+      headers: { Authorization: `Bearer ${TOKEN}` },
+    }),
+    { tokenHash, databaseConfigured: true, callClosedTrip: async () => closedPayload, callClosedDay: async () => ({ date: '2026-02-31', trips: [] }) },
+  );
+  assert.equal(badDate.status, 400);
 
   const liveIndex = await readFile(new URL('../tracklog-ops-status/index.ts', import.meta.url), 'utf8');
   assert.doesNotMatch(liveIndex, /tracklog_ops_closed_trip/);
@@ -199,6 +291,7 @@ async function main() {
   assert.doesNotMatch(migration, /device_id|driver_phone|driver_email|odo_start|trip_route_points|latest_lat/);
   const rollback = await readFile(new URL('../../rollback/20261111144500_tracklog_ops_closed_trip_down.sql', import.meta.url), 'utf8');
   assert.match(rollback, /drop function if exists public\.tracklog_ops_closed_trip\(text\)/);
+  assert.match(rollback, /drop function if exists public\.tracklog_ops_closed_day\(text\)/);
   assert.doesNotMatch(rollback, /drop table|trip_headers|trip_events/i);
 
   console.log('tracklog-ops-closed-trip: closed segments, JST, and leak assertions passed');

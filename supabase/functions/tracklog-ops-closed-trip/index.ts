@@ -23,4 +23,13 @@ Deno.serve((request: Request) => handleClosedTrip(request, {
     }
     return data;
   },
+  callClosedDay: async date => {
+    if (!adminClient) throw new Error('database_not_configured');
+    const { data, error } = await adminClient.rpc('tracklog_ops_closed_day', { _day: date });
+    if (error) {
+      console.error('[tracklog-ops-closed-trip] day_rpc_failed', error.code ?? '');
+      throw new Error('rpc_failed');
+    }
+    return data;
+  },
 }));
