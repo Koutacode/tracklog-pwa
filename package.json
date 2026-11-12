@@ -1,6 +1,6 @@
 {
   "name": "tracklog-assist",
-  "version": "0.1.95",
+  "version": "0.1.96",
   "private": true,
   "description": "Truck operation log native app with offline support and day-based segment calculations.",
   "tracklogRelease": {
