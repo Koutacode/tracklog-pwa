@@ -172,3 +172,26 @@ single `sourceDatasetDate` rather than applying the MLIT snapshot date to OSM.
 The note records the 2026-10-25 verification date separately.
 No Nominatim request is added to the app. No trip, account or driver data belongs
 in this supplement.
+
+## Official ZIP comparison (2026-11-12)
+
+`N06-25_GML.zip` was downloaded again on 2026-11-12 from
+<https://nlftp.mlit.go.jp/ksj/gml/data/N06/N06-25/N06-25_GML.zip>
+(the file linked as `N06-25_GML.zip` on the 2025 dataset page). Size
+8,289,668 bytes. SHA-256
+`742c8785dfb2f900f167972abe00d5c36103365c0f9fb11dc8a883aa358ac23e`,
+the same digest recorded on 2026-10-25.
+
+`scripts/build-mlit-ic-catalog.py` was run on that ZIP. The current kind 1
+and kind 2 names match this bundled catalogue exactly: 1,942 ordinary ICs
+and 164 smart ICs, 2,106 points. No ordinary IC was missing, so
+`catalog-data.ts` was not regenerated and its coordinates were not replaced.
+
+苫小牧東 is not a current ordinary IC in this snapshot. The continuing joint
+(`N06_014 = 9999`) is named `苫小牧東IC/JCT` with `N06_019 = 3` (JCT). The
+older ordinary-IC record named `苫小牧東` has `N06_014 = 1997` and is outside
+the current-year filter. The existing extractor keeps kinds 1 and 2 only, so
+that joint stays out with the other current JCT records: 245 total, of which
+26 are named both IC and JCT, 217 are JCT names, and 2 have neither token
+(`大島南`, `紫川`). Kind 4 stays out as well (33 current joints, including SA
+and PA endpoints). Smart ICs stay in, and none were newly added.
