@@ -5,7 +5,7 @@
 ## 実行順
 
 1. `supabase/migrations/20261112143000_tracklog_preserve_manual_ic_source.sql` を適用する。
-2. `01_select.sql` で対象行を見る。`revision` が 7、`type` が `expressway_end`、`extras.icResolveStatus` が `failed`、IC名が空であること。
+2. `01_select.sql` で対象行を見る。住所の列と座標の列は出さない。`type`、`revision`、extras の IC 関連キーを確認する。
 3. `02_fix.sql` をファイルごと1回実行する。更新が1件でなければ例外になり、トランザクションは戻る。
 4. 戻すときは `03_revert.sql`。`revision` が 8 でないと例外で戻る。修正後に増えた extras のキーは残す。migration 未適用のまま戻すと、現行トリガーが IC名を残すため、手続きが例外を出して戻る。
 
