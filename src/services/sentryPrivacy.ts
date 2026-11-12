@@ -70,6 +70,11 @@ const SAFE_NUMERIC_KEYS = new Set([
   'number',
 ]);
 
+const POSTAL_CODE = /〒?\d{3}-\d{4}(?!-\d)/g;
+const PHONE_NUMBER = /(?<!\d)0\d{1,4}(?:-\d{1,4}){2,3}(?!\d)/g;
+const BLOCK_NUMBER = /(?<!\d)\d{1,4}-\d{1,4}-\d{1,4}(?!\d)/g;
+const HYPHEN_DECIMAL = /(?<![A-Za-z0-9.])([+-]?\d{1,3})-(\d{2,8})(?![A-Za-z0-9])/g;
+const KANJI_ADDRESS_NUMBER = /[〇零一二三四五六七八九十百千]+(?=丁目|番地|番|号)/g;
 const QUERY_COORDINATE = /([?&#](?:lat|latitude|lng|lon|long|longitude|geo|x|y)=)([+-]?\d+(?:\.\d+)?)/gi;
 const COORDINATE_PAIR = /(?<![A-Za-z0-9.])([+-]?\d{1,3}(?:\.\d{1,8})?)\s*(?:[,，]|\/|\s+)\s*([+-]?\d{1,3}(?:\.\d{1,8})?)(?![A-Za-z0-9.])/g;
 const COORDINATE = /(?<![A-Za-z0-9.])[+-]?\d{1,3}\.\d{1,8}(?![A-Za-z0-9])/g;
@@ -84,7 +89,43 @@ const LINE_TEXT = /(?:[A-Za-z0-9_./\\-]+\.(?:ts|tsx|js|mjs|jsx|vue|java|kt)):\d+
 const COUNT_TEXT = /\d+\s*件/g;
 
 function normalizeKey(key: string): string {
-  return key.toLowerCase().replace(/[^a-z0-9]/g, '');
+  return key.normalize('NFKC').toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+const KANJI_DIGIT: Record<string, number> = {
+  〇: 0, 零: 0, 一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9,
+};
+
+function parseKanjiNumber(token: string): number | null {
+  let total = 0;
+  let current = 0;
+  for (const character of token) {
+    if (character in KANJI_DIGIT) {
+      current = KANJI_DIGIT[character];
+      continue;
+    }
+    const unit = character === '十' ? 10 : character === '百' ? 100 : character === '千' ? 1000 : 0;
+    if (!unit) return null;
+    total += (current || 1) * unit;
+    current = 0;
+  }
+  return total + current;
+}
+
+export function foldForScrub(value: string): string {
+  return value
+    .normalize('NFKC')
+    .replace(/\u3000/g, ' ')
+    .replace(/、/g, ',')
+    .replace(/(?<=\d)[・･](?=\d)/g, '.')
+    .replace(/(?<=\d)[－ー−‐‒–—―ｰ](?=\d)/g, '-');
+}
+
+function foldKanjiAddressNumbers(value: string): string {
+  return value.replace(KANJI_ADDRESS_NUMBER, token => {
+    const parsed = parseKanjiNumber(token);
+    return parsed == null ? token : String(parsed);
+  });
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -141,11 +182,18 @@ export function scrubSentryText(value: string): string {
   const times: string[] = [];
   const lines: string[] = [];
   const counts: string[] = [];
-  let text = hold(VERSION_TEXT, value, 'V', versions);
+  let text = foldKanjiAddressNumbers(foldForScrub(value));
+  text = hold(VERSION_TEXT, text, 'V', versions);
   text = hold(TIME_TEXT, text, 'T', times);
   text = hold(LINE_TEXT, text, 'L', lines);
   text = hold(COUNT_TEXT, text, 'C', counts);
   text = text
+    .replace(PHONE_NUMBER, '[filtered]')
+    .replace(POSTAL_CODE, '[filtered]')
+    .replace(BLOCK_NUMBER, '[filtered]')
+    .replace(HYPHEN_DECIMAL, (match, whole: string, fraction: string) => (
+      isStandaloneCoordinate(Number(`${whole}.${fraction}`)) ? '[filtered]' : match
+    ))
     .replace(QUERY_COORDINATE, (match, key: string, numeric: string) => {
       const valueAsNumber = Number(numeric);
       if (!Number.isFinite(valueAsNumber) || Math.abs(valueAsNumber) > 180) return match;
@@ -219,7 +267,13 @@ function scrubNode(value: unknown): unknown {
   const output: Record<string, unknown> = {};
   for (const [key, child] of Object.entries(value)) {
     const normalized = normalizeKey(key);
-    if (WIPED_KEYS.has(normalized) || SENSITIVE_KEYS.has(normalized) || RAW_SENSITIVE_KEYS.has(key)) continue;
+    const foldedKey = key.normalize('NFKC');
+    if (
+      WIPED_KEYS.has(normalized)
+      || SENSITIVE_KEYS.has(normalized)
+      || RAW_SENSITIVE_KEYS.has(key)
+      || RAW_SENSITIVE_KEYS.has(foldedKey)
+    ) continue;
     if (normalized === 'breadcrumbs') {
       output[key] = scrubBreadcrumbList(child);
       continue;

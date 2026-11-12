@@ -161,6 +161,40 @@ assert.equal(coordinateShape?.pair?.longitude, undefined);
 assert.equal(JSON.stringify(coordinateShape).includes('35.681'), false);
 assert.equal(JSON.stringify(coordinateShape).includes('139.767'), false);
 
+const fullwidthEvent = scrubSentryEvent({
+  message: [
+    'バージョン０．１．９５',
+    '失敗１２件',
+    '時刻１３：５８',
+    'ｉｎｄｅｘ．ｔｓ：１２８：４',
+    '座標４０．０００１',
+    '［１４０．０００１，４０．０００１］',
+    '中黒４０・０００１',
+    'ハイフン４０－０００１',
+    '空白４０．０００１　１４０．０００１',
+    '混在架空市40．0001',
+    '架空市架空区九十九町一丁目二番地三号',
+    '〒９９９－００００',
+    '０９０－００００－００００',
+  ].join(' '),
+  'ｌａｔ': '４０．０００１',
+  'ｌｎｇ': '１４０．０００１',
+});
+const fullwidthMessage = fullwidthEvent?.message ?? '';
+for (const kept of ['0.1.95', '12件', '13:58', 'index.ts:128:4']) {
+  assert.equal(fullwidthMessage.includes(kept), true, `全角で書かれた ${kept} は半角で残す`);
+}
+for (const leaked of [
+  '４０', '４０．０００１', '40.0001', '１４０', '140.0001',
+  '架空市', '架空区', '九十九町', '一丁目', '1丁目', '二番地', '2番地', '三号',
+  '９９９', '999-0000', '０９０', '090-0000-0000', '-0000', '0000',
+]) {
+  assert.equal(fullwidthMessage.includes(leaked), false, `全角の位置情報が残っています: ${leaked}`);
+}
+assert.equal(fullwidthEvent?.['ｌａｔ'], undefined);
+assert.equal((fullwidthEvent as { lat?: unknown } | null)?.lat, undefined);
+assert.equal(fullwidthEvent?.['ｌｎｇ'], undefined);
+
 async function main() {
   Object.assign(globalThis, {
     __APP_VERSION__: '0.1.95',
