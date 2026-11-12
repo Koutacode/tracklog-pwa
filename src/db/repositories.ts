@@ -43,7 +43,7 @@ import {
   resolveTogglePairing,
 } from '../domain/togglePairing';
 import { planEventTypeConversion } from '../domain/eventTypeConversion';
-import { mergeIcMetadata, type IcNameEstimate } from '../domain/icMetadata';
+import { hasManualIcMarker, mergeIcMetadata, type IcNameEstimate } from '../domain/icMetadata';
 import {
   assertExpresswayEndCommitAuthorization,
   type ExpresswayEndCommitAuthorization,
@@ -2223,7 +2223,7 @@ export async function getPendingExpresswayEvents(
 
 /** Missing names may acquire bounded local evidence without renewing network retries. */
 export function canRecoverExhaustedExpresswayIcLocally(extras?: Record<string, unknown>): boolean {
-  return extras?.icResolvedManually !== true
+  return !hasManualIcMarker(extras)
     && !(typeof extras?.icName === 'string' && extras.icName.trim())
     && extras?.icResolveStatus === 'failed'
     && getIcResolveAlgorithmVersionFromExtras(extras) === IC_RESOLVE_ALGORITHM_VERSION
@@ -2397,7 +2397,7 @@ export async function updateExpresswayResolved(params: {
   await db.transaction('rw', db.events, async () => {
     const ev = await db.events.get(params.eventId);
     if (!ev) return;
-    if (ev.extras?.icResolvedManually === true && !(params.status === 'resolved'
+    if (hasManualIcMarker(ev.extras) && !(params.status === 'resolved'
       && params.clearManualResolution && !params.estimate && params.guard?.allowExistingManual)) return;
     if (
       params.guard
@@ -2448,6 +2448,10 @@ export async function updateExpresswayResolved(params: {
       if (params.clearManualResolution) {
         delete extras.icResolvedManually;
         delete extras.icResolveManualUpdatedAt;
+        if (extras.icResolveSource === 'manual') {
+          delete extras.icResolveSource;
+          delete extras.manualFixPreviousExtras;
+        }
         extras.icResolveManualClearedAt = new Date(Math.max(Date.now(),
           Date.parse(String(ev.extras?.icResolveManualUpdatedAt ?? '')) || 0)).toISOString();
       }
@@ -2497,7 +2501,7 @@ export async function markExpresswayResolveFailure(params: {
   await db.transaction('rw', db.events, async () => {
     const ev = await db.events.get(params.eventId);
     if (!ev) return;
-    if (ev.extras?.icResolvedManually === true) return;
+    if (hasManualIcMarker(ev.extras)) return;
     if (
       params.guard
       && !canApplyIcResolutionResult(

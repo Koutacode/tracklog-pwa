@@ -1,3 +1,4 @@
+import { hasManualIcMarker } from '../domain/icMetadata';
 import type { BaseEvent } from '../domain/types';
 
 export const IC_RESOLVE_RETRY_LIMIT = 6;
@@ -51,7 +52,7 @@ export function captureIcResolutionEventVersion(
     syncMutationId: normalizedVersionText(event.syncMutationId),
     status: normalizedVersionText(event.extras?.icResolveStatus),
     name: normalizedVersionText(event.extras?.icName),
-    resolvedManually: event.extras?.icResolvedManually === true,
+    resolvedManually: hasManualIcMarker(event.extras),
     manualUpdatedAt: normalizedVersionText(event.extras?.icResolveManualUpdatedAt),
     // Snapshot primitive inputs instead of holding mutable geo/extras objects.
     // Address completion and sync acknowledgement may change the general row
@@ -79,7 +80,8 @@ export function canApplyIcResolutionResult(
   options?: { allowExistingManual?: boolean },
 ): boolean {
   const current = captureIcResolutionEventVersion(currentEvent);
-  if (current.resolvedManually && options?.allowExistingManual !== true) return false;
+  if ((current.resolvedManually || hasManualIcMarker(currentEvent.extras))
+    && options?.allowExistingManual !== true) return false;
   const sameInput = expected.inputSignature != null && current.inputSignature != null
     ? expected.inputSignature === current.inputSignature
     : current.localRevision === expected.localRevision && current.syncMutationId === expected.syncMutationId;
@@ -121,7 +123,7 @@ export function canRecoverExhaustedIcResolve(
   nowMs: number,
   observedMapSuccessAt: number,
 ): boolean {
-  if (extras?.icResolvedManually === true
+  if (hasManualIcMarker(extras)
     || (typeof extras?.icName === 'string' && extras.icName.trim())
     || extras?.icResolveStatus !== 'failed'
     || getIcResolveAlgorithmVersion(extras) !== IC_RESOLVE_ALGORITHM_VERSION
@@ -173,7 +175,7 @@ export function canRetryIcResolve(
   _legacyIgnorePendingBackoff = false,
 ): boolean {
   // Automatic recovery never replaces a driver's explicit correction.
-  if (extras?.icResolvedManually === true) return false;
+  if (hasManualIcMarker(extras)) return false;
   const icName = extras?.icName;
   const status = extras?.icResolveStatus;
   // Legacy named events did not always persist a status. Keep those stable, but

@@ -30,6 +30,9 @@ const IC_METADATA_MIGRATION_PATH = path.join(
 const IC_ALGORITHM_PRECEDENCE_MIGRATION_PATH = path.join(
   ROOT, "supabase", "migrations", "20261006125438_tracklog_ic_metadata_algorithm_precedence.sql",
 );
+const IC_MANUAL_SOURCE_MIGRATION_PATH = path.join(
+  ROOT, "supabase", "migrations", "20261112143000_tracklog_preserve_manual_ic_source.sql",
+);
 const ROLLBACK_PATH = path.join(ROOT, "docs", "sql", "rollback-tracklog-sync-v2-reduce-disk-io.sql");
 
 const OWNER_ID = "11111111-1111-4111-8111-111111111111";
@@ -638,6 +641,11 @@ try {
     await db.exec(migration);
     await db.exec(migration);
     assert.deepEqual((await firstRow(metadataSql)).metadata, before);
+    const manualSourceMigration = await readFile(IC_MANUAL_SOURCE_MIGRATION_PATH, "utf8");
+    assert.doesNotMatch(manualSourceMigration, /\b(?:delete from|update public|alter table|create trigger|grant|revoke)\b/i);
+    await db.exec(manualSourceMigration);
+    await db.exec(manualSourceMigration);
+    assert.deepEqual((await firstRow(metadataSql)).metadata, before);
   });
 
   await check("retains service-role-only RPC access, device approval, owner and input validation", async () => {
@@ -833,6 +841,92 @@ try {
     assert.equal(event.extras.icName, "再取得確認済みIC");
     assert.equal(event.extras.icResolveManualClearedAt, "2026-07-10T01:40:00.000Z");
     assert.deepEqual(event.extras.icNameEstimate, icEstimate);
+  });
+  await check("keeps a direct source marker and its previous extras, and honors an explicit clear", async () => {
+    const previous = { icResolveStatus: "failed", icResolveRetryCount: 6, icResolveAlgorithmVersion: 16,
+      icResolveError: "synthetic upstream failure", expresswaySessionId: "synthetic-session", odo: 150 };
+    let event = await createIcFixture({ ...previous, icName: "合成直接修正IC", icResolveStatus: "resolved",
+      icResolvedManually: true, icResolveSource: "manual", icResolveRetryCount: 0,
+      icResolveManualUpdatedAt: "2026-11-12T00:00:00.000Z", manualFixPreviousExtras: previous });
+    event = await writeIcFixture(event, previous);
+    assert.equal(event.extras.icName, "合成直接修正IC");
+    assert.equal(event.extras.icResolveSource, "manual");
+    assert.deepEqual(event.extras.manualFixPreviousExtras, previous);
+    assert.equal(event.extras.odo, 150);
+    event = await writeIcFixture(event, { ...previous, icResolveManualClearedAt: "2026-11-12T00:05:00.000Z" });
+    assert.equal(event.extras.icName, undefined);
+    assert.equal(event.extras.icResolveStatus, "failed");
+    assert.equal(event.extras.icResolveSource, undefined);
+    assert.equal(event.extras.manualFixPreviousExtras, undefined);
+    assert.equal(event.extras.expresswaySessionId, "synthetic-session");
+    assert.equal(event.extras.odo, 150);
+  });
+  await check("applies the one-row manual correction and its revert without keeping a failed name", async () => {
+    const eventId = "4533fb3a-0089-46fc-be86-4bab94eff9a3";
+    const tripId = "e9dd021b-0a3f-4df9-b555-f220022bfb00";
+    const sessionId = "6b582a3d-65da-4bd9-b527-0e0cebece2b1";
+    const failed = {
+      icResolveStatus: "failed",
+      icResolveError: "synthetic upstream failure",
+      expresswaySessionId: sessionId,
+      icResolveRetryCount: 6,
+      icResolveLastAttemptAt: "2026-11-11T14:52:37.864Z",
+      icResolveAlgorithmVersion: 16,
+    };
+    assert.equal((await sync([tripMutation(nextMutationId(), tripId)])).acks[0].status, "applied");
+    assert.equal((await sync([eventMutation(nextMutationId(), eventId, tripId, 0, {
+      type: "expressway_end",
+      address: "北海道苫小牧市あけぼの町",
+      geo: null,
+      extras: failed,
+    })])).acks[0].status, "applied");
+    await db.exec("reset role");
+    await db.exec("alter table public.trip_events disable trigger tracklog_sync_touch_trip_events");
+    await db.query("update public.trip_events set revision = 7 where id = $1", [eventId]);
+    await db.exec("alter table public.trip_events enable trigger tracklog_sync_touch_trip_events");
+    const before = await firstRow("select revision, change_seq from public.trip_events where id = $1", [eventId]);
+    assert.equal(Number(before.revision), 7);
+    await db.exec(await readFile(path.join(
+      ROOT, "docs/sql/2026-11-12_tomakomai-higashi-ic-fix/02_fix.sql"), "utf8"));
+    const fixed = await firstRow("select revision, change_seq, extras from public.trip_events where id = $1", [eventId]);
+    assert.equal(Number(fixed.revision), 8);
+    assert.ok(Number(fixed.change_seq) > Number(before.change_seq));
+    assert.equal(fixed.extras.icName, "苫小牧東IC");
+    assert.equal(fixed.extras.icResolveStatus, "resolved");
+    assert.equal(fixed.extras.icResolveSource, "manual");
+    assert.equal(fixed.extras.icResolvedManually, true);
+    assert.equal(fixed.extras.expresswaySessionId, sessionId);
+    assert.equal(fixed.extras.manualFixPreviousExtras.icResolveStatus, "failed");
+    assert.equal(fixed.extras.icResolveError, undefined);
+    const revertSql = await readFile(path.join(
+      ROOT, "docs/sql/2026-11-12_tomakomai-higashi-ic-fix/03_revert.sql"), "utf8");
+    await db.exec("reset role");
+    await db.exec("alter table public.trip_events disable trigger tracklog_sync_touch_trip_events");
+    await db.query(
+      "update public.trip_events set extras = extras || jsonb_build_object('laterNote', 'added after the fix') where id = $1",
+      [eventId],
+    );
+    await db.query("update public.trip_events set revision = 9 where id = $1", [eventId]);
+    await db.exec("alter table public.trip_events enable trigger tracklog_sync_touch_trip_events");
+    await assert.rejects(() => db.exec(revertSql), /revision 8/);
+    await db.exec("rollback");
+    const blocked = await firstRow("select revision, extras from public.trip_events where id = $1", [eventId]);
+    assert.equal(Number(blocked.revision), 9);
+    assert.equal(blocked.extras.icName, "苫小牧東IC");
+    assert.equal(blocked.extras.laterNote, "added after the fix");
+    await db.exec("alter table public.trip_events disable trigger tracklog_sync_touch_trip_events");
+    await db.query("update public.trip_events set revision = 8 where id = $1", [eventId]);
+    await db.exec("alter table public.trip_events enable trigger tracklog_sync_touch_trip_events");
+    await db.exec(revertSql);
+    const reverted = await firstRow("select revision, change_seq, extras from public.trip_events where id = $1", [eventId]);
+    assert.equal(Number(reverted.revision), 9);
+    assert.ok(Number(reverted.change_seq) > Number(fixed.change_seq));
+    assert.equal(reverted.extras.icName, undefined);
+    assert.equal(reverted.extras.icResolveStatus, "failed");
+    assert.equal(reverted.extras.icResolveSource, undefined);
+    assert.equal(reverted.extras.expresswaySessionId, sessionId);
+    assert.equal(reverted.extras.icResolveRetryCount, 6);
+    assert.equal(reverted.extras.laterNote, "added after the fix");
   });
   await check("does not resurrect a manual value whose timestamp equals the explicit clearing marker", async () => {
     let event = await createIcFixture({ icName: "再取得確認済みIC", icResolveStatus: "resolved",
