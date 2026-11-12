@@ -70,9 +70,23 @@ for (const [state, at] of [
   'cooldown, clock rollback, stale or corrupt receipt fails closed');
 
 assertEqual(
-  canRetryIcResolve({ icName: '札幌IC', icResolveAlgorithmVersion: 1 }, nowMs),
+  canRetryIcResolve({
+    icName: '合成手動IC',
+    icResolveStatus: 'failed',
+    icResolveRetryCount: 6,
+    icResolveAlgorithmVersion: 1,
+    icResolveSource: 'manual',
+  }, nowMs),
   false,
-  'an already named event is never reprocessed just because its algorithm is old',
+  'a manual source marker blocks retries even when the algorithm is stale and the status is still failed',
+);
+assertEqual(
+  canRecoverExhaustedIcResolve({
+    ...exhausted,
+    icResolveSource: 'manual',
+  }, nowMs, nowMs),
+  false,
+  'a manual source marker does not reopen the one exhausted recovery',
 );
 assertEqual(
   canRetryIcResolve({

@@ -69,6 +69,9 @@ const cases: { name: string; extras: Record<string, unknown>; label: string; sta
   }, label: '合成北入口 / 合成南入口（推定候補） / 未確定', state: 'estimated' },
   { name: 'confirmed name', extras: { icName: '合成確定IC', icResolveStatus: 'resolved' },
     label: '合成確定IC', state: 'resolved' },
+  { name: 'manual source marker without the boolean', extras: {
+    icName: '合成手動IC', icResolveStatus: 'resolved', icResolveSource: 'manual',
+  }, label: '合成手動IC（手動修正）', state: 'manual' },
   { name: 'manual with historic estimate and pending', extras: {
     icName: '合成手動IC', icNameEstimate: estimate, icResolveStatus: 'pending', icResolvedManually: true,
   }, label: '合成手動IC（手動修正）', state: 'manual' },

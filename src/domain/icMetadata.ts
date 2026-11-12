@@ -12,11 +12,17 @@ export type IcNameEstimate = {
 
 export const IC_METADATA_FIELDS = [
   'icName', 'icNameEstimate', 'icNameEstimateHistory', 'icDistanceM', 'icResolveStatus', 'icResolveAlgorithmVersion',
-  'icResolvedManually', 'icResolveManualUpdatedAt', 'icResolveManualClearedAt',
+  'icResolvedManually', 'icResolveSource', 'icResolveManualUpdatedAt', 'icResolveManualClearedAt',
+  'manualFixPreviousExtras',
   'icResolveGeoSource', 'icResolveGeoOffsetSeconds', 'icResolveRetryCount',
   'icResolveNextRetryAt', 'icResolveLastAttemptAt', 'icResolveError',
   'icNameSearchSourceId', 'icNameSearchAddressUpdated',
 ] as const;
+
+/** A direct correction must survive retries, algorithm bumps, and stale device writes. */
+export function hasManualIcMarker(extras: Record<string, unknown> | null | undefined): boolean {
+  return extras?.icResolvedManually === true || extras?.icResolveSource === 'manual';
+}
 
 export function icMetadataText(value: unknown): string | null {
   return typeof value === 'string' && value.trim() ? value.trim() : null;
@@ -28,7 +34,7 @@ function timestamp(value: unknown): number {
 }
 
 export function isEstimatedIcName(extras: Record<string, unknown> | undefined): boolean {
-  if (extras?.icResolvedManually === true) return false;
+  if (hasManualIcMarker(extras)) return false;
   const name = icMetadataText(extras?.icName);
   if (name && /[（(]推定(?:候補)?[）)]/.test(name)) return true;
   const estimate = extras?.icNameEstimate;
@@ -65,8 +71,8 @@ export function mergeIcMetadata(
   const result = { ...incoming };
   const oldName = icMetadataText(existing.icName);
   const nextName = icMetadataText(incoming?.icName);
-  const oldManual = existing.icResolvedManually === true && !!oldName;
-  const nextManual = incoming?.icResolvedManually === true && !!nextName;
+  const oldManual = hasManualIcMarker(existing) && !!oldName;
+  const nextManual = hasManualIcMarker(incoming) && !!nextName;
   const clearedAt = timestamp(incoming?.icResolveManualClearedAt);
   const oldManualAt = timestamp(existing.icResolveManualUpdatedAt);
   const nextManualAt = timestamp(incoming?.icResolveManualUpdatedAt);
@@ -111,16 +117,20 @@ export function mergeIcMetadata(
       delete result[key];
       if (Object.prototype.hasOwnProperty.call(existing, key)) result[key] = existing[key];
     }
-  } else if (preserveAddressCandidates || (oldName && !nextName)) {
+  } else if (preserveAddressCandidates || (oldName && !nextName && !(oldManual && explicitManualClear))) {
     // A failure may update progress, but a previously saved estimate stays visible.
+    // An explicit clear is the only way back to the saved pre-correction extras.
     for (const key of ['icName', 'icDistanceM', 'icResolveGeoSource', 'icResolveGeoOffsetSeconds'] as const) {
       delete result[key];
       if (Object.prototype.hasOwnProperty.call(existing, key)) result[key] = existing[key];
     }
     if (preserveAddressCandidates) result.icNameEstimate = existing.icNameEstimate;
   }
-  if (!result.icNameEstimate && existing.icNameEstimate) result.icNameEstimate = existing.icNameEstimate;
+  if (!result.icNameEstimate && existing.icNameEstimate && !(oldManual && explicitManualClear && !nextName)) {
+    result.icNameEstimate = existing.icNameEstimate;
+  }
   if (!keepOldResolution && ['pending', 'failed'].includes(String(incoming?.icResolveStatus))
+    && !(oldManual && explicitManualClear)
     && (olderAlgorithm || (!incomingProvenNewer
       && timestamp(existing.icResolveLastAttemptAt) > timestamp(incoming?.icResolveLastAttemptAt)))) {
     for (const key of ['icResolveStatus', 'icResolveAlgorithmVersion', 'icResolveRetryCount',

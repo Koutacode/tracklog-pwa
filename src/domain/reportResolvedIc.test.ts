@@ -179,4 +179,33 @@ assert.equal(mergeIcMetadata({ ...skewed, icResolveAlgorithmVersion: 16 }, catal
   { incomingIsNewer: true })?.icName, catalogueEstimate.displayName, 'a proven local lookup survives a backward clock adjustment');
 assert.equal(mergeIcMetadata(catalogueResult, skewed, { incomingIsNewer: true })?.icName, catalogueEstimate.displayName,
   'an old algorithm cannot return merely by carrying a later clock or sync revision');
+
+const previousFailure = {
+  icResolveStatus: 'failed', icResolveRetryCount: 6, icResolveAlgorithmVersion: 16,
+  icResolveError: 'synthetic upstream failure', expresswaySessionId: 'synthetic-session',
+};
+const directFix = {
+  ...previousFailure,
+  icName: '合成手動IC',
+  icResolveStatus: 'resolved',
+  icResolvedManually: true,
+  icResolveSource: 'manual',
+  icResolveManualUpdatedAt: '2026-11-12T00:00:00.000Z',
+  icResolveRetryCount: 0,
+  manualFixPreviousExtras: previousFailure,
+};
+delete (directFix as { icResolveError?: string }).icResolveError;
+const replayedFailure = mergeIcMetadata(directFix, previousFailure);
+assert.equal(replayedFailure?.icName, '合成手動IC', 'a stale failed payload cannot replace a direct correction');
+assert.equal(replayedFailure?.icResolveSource, 'manual');
+assert.deepEqual(replayedFailure?.manualFixPreviousExtras, previousFailure,
+  'the pre-correction extras survive a device replay');
+const cleared = mergeIcMetadata(directFix, {
+  ...previousFailure,
+  icResolveManualClearedAt: '2026-11-12T00:05:00.000Z',
+});
+assert.equal(cleared?.icName, undefined, 'an explicit clear returns to the unnamed failure');
+assert.equal(cleared?.icResolveStatus, 'failed');
+assert.equal(cleared?.manualFixPreviousExtras, undefined);
+assert.equal(cleared?.icResolveSource, undefined);
 console.log('reportResolvedIc: read projection assertions passed');

@@ -7,6 +7,8 @@ export type ExpresswayIcDisplay = {
   state: ExpresswayIcDisplayState;
 };
 
+import { hasManualIcMarker } from './icMetadata';
+
 function text(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
 }
@@ -48,7 +50,7 @@ function latestCatalogueSupplement(
 /** Presentation only: never promotes address estimates or alters event data. */
 export function getExpresswayIcDisplay(extras: Record<string, unknown> = {}): ExpresswayIcDisplay {
   const name = text(extras.icName);
-  const manual = extras.icResolvedManually === true && !!name;
+  const manual = hasManualIcMarker(extras) && !!name;
   const estimate = extras.icNameEstimate;
   const savedEstimateName = estimate && typeof estimate === 'object'
     ? text((estimate as Record<string, unknown>).displayName) : undefined;
