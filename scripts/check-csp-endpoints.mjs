@@ -13,6 +13,10 @@ const requiredConnectSources = [
   { source: 'https://firebaseinstallations.googleapis.com', reason: 'Firebase web push installation token' },
   { source: 'https://fcmregistrations.googleapis.com', reason: 'Firebase web push registration token' },
   { source: 'https://firebaselogging.googleapis.com', reason: 'Firebase push delivery/open metrics' },
+  { source: 'https://*.ingest.sentry.io', reason: 'Sentry error reports' },
+  { source: 'https://*.ingest.us.sentry.io', reason: 'Sentry error reports (US)' },
+  { source: 'https://*.ingest.de.sentry.io', reason: 'Sentry error reports (DE)' },
+  { source: 'https://*.ingest.eu.sentry.io', reason: 'Sentry error reports (EU)' },
 ];
 
 const cspMatch = indexHtml.match(

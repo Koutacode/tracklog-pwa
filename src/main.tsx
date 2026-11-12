@@ -9,6 +9,9 @@ import {
   isTracklogNativeAuthCallbackUrl,
   persistNativeAuthCallbackUrl,
 } from './services/nativeAuthCallbackPersistence';
+import { initTracklogSentry } from './services/sentry';
+
+initTracklogSentry();
 
 // Mount the root component into the DOM. The strict mode helps catch
 // unexpected side effects during development. Production builds omit it.
