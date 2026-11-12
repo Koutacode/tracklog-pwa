@@ -268,6 +268,90 @@ final class ResidentLocationQueue {
     }
 
     /**
+     * Reads queued points without moving the drain cursor or the WebView peek markers.
+     * The WebView remains the only consumer that copies a point into Dexie and then acks it.
+     */
+    static List<JSONObject> snapshotUnacknowledged(
+            Context context,
+            int limit,
+            Set<String> skipIds
+    ) throws Exception {
+        int cappedLimit = Math.max(1, Math.min(limit, 500));
+        Set<String> skip = skipIds == null ? Collections.emptySet() : skipIds;
+        synchronized (DRAIN_LOCK) {
+            File directory = context.getFilesDir();
+            recover(directory);
+            List<JSONObject> points = new ArrayList<>();
+            Set<String> seen = new HashSet<>();
+            int[] scanned = new int[] {0};
+            for (File file : readableSpools(directory)) {
+                if (!appendSnapshot(
+                        file,
+                        ResidentLocationSpoolStore.readCursor(file, ResidentLocationSpoolStore.DEFAULT_RENAME),
+                        cappedLimit,
+                        skip,
+                        seen,
+                        scanned,
+                        points
+                )) {
+                    return points;
+                }
+            }
+            synchronized (FILE_LOCK) {
+                recoverActiveLocked(directory);
+                File active = new File(directory, QUEUE_FILE_NAME);
+                if (active.exists() && active.length() > 0L) {
+                    appendSnapshot(active, 0L, cappedLimit, skip, seen, scanned, points);
+                }
+            }
+            return points;
+        }
+    }
+
+    private static List<File> readableSpools(File directory) {
+        List<File> readable = new ArrayList<>();
+        for (File file : ResidentLocationSpoolStore.orderedSpoolFiles(directory, DATA_SPOOL_PREFIX)) {
+            long cursor = ResidentLocationSpoolStore.readCursor(
+                    file,
+                    ResidentLocationSpoolStore.DEFAULT_RENAME
+            );
+            if (cursor < file.length()) readable.add(file);
+        }
+        return readable;
+    }
+
+    private static boolean appendSnapshot(
+            File file,
+            long cursor,
+            int limit,
+            Set<String> skip,
+            Set<String> seen,
+            int[] scanned,
+            List<JSONObject> points
+    ) throws Exception {
+        try (RandomAccessFile input = new RandomAccessFile(file, "r")) {
+            long start = Math.max(0L, Math.min(cursor, file.length()));
+            input.seek(start);
+            String encoded;
+            while ((encoded = input.readLine()) != null) {
+                if (scanned[0] >= 20_000) return false;
+                scanned[0] += 1;
+                String line = new String(
+                        encoded.getBytes(StandardCharsets.ISO_8859_1),
+                        StandardCharsets.UTF_8
+                );
+                JSONObject point = parsePoint(line);
+                if (point == null) continue;
+                String id = point.optString("id", "").trim();
+                if (id.isEmpty() || !seen.add(id) || skip.contains(id)) continue;
+                points.add(point);
+                if (points.size() >= limit) return false;
+            }
+        }
+        return true;
+    }
+
+    /**
      * Seals a quiet active file so a trip that stopped below the size cap is still represented by
      * an immutable spool. Appends and drains use the same lock order, so a partial active write is
      * never renamed underneath either operation.

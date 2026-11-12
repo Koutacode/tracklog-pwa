@@ -4,6 +4,7 @@ import { buildNativeSetupReadiness, type NativeSetupSnapshot } from '../services
 import {
   canUseNativeResidentLocation,
   drainNativeResidentRoutePointQueue,
+  nativeRoutePointSyncMutationId,
   orderNativeResidentRoutePoints,
   resolveNativeLocationSetupAction,
   resolveUnapprovedNativeLocationAction,
@@ -407,6 +408,27 @@ async function runAsyncTests() {
     addRoutePoint: async () => undefined,
   });
   assertEqual(pwaPeekCalled, false, 'PWA does not invoke the native queue bridge');
+
+  const pointId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  assertEqual(nativeRoutePointSyncMutationId(pointId), pointId, 'a route point UUID is its sync mutation id');
+  assertEqual(nativeRoutePointSyncMutationId(' point-1 '), null, 'legacy non-UUID ids keep a Dexie-generated mutation id');
+  const mutationIds: string[] = [];
+  await drainNativeResidentRoutePointQueue({
+    enabled: true,
+    peek: async () => ({
+      points: [point({ id: pointId }), point({ id: 'legacy-point' })],
+      remaining: 0,
+    }),
+    acknowledge: async () => ({ remaining: 0 }),
+    addRoutePoint: async routePoint => {
+      mutationIds.push(routePoint.syncMutationId ?? '');
+    },
+  });
+  assertEqual(
+    mutationIds.join(','),
+    `${pointId},`,
+    'Dexie receives the same mutation id the native uploader uses, and only for UUID point ids',
+  );
 
   console.log(`nativeResidentLocationPolicy: ${assertionCount} assertions passed`);
 }

@@ -980,12 +980,21 @@ export async function addEvent(event: AppEvent) {
   notifyRemoteMutation(`event-${event.type}`);
 }
 
+const ROUTE_POINT_SYNC_MUTATION_ID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function acceptedRoutePointSyncMutationId(value: string | undefined): string | undefined {
+  const normalized = value?.trim() ?? '';
+  return ROUTE_POINT_SYNC_MUTATION_ID.test(normalized) ? normalized : undefined;
+}
+
 export async function addRoutePoint(point: Omit<RoutePoint, 'id'> & { id?: string }): Promise<RoutePoint> {
   if (point.id) {
     const existing = await db.routePoints.get(point.id);
     if (existing) return existing;
   }
   const id = point.id ?? uuid();
+  const syncMutationId = acceptedRoutePointSyncMutationId(point.syncMutationId);
   const row: RoutePoint = {
     id,
     tripId: point.tripId,
@@ -997,6 +1006,7 @@ export async function addRoutePoint(point: Omit<RoutePoint, 'id'> & { id?: strin
     speed: normalizeRoutePointSpeed(point.speed),
     heading: normalizeRoutePointHeading(point.heading),
     source: point.source,
+    ...(syncMutationId ? { syncMutationId } : {}),
   };
   await db.routePoints.put(row);
   notifyRemoteMutation('route-point');
