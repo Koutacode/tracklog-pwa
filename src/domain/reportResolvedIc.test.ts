@@ -208,4 +208,18 @@ assert.equal(cleared?.icName, undefined, 'an explicit clear returns to the unnam
 assert.equal(cleared?.icResolveStatus, 'failed');
 assert.equal(cleared?.manualFixPreviousExtras, undefined);
 assert.equal(cleared?.icResolveSource, undefined);
+const refreshedIncoming = {
+  expresswaySessionId: directFix.expresswaySessionId,
+  icResolveAlgorithmVersion: directFix.icResolveAlgorithmVersion,
+  icResolveRetryCount: directFix.icResolveRetryCount,
+  icName: '再取得した合成IC',
+  icResolveStatus: 'resolved',
+  icResolveLastAttemptAt: '2026-11-12T00:10:00.000Z',
+  icResolveManualClearedAt: '2026-11-12T00:10:00.000Z',
+};
+const refreshed = mergeIcMetadata(directFix, refreshedIncoming, { incomingIsNewer: true });
+assert.equal(refreshed?.icName, '再取得した合成IC', 'clearing the manual source keeps the newly resolved name');
+assert.equal(refreshed?.icResolveSource, undefined);
+assert.equal(refreshed?.manualFixPreviousExtras, undefined);
+assert.equal(refreshed?.icResolveStatus, 'resolved');
 console.log('reportResolvedIc: read projection assertions passed');

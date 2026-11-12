@@ -1,6 +1,8 @@
--- 02_fix.sql の手動修正を、残してある extras へ戻す。エージェントからは実行しない。
+-- 02_fix.sql の手動修正を、残してある IC の失敗状態へ戻す。エージェントからは実行しない。
+-- extras 全体は置き換えない。修正のあとで増えたキーは残す。
+-- revision が 8 でないときは例外を出し、トランザクションは ROLLBACK する。
 -- supabase/migrations/20261112143000_tracklog_preserve_manual_ic_source.sql を先に適用する。
--- 未適用だと、更新件数は1でもトリガーが IC名を残す。その場合はこの手続きが例外を出して ROLLBACK する。
+-- 未適用だと、更新件数は1でもトリガーが IC名を残す。その場合も例外で ROLLBACK する。
 -- 戻す extras には icResolveManualClearedAt を足す。これが無いと手動修正を消せない。
 -- revision / change_seq / updated_at は既存トリガーが上げる。
 
@@ -26,6 +28,10 @@ BEGIN
     RAISE EXCEPTION 'target event was not found';
   END IF;
 
+  IF v_row.revision IS DISTINCT FROM 8 THEN
+    RAISE EXCEPTION 'revert requires revision 8';
+  END IF;
+
   v_previous := v_row.extras->'manualFixPreviousExtras';
   IF v_row.trip_id IS DISTINCT FROM v_trip
      OR v_row.type IS DISTINCT FROM 'expressway_end'
@@ -47,12 +53,20 @@ BEGIN
     ) AT TIME ZONE 'UTC',
     'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'
   );
-  v_restored := (v_previous
-    - 'lat' - 'lng' - 'lon' - 'geo' - 'latitude' - 'longitude'
-    - 'manualFixPreviousExtras' - 'icResolveSource' - 'icResolvedManually'
-    - 'icName' - 'icResolveManualUpdatedAt' - 'icDistanceM'
-    - 'icResolveGeoSource' - 'icResolveGeoOffsetSeconds')
-    || jsonb_build_object('icResolveManualClearedAt', v_cleared_at);
+  v_restored := (
+    (v_row.extras
+      - 'lat' - 'lng' - 'lon' - 'geo' - 'latitude' - 'longitude'
+      - 'icName' - 'icResolvedManually' - 'icResolveSource' - 'icResolveManualUpdatedAt'
+      - 'manualFixPreviousExtras' - 'icDistanceM' - 'icResolveGeoSource' - 'icResolveGeoOffsetSeconds'
+      - 'icResolveStatus' - 'icResolveError' - 'icResolveRetryCount' - 'icResolveLastAttemptAt'
+      - 'icResolveNextRetryAt' - 'icResolveAlgorithmVersion')
+    || (v_previous
+      - 'lat' - 'lng' - 'lon' - 'geo' - 'latitude' - 'longitude'
+      - 'manualFixPreviousExtras' - 'icResolveSource' - 'icResolvedManually'
+      - 'icName' - 'icResolveManualUpdatedAt' - 'icDistanceM'
+      - 'icResolveGeoSource' - 'icResolveGeoOffsetSeconds')
+    || jsonb_build_object('icResolveManualClearedAt', v_cleared_at)
+  );
 
   UPDATE public.trip_events
   SET extras = v_restored

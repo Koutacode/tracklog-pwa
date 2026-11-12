@@ -1,3 +1,5 @@
+import { hasManualIcMarker } from './icMetadata';
+
 export type ExpresswayIcDisplayState = 'resolved' | 'manual' | 'estimated' | 'pending' | 'failed' | 'unresolved';
 
 export type ExpresswayIcDisplay = {
@@ -6,8 +8,6 @@ export type ExpresswayIcDisplay = {
   detail: string;
   state: ExpresswayIcDisplayState;
 };
-
-import { hasManualIcMarker } from './icMetadata';
 
 function text(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;

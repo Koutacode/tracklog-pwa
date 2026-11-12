@@ -898,8 +898,26 @@ try {
     assert.equal(fixed.extras.expresswaySessionId, sessionId);
     assert.equal(fixed.extras.manualFixPreviousExtras.icResolveStatus, "failed");
     assert.equal(fixed.extras.icResolveError, undefined);
-    await db.exec(await readFile(path.join(
-      ROOT, "docs/sql/2026-11-12_tomakomai-higashi-ic-fix/03_revert.sql"), "utf8"));
+    const revertSql = await readFile(path.join(
+      ROOT, "docs/sql/2026-11-12_tomakomai-higashi-ic-fix/03_revert.sql"), "utf8");
+    await db.exec("reset role");
+    await db.exec("alter table public.trip_events disable trigger tracklog_sync_touch_trip_events");
+    await db.query(
+      "update public.trip_events set extras = extras || jsonb_build_object('laterNote', 'added after the fix') where id = $1",
+      [eventId],
+    );
+    await db.query("update public.trip_events set revision = 9 where id = $1", [eventId]);
+    await db.exec("alter table public.trip_events enable trigger tracklog_sync_touch_trip_events");
+    await assert.rejects(() => db.exec(revertSql), /revision 8/);
+    await db.exec("rollback");
+    const blocked = await firstRow("select revision, extras from public.trip_events where id = $1", [eventId]);
+    assert.equal(Number(blocked.revision), 9);
+    assert.equal(blocked.extras.icName, "苫小牧東IC");
+    assert.equal(blocked.extras.laterNote, "added after the fix");
+    await db.exec("alter table public.trip_events disable trigger tracklog_sync_touch_trip_events");
+    await db.query("update public.trip_events set revision = 8 where id = $1", [eventId]);
+    await db.exec("alter table public.trip_events enable trigger tracklog_sync_touch_trip_events");
+    await db.exec(revertSql);
     const reverted = await firstRow("select revision, change_seq, extras from public.trip_events where id = $1", [eventId]);
     assert.equal(Number(reverted.revision), 9);
     assert.ok(Number(reverted.change_seq) > Number(fixed.change_seq));
@@ -908,6 +926,7 @@ try {
     assert.equal(reverted.extras.icResolveSource, undefined);
     assert.equal(reverted.extras.expresswaySessionId, sessionId);
     assert.equal(reverted.extras.icResolveRetryCount, 6);
+    assert.equal(reverted.extras.laterNote, "added after the fix");
   });
   await check("does not resurrect a manual value whose timestamp equals the explicit clearing marker", async () => {
     let event = await createIcFixture({ icName: "再取得確認済みIC", icResolveStatus: "resolved",

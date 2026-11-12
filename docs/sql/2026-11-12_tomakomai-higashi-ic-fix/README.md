@@ -7,7 +7,7 @@
 1. `supabase/migrations/20261112143000_tracklog_preserve_manual_ic_source.sql` を適用する。
 2. `01_select.sql` で対象行を見る。`revision` が 7、`type` が `expressway_end`、`extras.icResolveStatus` が `failed`、IC名が空であること。
 3. `02_fix.sql` をファイルごと1回実行する。更新が1件でなければ例外になり、トランザクションは戻る。
-4. 戻すときは `03_revert.sql`。migration 未適用のまま戻すと、現行トリガーが IC名を残すため、手続きが例外を出して戻る。
+4. 戻すときは `03_revert.sql`。`revision` が 8 でないと例外で戻る。修正後に増えた extras のキーは残す。migration 未適用のまま戻すと、現行トリガーが IC名を残すため、手続きが例外を出して戻る。
 
 `revision`、`change_seq`、`updated_at` は `tracklog_private.touch_sync_row` が UPDATE 時に上げる。SQL では代入しない。端末が古い `baseRevision` で上書きしようとすると `revision_conflict` になる。
 

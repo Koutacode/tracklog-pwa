@@ -2448,6 +2448,10 @@ export async function updateExpresswayResolved(params: {
       if (params.clearManualResolution) {
         delete extras.icResolvedManually;
         delete extras.icResolveManualUpdatedAt;
+        if (extras.icResolveSource === 'manual') {
+          delete extras.icResolveSource;
+          delete extras.manualFixPreviousExtras;
+        }
         extras.icResolveManualClearedAt = new Date(Math.max(Date.now(),
           Date.parse(String(ev.extras?.icResolveManualUpdatedAt ?? '')) || 0)).toISOString();
       }
