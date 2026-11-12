@@ -71,8 +71,13 @@ const SAFE_NUMERIC_KEYS = new Set([
 ]);
 
 const POSTAL_CODE = /〒?\d{3}-\d{4}(?!-\d)/g;
+const POSTAL_COMPACT = /〒\d{7}(?!\d)/g;
+const POSTAL_SPACED = /〒\d{3}\s+\d{4}(?!\d)/g;
 const PHONE_NUMBER = /(?<!\d)0\d{1,4}(?:-\d{1,4}){2,3}(?!\d)/g;
+const PHONE_COMPACT = /(?<!\d)0\d{9,10}(?!\d)/g;
+const PHONE_SPACED = /(?<!\d)0\d{1,4}(?:\s+\d{2,4}){2,3}(?!\d)/g;
 const BLOCK_NUMBER = /(?<!\d)\d{1,4}-\d{1,4}-\d{1,4}(?!\d)/g;
+const SHORT_DATE = /^\d{2}-\d{2}-\d{2}$/;
 const HYPHEN_DECIMAL = /(?<![A-Za-z0-9.])([+-]?\d{1,3})-(\d{2,8})(?![A-Za-z0-9])/g;
 const KANJI_ADDRESS_NUMBER = /[〇零一二三四五六七八九十百千]+(?=丁目|番地|番|号)/g;
 const QUERY_COORDINATE = /([?&#](?:lat|latitude|lng|lon|long|longitude|geo|x|y)=)([+-]?\d+(?:\.\d+)?)/gi;
@@ -117,6 +122,7 @@ export function foldForScrub(value: string): string {
     .normalize('NFKC')
     .replace(/\u3000/g, ' ')
     .replace(/、/g, ',')
+    .replace(/(?<=\d)。(?=\d)/g, '.')
     .replace(/(?<=\d)[・･](?=\d)/g, '.')
     .replace(/(?<=\d)[－ー−‐‒–—―ｰ](?=\d)/g, '-');
 }
@@ -166,6 +172,28 @@ export function isStandaloneCoordinate(value: number): boolean {
   return places >= 1 && Math.abs(value) >= 20 && Math.abs(value) <= 180;
 }
 
+function fractionalDigits(token: string): number {
+  const dot = token.indexOf('.');
+  return dot < 0 ? 0 : token.length - dot - 1;
+}
+
+function isStandaloneCoordinateToken(token: string): boolean {
+  const numeric = Number(token);
+  if (!Number.isFinite(numeric) || Math.abs(numeric) > 180) return false;
+  const places = fractionalDigits(token);
+  if (places >= 4) return true;
+  return places >= 1 && Math.abs(numeric) >= 20 && Math.abs(numeric) <= 180;
+}
+
+function isSensitiveRecordKey(key: string): boolean {
+  const foldedKey = key.normalize('NFKC');
+  const normalized = normalizeKey(key);
+  return WIPED_KEYS.has(normalized)
+    || SENSITIVE_KEYS.has(normalized)
+    || RAW_SENSITIVE_KEYS.has(key)
+    || RAW_SENSITIVE_KEYS.has(foldedKey);
+}
+
 function hold(pattern: RegExp, value: string, token: string, held: string[]): string {
   return value.replace(pattern, match => {
     held.push(match);
@@ -189,10 +217,14 @@ export function scrubSentryText(value: string): string {
   text = hold(COUNT_TEXT, text, 'C', counts);
   text = text
     .replace(PHONE_NUMBER, '[filtered]')
+    .replace(PHONE_SPACED, '[filtered]')
+    .replace(PHONE_COMPACT, '[filtered]')
+    .replace(POSTAL_SPACED, '[filtered]')
+    .replace(POSTAL_COMPACT, '[filtered]')
     .replace(POSTAL_CODE, '[filtered]')
-    .replace(BLOCK_NUMBER, '[filtered]')
+    .replace(BLOCK_NUMBER, match => (SHORT_DATE.test(match) ? match : '[filtered]'))
     .replace(HYPHEN_DECIMAL, (match, whole: string, fraction: string) => (
-      isStandaloneCoordinate(Number(`${whole}.${fraction}`)) ? '[filtered]' : match
+      isStandaloneCoordinateToken(`${whole}.${fraction}`) ? '[filtered]' : match
     ))
     .replace(QUERY_COORDINATE, (match, key: string, numeric: string) => {
       const valueAsNumber = Number(numeric);
@@ -203,7 +235,7 @@ export function scrubSentryText(value: string): string {
       isCoordinatePair(Number(first), Number(second)) ? '[filtered]' : match
     ))
     .replace(LABELED_COORDINATE, '$1[filtered]')
-    .replace(COORDINATE, match => (isStandaloneCoordinate(Number(match)) ? '[filtered]' : match))
+    .replace(COORDINATE, match => (isStandaloneCoordinateToken(match) ? '[filtered]' : match))
     .replace(IPV4, '[filtered]')
     .replace(ADDRESS, '[filtered]')
     .replace(LOCAL_ADDRESS, '[filtered]')
@@ -267,13 +299,7 @@ function scrubNode(value: unknown): unknown {
   const output: Record<string, unknown> = {};
   for (const [key, child] of Object.entries(value)) {
     const normalized = normalizeKey(key);
-    const foldedKey = key.normalize('NFKC');
-    if (
-      WIPED_KEYS.has(normalized)
-      || SENSITIVE_KEYS.has(normalized)
-      || RAW_SENSITIVE_KEYS.has(key)
-      || RAW_SENSITIVE_KEYS.has(foldedKey)
-    ) continue;
+    if (isSensitiveRecordKey(key)) continue;
     if (normalized === 'breadcrumbs') {
       output[key] = scrubBreadcrumbList(child);
       continue;
@@ -292,7 +318,7 @@ function scrubDevice(device: Record<string, unknown>): Record<string, unknown> {
   const output: Record<string, unknown> = {};
   for (const [key, child] of Object.entries(device)) {
     const normalized = normalizeKey(key);
-    if (normalized === 'name' || SENSITIVE_KEYS.has(normalized) || RAW_SENSITIVE_KEYS.has(key)) continue;
+    if (normalized === 'name' || isSensitiveRecordKey(key)) continue;
     const scrubbed = scrubNode(child);
     if (scrubbed !== undefined) output[key] = scrubbed;
   }
