@@ -1,6 +1,23 @@
 import assert from 'node:assert/strict';
 import { scrubSentryBreadcrumb, scrubSentryEvent } from './sentryPrivacy';
 
+let assertions = 0;
+const checkEqual: typeof assert.equal = assert.equal;
+const checkOk: typeof assert.ok = assert.ok;
+const checkDeepEqual: typeof assert.deepEqual = assert.deepEqual;
+assert.equal = ((...args: Parameters<typeof assert.equal>) => {
+  assertions += 1;
+  return checkEqual(...args);
+}) as typeof assert.equal;
+assert.ok = ((...args: Parameters<typeof assert.ok>) => {
+  assertions += 1;
+  return checkOk(...args);
+}) as typeof assert.ok;
+assert.deepEqual = ((...args: Parameters<typeof assert.deepEqual>) => {
+  assertions += 1;
+  return checkDeepEqual(...args);
+}) as typeof assert.deepEqual;
+
 const SYNTHETIC_LAT = '35.000100';
 const SYNTHETIC_LNG = '139.000100';
 const SYNTHETIC_ADDRESS = '神奈川県横浜市';
@@ -113,6 +130,37 @@ const plain = scrubSentryEvent({ message: 'データベースの更新に失敗�
 assert.equal(plain?.message, 'データベースの更新に失敗しました');
 assert.equal(plain?.exception?.values?.[0]?.value, 'データベースの更新に失敗しました');
 
+const keptDetail = 'バージョン 0.1.95 で 12件失敗 2026-11-12T13:58:13Z 00:11 index.ts:128:4 行番号 42';
+const coordinateShape = scrubSentryEvent({
+  message: `${keptDetail} 出口 35.681,139.767 と 35.68 139.76 と 35.6 横浜市港北区大豆戸町1丁目2番3号`,
+  frames: { lineno: 128, colno: 4 },
+  point: { x: 35.681, y: 139.767, note: '地点' },
+  path: [139.767, 35.681, 12],
+  pair: { latitude: 35.68, longitude: 139.76 },
+});
+const coordinateMessage = coordinateShape?.message ?? '';
+assert.equal(coordinateMessage.includes(keptDetail), true, '版・件数・時刻・行番号は残す');
+assert.equal(coordinateMessage.includes('35.681'), false);
+assert.equal(coordinateMessage.includes('139.767'), false);
+assert.equal(coordinateMessage.includes('35.68'), false);
+assert.equal(coordinateMessage.includes('139.76'), false);
+assert.equal(coordinateMessage.includes('35.6'), false);
+assert.equal(coordinateMessage.includes('横浜市'), false);
+assert.equal(coordinateMessage.includes('港北区'), false);
+assert.equal(coordinateMessage.includes('大豆戸町'), false);
+assert.equal(coordinateMessage.includes('1丁目'), false);
+assert.equal(coordinateMessage.includes('2番3号'), false);
+assert.equal(coordinateShape?.frames?.lineno, 128);
+assert.equal(coordinateShape?.frames?.colno, 4);
+assert.equal(coordinateShape?.point?.x, undefined);
+assert.equal(coordinateShape?.point?.y, undefined);
+assert.equal(coordinateShape?.point?.note, '地点');
+assert.deepEqual(coordinateShape?.path, ['[filtered]', 12]);
+assert.equal(coordinateShape?.pair?.latitude, undefined);
+assert.equal(coordinateShape?.pair?.longitude, undefined);
+assert.equal(JSON.stringify(coordinateShape).includes('35.681'), false);
+assert.equal(JSON.stringify(coordinateShape).includes('139.767'), false);
+
 async function main() {
   Object.assign(globalThis, {
     __APP_VERSION__: '0.1.95',
@@ -142,6 +190,7 @@ async function main() {
   const options = calls[0] as ReturnType<typeof sentry.buildTracklogSentryOptions>;
   assert.equal(options.dsn, placeholderDsn);
   assert.equal(options.sendDefaultPii, false);
+  assert.equal(options.sendClientReports, false);
   assert.equal(options.release, 'tracklog-assist@0.1.95');
   assert.equal(options.environment, 'production');
   assert.equal(Object.prototype.hasOwnProperty.call(options, 'tracesSampleRate'), false, 'tracesSampleRate は設定しない');
@@ -163,6 +212,7 @@ async function main() {
   const integrations = options.integrations([
     { name: 'GlobalHandlers' },
     { name: 'Breadcrumbs' },
+    { name: 'BrowserSession' },
     { name: 'HttpContext' },
     { name: 'Replay' },
     { name: 'BrowserTracing' },
@@ -170,8 +220,11 @@ async function main() {
     { name: 'WebVitals' },
   ]);
   assert.deepEqual(integrations.map(integration => integration.name).sort(), ['Breadcrumbs', 'GlobalHandlers']);
+  assert.equal(integrations.some(integration => integration.name === 'BrowserSession'), false, 'BrowserSession は残さない');
 
-  const scrubbedByCallback = options.beforeSend?.(sensitiveEvent as never, {});
+  const hint = { attachments: [{ filename: 'note.txt', data: '35.681,139.767 横浜市' }] };
+  const scrubbedByCallback = options.beforeSend?.(sensitiveEvent as never, hint);
+  assert.deepEqual(hint.attachments, []);
   assert.ok(scrubbedByCallback);
   assertNoSensitiveText(scrubbedByCallback, 'beforeSend');
   assert.equal(options.beforeBreadcrumb?.({ category: 'console', message: SYNTHETIC_LAT }, {}), null);
@@ -182,6 +235,7 @@ async function main() {
   }, {});
   assert.ok(scrubbedBreadcrumb);
   assertNoSensitiveText(scrubbedBreadcrumb, 'beforeBreadcrumb');
+  console.log(`sentry privacy assertions: ${assertions}`);
 }
 
 const TRACKLOG_DISABLED_EXPECTATION = {

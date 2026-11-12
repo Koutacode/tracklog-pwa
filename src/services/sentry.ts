@@ -13,6 +13,7 @@ const BLOCKED_INTEGRATION_NAMES = new Set([
   'Replay',
   'BrowserTracing',
   'BrowserProfiling',
+  'BrowserSession',
   'HttpContext',
   'WebVitals',
   'FetchStreamPerformance',
@@ -66,6 +67,7 @@ export function buildTracklogSentryOptions(config: TracklogSentryConfig): Browse
   return {
     dsn,
     sendDefaultPii: false,
+    sendClientReports: false,
     release: config.release,
     environment: config.environment,
     // この SDK は tracesSampleRate を書くと性能計測が有効になる。0 でも span の記録がオンになるため置かない。
@@ -93,7 +95,8 @@ export function buildTracklogSentryOptions(config: TracklogSentryConfig): Browse
     beforeBreadcrumb(breadcrumb: Breadcrumb) {
       return scrubSentryBreadcrumb(breadcrumb);
     },
-    beforeSend(event: ErrorEvent, _hint: EventHint) {
+    beforeSend(event: ErrorEvent, hint: EventHint) {
+      clearHintAttachments(hint);
       return scrubSentryEvent(event);
     },
     beforeSendTransaction(_event: TransactionEvent, _hint: EventHint) {
@@ -106,6 +109,19 @@ export function buildTracklogSentryOptions(config: TracklogSentryConfig): Browse
       return null;
     },
   };
+}
+
+export function clearHintAttachments(hint: EventHint | undefined): void {
+  if (!hint) return;
+  try {
+    hint.attachments = [];
+  } catch {
+    try {
+      hint.attachments?.splice(0, hint.attachments.length);
+    } catch {
+      // 添付を空にできない場合でも、イベント本文の位置情報は消したまま送る。
+    }
+  }
 }
 
 export type TracklogSentryInitDeps = {
