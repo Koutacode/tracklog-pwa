@@ -55,6 +55,18 @@ export function canUseNativeResidentLocation(input: {
     && identity.approvalStatus === 'approved';
 }
 
+const NATIVE_ROUTE_POINT_MUTATION_ID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+/**
+ * Sync v2 receipts are keyed by mutation id. Reusing the route point id makes a
+ * native upload and a later WebView upload the same receipt instead of two rows.
+ */
+export function nativeRoutePointSyncMutationId(pointId: string): string | null {
+  const id = pointId.trim();
+  return NATIVE_ROUTE_POINT_MUTATION_ID.test(id) ? id : null;
+}
+
 export type NativeResidentRoutePoint = Omit<RoutePoint, 'id'> & {
   id: string;
   /** Boot-scoped Android monotonic clock identity; not persisted by RoutePoint storage. */
@@ -188,7 +200,11 @@ export async function drainNativeResidentRoutePointQueue(input: {
     for (const point of chronologicalPoints) {
       if (persistedIds.has(point.id)) continue;
       persistedIds.add(point.id);
-      await input.addRoutePoint(point);
+      const syncMutationId = nativeRoutePointSyncMutationId(point.id);
+      await input.addRoutePoint({
+        ...point,
+        ...(syncMutationId ? { syncMutationId } : {}),
+      });
       await input.onPersistedPoint?.(point);
       persisted += 1;
     }

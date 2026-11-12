@@ -59,6 +59,7 @@ public final class ResidentLocationService extends Service {
             handler.postDelayed(this, READINESS_CHECK_MS);
         }
     };
+    private final Runnable routeSyncRunnable = this::runRoutePointSync;
     private LocationManager locationManager;
     // Both the registrar and listener reference are owned exclusively by the main thread.
     private LocationListener registeredLocationListener;
@@ -81,7 +82,10 @@ public final class ResidentLocationService extends Service {
     private Handler locationHandler;
     private ExecutorService uploadExecutor;
     private final AtomicBoolean uploadInFlight = new AtomicBoolean(false);
+    private final AtomicBoolean routeSyncInFlight = new AtomicBoolean(false);
     private final AtomicBoolean expresswayProbeInFlight = new AtomicBoolean(false);
+    private volatile boolean routeSyncScheduled;
+    private volatile long lastRouteSyncAttemptAt;
     private final String monotonicLocationSessionId = UUID.randomUUID().toString();
     private ResidentLocationQualityPolicy.Fix lastAcceptedFix;
     private ResidentLocationQualityPolicy.Fix lastPersistedRouteFix;
@@ -243,8 +247,13 @@ public final class ResidentLocationService extends Service {
             sampling.reconcile(desired, locationRegistration);
             if (shouldWait || waitingForTrip) {
                 handler.removeCallbacks(expresswayProbeRetryCheck);
+                cancelRoutePointSync();
             } else {
                 scheduleDueExpresswayProbe();
+                scheduleRoutePointSync(ResidentRoutePointSyncPolicy.delayUntilNextAttempt(
+                        System.currentTimeMillis(),
+                        lastRouteSyncAttemptAt
+                ));
             }
             NotificationManager manager = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
             if (manager != null && !previousNotificationText.equals(notificationText())) {
@@ -424,6 +433,7 @@ public final class ResidentLocationService extends Service {
                 ResidentLocationState.markQueueWriteSuccess(this, now);
                 handler.removeCallbacks(queueIdleSeal);
                 handler.postDelayed(queueIdleSeal, ResidentLocationQueue.ACTIVE_IDLE_SEAL_MS);
+                scheduleRoutePointSync(ResidentRoutePointSyncPolicy.FIRST_DELAY_MS);
             } catch (Exception exception) {
                 queueWriteSucceeded = false;
                 ResidentLocationState.markQueueWriteFailure(this, now);
@@ -716,6 +726,54 @@ public final class ResidentLocationService extends Service {
         return "response";
     }
 
+    private void scheduleRoutePointSync(long delayMs) {
+        if (stopping || routeSyncInFlight.get() || routeSyncScheduled) return;
+        if (Looper.myLooper() != handler.getLooper()) {
+            handler.post(() -> scheduleRoutePointSync(delayMs));
+            return;
+        }
+        String tripId = ResidentLocationState.getActiveTripId(this);
+        if (!canProcessTrip(tripId)) return;
+        routeSyncScheduled = true;
+        handler.postDelayed(routeSyncRunnable, Math.max(0L, delayMs));
+    }
+
+    private void cancelRoutePointSync() {
+        routeSyncScheduled = false;
+        handler.removeCallbacks(routeSyncRunnable);
+    }
+
+    private void runRoutePointSync() {
+        routeSyncScheduled = false;
+        if (stopping || uploadExecutor == null || uploadExecutor.isShutdown()) return;
+        String tripId = ResidentLocationState.getActiveTripId(this);
+        if (!canProcessTrip(tripId)) return;
+        if (!routeSyncInFlight.compareAndSet(false, true)) return;
+        uploadExecutor.execute(() -> {
+            ResidentLocationUploader.Outcome outcome = ResidentLocationUploader.Outcome.RETRY;
+            try {
+                if (!canProcessTrip(tripId)) return;
+                lastRouteSyncAttemptAt = System.currentTimeMillis();
+                outcome = ResidentLocationUploader.syncQueuedRoutePoints(this, tripId);
+                if (outcome == ResidentLocationUploader.Outcome.STOPPED_AUTHORIZATION) {
+                    handler.post(() -> {
+                        if (!ResidentLocationState.isEligible(this)) stopResidentService();
+                    });
+                }
+            } finally {
+                routeSyncInFlight.set(false);
+                ResidentLocationUploader.Outcome completed = outcome;
+                handler.post(() -> {
+                    if (stopping) return;
+                    long delay = completed == ResidentLocationUploader.Outcome.RETRY
+                            ? ResidentRoutePointSyncPolicy.RETRY_DELAY_MS
+                            : ResidentRoutePointSyncPolicy.INTERVAL_MS;
+                    scheduleRoutePointSync(delay);
+                });
+            }
+        });
+    }
+
     private void uploadLatestLocation(Location location, String tripId) {
         if (!canProcessTrip(tripId)) return;
         ResidentLocationState.Authorization authorization =
@@ -784,6 +842,7 @@ public final class ResidentLocationService extends Service {
 
     private void stopResidentService() {
         stopping = true;
+        cancelRoutePointSync();
         handler.removeCallbacks(readinessCheck);
         RUNNING.set(false);
         foregroundStarted = false;

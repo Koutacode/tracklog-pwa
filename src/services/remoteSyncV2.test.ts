@@ -4,7 +4,7 @@ import { db } from '../db/db';
 import { withRemoteSyncSignalsSuppressed } from '../app/remoteSyncSignal';
 import { synchronizeRemoteOutbox } from './remoteSyncV2';
 import { SUPABASE_CONFIGURED } from './supabase';
-import { updateEventTimestamp, updateExpresswayIcNameManual, updateExpresswayResolved,
+import { addRoutePoint, updateEventTimestamp, updateExpresswayIcNameManual, updateExpresswayResolved,
   markExpresswayResolveFailure } from '../db/repositories';
 import { getReportTrip, listReportTrips, saveReportTripSnapshot } from '../db/reportRepository';
 import { buildTripDetailReportSnapshot } from '../ui/screens/tripDetailReportSnapshot';
@@ -535,6 +535,49 @@ async function main() {
     if (navigatorDescriptor) Object.defineProperty(globalThis, 'navigator', navigatorDescriptor);
     else Reflect.deleteProperty(globalThis, 'navigator');
   }
+
+  await reset();
+  const nativePointId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  await addRoutePoint({
+    id: nativePointId,
+    tripId: TRIP,
+    ts: TS,
+    lat: 35,
+    lng: 139,
+    accuracy: 10,
+    speed: 12,
+    heading: 90,
+    source: 'background',
+    syncMutationId: nativePointId,
+  });
+  const nativeCalls = await captureRun(async request => success(request, {
+    acks: request.mutations.map(mutation => ({
+      mutationId: mutation.mutationId,
+      entityType: mutation.entityType,
+      entityId: mutation.entityId,
+      status: 'duplicate',
+      revision: 1,
+      changeSeq: 4,
+    })),
+  }));
+  const nativeMutation = nativeCalls[0]?.mutations.find(mutation => mutation.entityId === nativePointId);
+  assert.equal(nativeMutation?.mutationId, nativePointId, 'WebView retry uses the native point id as the mutation id');
+  assert.equal(nativeMutation?.operation, 'upsert');
+  assert.equal(nativeMutation?.payload?.trip_id, TRIP);
+  assert.equal((await db.routePoints.get(nativePointId))?.syncStatus, 'synced');
+  assert.equal(await db.routePoints.count(), 1);
+  const repeated = await addRoutePoint({
+    id: nativePointId,
+    tripId: TRIP,
+    ts: TS,
+    lat: 36,
+    lng: 140,
+    source: 'background',
+    syncMutationId: nativePointId,
+  });
+  assert.equal(repeated.lat, 35, 'a point the cloud already has is not written again');
+  assert.equal(await db.routePoints.count(), 1);
+  assert.equal((await db.routePoints.get(nativePointId))?.syncStatus, 'synced');
 
   console.log('remoteSyncV2 tests passed (real outbox/acks/cursors; synthetic transport and IndexedDB)');
 }

@@ -4,15 +4,22 @@ import android.content.Context;
 import android.location.Location;
 import android.util.Log;
 
+import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.BufferedReader;
+import java.io.File;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
 
 final class ResidentLocationUploader {
@@ -164,6 +171,184 @@ final class ResidentLocationUploader {
             Log.w(TAG, "Latest location retry failed", exception);
             return Outcome.RETRY;
         }
+    }
+
+    /**
+     * Sends queued route points through the existing sync v2 function. Points stay in the
+     * native queue until the WebView copies them into Dexie, and each mutation id is the
+     * point id so that later upload is a duplicate receipt rather than a second row.
+     * Token refresh uses the same lock as the latest-location heartbeat.
+     */
+    static Outcome syncQueuedRoutePoints(Context context, String expectedTripId) {
+        Context appContext = context.getApplicationContext();
+        if (!canSendLocation(appContext, expectedTripId)) return Outcome.RETRY;
+        AuthorizationSnapshot snapshot = getAuthorizationSnapshot(appContext);
+        if (snapshot.mutationPending) return Outcome.RETRY;
+        if (!snapshot.authorization.isConfigured()) return Outcome.STOPPED_AUTHORIZATION;
+        if (snapshot.blocked) return Outcome.BLOCKED_AUTHORIZATION;
+
+        File ledgerFile = new File(appContext.getFilesDir(), ResidentRoutePointSyncLedger.FILE_NAME);
+        ResidentRoutePointSyncLedger.State ledger = ResidentRoutePointSyncLedger.load(
+                ledgerFile,
+                snapshot.authorization.deviceId
+        );
+        boolean cursorResetUsed = false;
+        for (int batch = 0; batch < ResidentRoutePointSyncPolicy.MAX_BATCHES_PER_CYCLE; batch += 1) {
+            if (!canSendLocation(appContext, expectedTripId)) return Outcome.RETRY;
+            snapshot = getAuthorizationSnapshot(appContext);
+            if (snapshot.mutationPending) return Outcome.RETRY;
+            if (!snapshot.authorization.isConfigured()) return Outcome.STOPPED_AUTHORIZATION;
+            if (snapshot.blocked) return Outcome.BLOCKED_AUTHORIZATION;
+
+            List<JSONObject> queued;
+            try {
+                queued = ResidentLocationQueue.snapshotUnacknowledged(
+                        appContext,
+                        ResidentRoutePointSyncPolicy.MAX_MUTATIONS_PER_REQUEST,
+                        ledger.skipIds(System.currentTimeMillis())
+                );
+            } catch (Exception exception) {
+                Log.w(TAG, "Route point queue could not be read; points stay queued");
+                return Outcome.RETRY;
+            }
+            List<JSONObject> mutations = new ArrayList<>();
+            List<String> invalidIds = new ArrayList<>();
+            for (JSONObject point : queued) {
+                JSONObject mutation = ResidentRoutePointSyncPolicy.mutationFor(point);
+                if (mutation == null) {
+                    String id = point.optString("id", "").trim();
+                    if (!id.isEmpty()) invalidIds.add(id);
+                    continue;
+                }
+                mutations.add(mutation);
+            }
+            if (!invalidIds.isEmpty()) {
+                long now = System.currentTimeMillis();
+                Map<String, Long> defer = new LinkedHashMap<>();
+                for (String id : invalidIds) {
+                    defer.put(id, saturatingAdd(now, ResidentRoutePointSyncPolicy.INVALID_DEFER_MS));
+                }
+                ledger = ledger.apply(ledger.cursor, Collections.emptyList(), defer);
+                ResidentRoutePointSyncLedger.save(ledgerFile, ledger);
+            }
+            if (mutations.isEmpty()) return Outcome.SUCCESS;
+
+            RoutePost posted = postRouteMutations(
+                    appContext,
+                    snapshot,
+                    expectedTripId,
+                    ledger.cursor,
+                    mutations
+            );
+            if (posted.cursorAhead && !cursorResetUsed) {
+                cursorResetUsed = true;
+                ledger = ledger.withCursor(0L);
+                ResidentRoutePointSyncLedger.save(ledgerFile, ledger);
+                posted = postRouteMutations(appContext, snapshot, expectedTripId, 0L, mutations);
+            }
+            if (posted.outcome != Outcome.SUCCESS || posted.page == null) return posted.outcome;
+
+            long now = System.currentTimeMillis();
+            List<String> stored = ResidentRoutePointSyncPolicy.storedIds(posted.page.acks);
+            Map<String, Long> deferred = ResidentRoutePointSyncPolicy.deferrals(posted.page.acks, now);
+            if (stored.isEmpty() && deferred.isEmpty()) return Outcome.RETRY;
+            ledger = ledger.apply(posted.page.cursor, stored, deferred);
+            if (!ResidentRoutePointSyncLedger.save(ledgerFile, ledger)) {
+                Log.w(TAG, "Route sync receipts could not be saved; the same point ids stay retryable");
+                return Outcome.RETRY;
+            }
+            Log.i(TAG, "Route sync stored " + stored.size() + " queued points");
+            if (queued.size() < ResidentRoutePointSyncPolicy.MAX_MUTATIONS_PER_REQUEST) {
+                return Outcome.SUCCESS;
+            }
+        }
+        return Outcome.SUCCESS;
+    }
+
+    private static long saturatingAdd(long nowMs, long delayMs) {
+        if (delayMs <= 0L) return Math.max(0L, nowMs);
+        if (nowMs > Long.MAX_VALUE - delayMs) return Long.MAX_VALUE;
+        return nowMs + delayMs;
+    }
+
+    private static RoutePost postRouteMutations(
+            Context context,
+            AuthorizationSnapshot snapshot,
+            String expectedTripId,
+            long cursor,
+            List<JSONObject> mutations
+    ) {
+        if (!canSendLocation(context, expectedTripId)) return RoutePost.of(Outcome.RETRY);
+        JSONObject body;
+        try {
+            JSONArray payload = new JSONArray();
+            for (JSONObject mutation : mutations) payload.put(mutation);
+            body = new JSONObject()
+                    .put("protocolVersion", 2)
+                    .put("deviceId", snapshot.authorization.deviceId)
+                    .put("cursor", Math.max(0L, cursor))
+                    .put("mutations", payload);
+        } catch (Exception exception) {
+            Log.w(TAG, "Route sync payload could not be built; points stay queued");
+            return RoutePost.of(Outcome.RETRY);
+        }
+
+        SyncHttp http;
+        try {
+            http = postSync(snapshot.authorization, body);
+        } catch (Exception exception) {
+            Log.w(TAG, "Route sync request failed; points stay queued");
+            return RoutePost.of(Outcome.RETRY);
+        }
+        ResidentLocationUploadPolicy.Action action =
+                ResidentLocationUploadPolicy.classifyStatus(http.statusCode, false);
+        ResidentLocationState.Authorization attempted = snapshot.authorization;
+        long epoch = snapshot.epoch;
+        if (action == ResidentLocationUploadPolicy.Action.REFRESH) {
+            AuthorizationRefreshResult refresh;
+            try {
+                if (!canSendLocation(context, expectedTripId)) return RoutePost.of(Outcome.RETRY);
+                refresh = refreshAfterUnauthorized(context, snapshot.authorization, snapshot.epoch);
+            } catch (Exception exception) {
+                Log.w(TAG, "Route sync token refresh deferred");
+                return RoutePost.of(Outcome.RETRY);
+            }
+            if (refresh.cancelled) return RoutePost.of(Outcome.RETRY);
+            if (refresh.blocked) return RoutePost.of(Outcome.BLOCKED_AUTHORIZATION);
+            if (!refresh.authorization.isConfigured()) return RoutePost.of(Outcome.RETRY);
+            attempted = refresh.authorization;
+            epoch = refresh.epoch;
+            try {
+                if (!canSendLocation(context, expectedTripId)) return RoutePost.of(Outcome.RETRY);
+                http = postSync(refresh.authorization, body);
+            } catch (Exception exception) {
+                Log.w(TAG, "Route sync retry failed; points stay queued");
+                return RoutePost.of(Outcome.RETRY);
+            }
+            action = ResidentLocationUploadPolicy.classifyStatus(http.statusCode, true);
+        }
+        if (action == ResidentLocationUploadPolicy.Action.STOP_AUTHORIZATION) {
+            return RoutePost.of(stopAfterAuthorizationRejection(context, attempted, epoch));
+        }
+        if (action != ResidentLocationUploadPolicy.Action.SUCCESS) {
+            if (ResidentRoutePointSyncPolicy.isCursorAhead(http.statusCode, http.body)) {
+                return RoutePost.cursorAhead();
+            }
+            return RoutePost.of(Outcome.RETRY);
+        }
+        if (http.incomplete) {
+            Log.w(TAG, "Route sync response was incomplete; points stay queued");
+            return RoutePost.of(Outcome.RETRY);
+        }
+        String compact = ResidentRoutePointSyncPolicy.compactSyncPage(http.body);
+        ResidentRoutePointSyncPolicy.Page page = ResidentRoutePointSyncPolicy.parseCompactPage(
+                compact != null ? compact : http.body
+        );
+        if (page == null) {
+            Log.w(TAG, "Route sync response could not be read; points stay queued");
+            return RoutePost.of(Outcome.RETRY);
+        }
+        return RoutePost.success(page);
     }
 
     /**
@@ -676,6 +861,59 @@ final class ResidentLocationUploader {
         }
     }
 
+    private static SyncHttp postSync(
+            ResidentLocationState.Authorization authorization,
+            JSONObject payload
+    ) throws Exception {
+        HttpURLConnection connection = (HttpURLConnection) new URL(
+                authorization.supabaseUrl + "/functions/v1/tracklog-sync"
+        ).openConnection();
+        try {
+            connection.setRequestMethod("POST");
+            connection.setConnectTimeout(CONNECT_TIMEOUT_MS);
+            connection.setReadTimeout(ResidentRoutePointSyncPolicy.SYNC_READ_TIMEOUT_MS);
+            connection.setDoOutput(true);
+            connection.setUseCaches(false);
+            connection.setRequestProperty("Accept", "application/json");
+            connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
+            connection.setRequestProperty("apikey", authorization.anonKey);
+            if (authorization.accessToken != null && !authorization.accessToken.isEmpty()) {
+                connection.setRequestProperty("Authorization", "Bearer " + authorization.accessToken);
+            }
+            byte[] requestBody = payload.toString().getBytes(StandardCharsets.UTF_8);
+            connection.setFixedLengthStreamingMode(requestBody.length);
+            try (OutputStream output = connection.getOutputStream()) {
+                output.write(requestBody);
+                output.flush();
+            }
+            int statusCode = connection.getResponseCode();
+            InputStream stream = statusCode >= 200 && statusCode < 400
+                    ? connection.getInputStream()
+                    : connection.getErrorStream();
+            return readSyncResponse(statusCode, stream);
+        } finally {
+            connection.disconnect();
+        }
+    }
+
+    private static SyncHttp readSyncResponse(int statusCode, InputStream stream) throws Exception {
+        if (stream == null) return new SyncHttp(statusCode, "", false);
+        StringBuilder buffer = new StringBuilder();
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(stream, StandardCharsets.UTF_8))) {
+            char[] chunk = new char[2048];
+            int read;
+            while ((read = reader.read(chunk)) >= 0) {
+                buffer.append(chunk, 0, read);
+                String compact = ResidentRoutePointSyncPolicy.compactSyncPage(buffer.toString());
+                if (compact != null) return new SyncHttp(statusCode, compact, false);
+                if (buffer.length() >= ResidentRoutePointSyncPolicy.SYNC_RESPONSE_CHAR_LIMIT) {
+                    return new SyncHttp(statusCode, "", true);
+                }
+            }
+        }
+        return new SyncHttp(statusCode, buffer.toString(), false);
+    }
+
     private static String readResponse(InputStream stream) throws Exception {
         if (stream == null) return "";
         StringBuilder result = new StringBuilder();
@@ -688,6 +926,46 @@ final class ResidentLocationUploader {
             }
         }
         return result.toString();
+    }
+
+    private static final class SyncHttp {
+        final int statusCode;
+        final String body;
+        final boolean incomplete;
+
+        SyncHttp(int statusCode, String body, boolean incomplete) {
+            this.statusCode = statusCode;
+            this.body = body == null ? "" : body;
+            this.incomplete = incomplete;
+        }
+    }
+
+    private static final class RoutePost {
+        final Outcome outcome;
+        final ResidentRoutePointSyncPolicy.Page page;
+        final boolean cursorAhead;
+
+        private RoutePost(
+                Outcome outcome,
+                ResidentRoutePointSyncPolicy.Page page,
+                boolean cursorAhead
+        ) {
+            this.outcome = outcome;
+            this.page = page;
+            this.cursorAhead = cursorAhead;
+        }
+
+        static RoutePost of(Outcome outcome) {
+            return new RoutePost(outcome, null, false);
+        }
+
+        static RoutePost cursorAhead() {
+            return new RoutePost(Outcome.RETRY, null, true);
+        }
+
+        static RoutePost success(ResidentRoutePointSyncPolicy.Page page) {
+            return new RoutePost(Outcome.SUCCESS, page, false);
+        }
     }
 
     private static final class HttpResult {
