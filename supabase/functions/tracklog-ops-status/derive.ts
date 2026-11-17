@@ -434,8 +434,19 @@ function sanitizeDevices(value: unknown): Array<Record<string, unknown>> {
   return devices;
 }
 
-function inactiveBody(syncedAt: string): Record<string, unknown> {
-  return { trip_active: false, synced_at: toJstIso(syncedAt), stale: false };
+function lastConfirmedAt(value: unknown): string | null {
+  const text = textOrNull(value);
+  if (!text || !Number.isFinite(Date.parse(text))) return null;
+  return toJstIso(text);
+}
+
+function inactiveBody(syncedAt: string, seenAt: unknown): Record<string, unknown> {
+  return {
+    trip_active: false,
+    synced_at: toJstIso(syncedAt),
+    last_confirmed_at: lastConfirmedAt(seenAt),
+    stale: false,
+  };
 }
 
 export type BuiltOpsStatus = {
@@ -462,12 +473,13 @@ export function buildOpsStatus(raw: unknown): BuiltOpsStatus {
           active_count: Number.isInteger(activeCount) && activeCount > 1 && activeCount <= 10000 ? activeCount : 2,
           devices: sanitizeDevices(payload.devices),
           synced_at: toJstIso(syncedAt),
+          last_confirmed_at: lastConfirmedAt(payload.seen_at),
           stale: false,
         },
         geocode: null,
       };
     }
-    return { status: 200, body: inactiveBody(syncedAt), geocode: null };
+    return { status: 200, body: inactiveBody(syncedAt, payload.seen_at), geocode: null };
   }
 
   const tripId = textOrNull(payload.trip_id);
@@ -521,6 +533,7 @@ export function buildOpsStatus(raw: unknown): BuiltOpsStatus {
     trip_events: intervals.map(toPublicEvent),
     leg: legFor(tripStartedAt, syncedAt),
     synced_at: toJstIso(syncedAt),
+    last_confirmed_at: lastConfirmedAt(payload.seen_at),
     stale: isStale(textOrNull(payload.seen_at), syncedAt),
   };
 
