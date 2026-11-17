@@ -195,6 +195,52 @@ assert.equal(fullwidthEvent?.['ｌａｔ'], undefined);
 assert.equal((fullwidthEvent as { lat?: unknown } | null)?.lat, undefined);
 assert.equal(fullwidthEvent?.['ｌｎｇ'], undefined);
 
+function assertScrubbed(input: string, removed: string[], kept: string[]) {
+  const output = scrubSentryEvent({ message: input })?.message ?? '';
+  for (const value of removed) {
+    assert.equal(output.includes(value), false, `消えるべきものが残っています: ${value}`);
+    assert.equal(output.includes(value.normalize('NFKC')), false, `NFKC 後も残っています: ${value}`);
+  }
+  for (const value of kept) {
+    assert.equal(output.includes(value), true, `残すものがありません: ${value}`);
+  }
+  return output;
+}
+
+assertScrubbed(
+  '集計999 バージョン０．１．９５ 失敗１２件 〒９９９００００ 〒９９９　００００ ０９０００００００００ ０９０　００００　００００',
+  ['〒９９９００００', '〒9990000', '〒９９９　００００', '〒999 0000', '０９０００００００００', '09000000000', '０９０　００００　００００', '090 0000 0000'],
+  ['集計999', '0.1.95', '12件'],
+);
+assertScrubbed(
+  '句点は残す。 バージョン０．１．９５ ４０。０００１ と 40。0001',
+  ['４０。０００１', '40。0001', '40.0001'],
+  ['句点は残す。', '0.1.95'],
+);
+assertScrubbed(
+  '比率12.50 バージョン０．１．９５ ４０．００００ と １４０．００００００',
+  ['４０．００００', '40.0000', '１４０．００００００', '140.000000'],
+  ['比率12.50', '0.1.95'],
+);
+assertScrubbed(
+  '番地1-2-3 は消す １１－１２－１３ バージョン０．１．９５ 失敗１２件 時刻１３：５８ ｉｎｄｅｘ．ｔｓ：１２８：４',
+  ['1-2-3'],
+  ['11-12-13', '0.1.95', '12件', '13:58', 'index.ts:128:4'],
+);
+
+const deviceEvent = scrubSentryEvent({
+  device: {
+    '緯度': '４０。０００１',
+    model: '架空端末',
+    note: '残すメモ',
+  },
+});
+assert.equal(deviceEvent?.device?.['緯度'], undefined, 'NFKC した装置キーは残さない');
+assert.equal(JSON.stringify(deviceEvent?.device).includes('40.0001'), false);
+assert.equal(JSON.stringify(deviceEvent?.device).includes('４０。０００１'), false);
+assert.equal(deviceEvent?.device?.model, '架空端末');
+assert.equal(deviceEvent?.device?.note, '残すメモ');
+
 async function main() {
   Object.assign(globalThis, {
     __APP_VERSION__: '0.1.95',
