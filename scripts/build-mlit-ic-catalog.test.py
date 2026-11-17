@@ -27,6 +27,15 @@ class CatalogExtractionTest(unittest.TestCase):
         self.assertEqual(stats['excludedNonCurrent'], 2)
         self.assertEqual(stats['excludedNonIcKind'], 2)
 
+    def test_expired_ordinary_ic_is_not_kept_when_the_current_record_is_a_junction(self):
+        rows, stats = builder.extract_current_entries([
+            feature('EA03_000001', '合成東', '1', start=1978, end=1997, opened=1978),
+            feature('EA03_000001', '合成東IC/JCT', '3', start=1998, end=9999, opened=1978),
+        ])
+        self.assertEqual(rows, [])
+        self.assertEqual(stats['excludedNonCurrent'], 1)
+        self.assertEqual(stats['excludedNonIcKind'], 1)
+
     def test_preserves_public_name_and_does_not_invent_entrance_or_direction(self):
         rows, _ = builder.extract_current_entries([feature(name='合成')])
         self.assertEqual(rows, [['test-a', '合成', 35, 139, 1]])

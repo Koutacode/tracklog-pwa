@@ -111,6 +111,15 @@ test('supplements cannot bypass the combined candidate overflow guard', () => {
   assert.equal(lookupIcCatalogWithSupplement(primary, lat, lon), null);
 });
 
+test('Tomakomai-Higashi is not an ordinary or smart IC in the bundled catalogue', () => {
+  const names = new Set(IC_CATALOG_ENTRIES.map(entry => entry[1]));
+  assert.equal(names.has('苫小牧東'), false);
+  assert.equal(names.has('苫小牧東IC'), false);
+  assert.equal(names.has('苫小牧東IC/JCT'), false);
+  assert.equal(names.has('苫小牧中央'), true);
+  assert.equal(names.has('苫小牧西'), true);
+});
+
 test('supplement data contains only public feature facts and licence provenance', () => {
   const serialized = JSON.stringify(IC_SUPPLEMENTAL_METADATA);
   assert.doesNotMatch(serialized, /"(?:user|uid|changeset|tripId|eventId|deviceId)"/);
