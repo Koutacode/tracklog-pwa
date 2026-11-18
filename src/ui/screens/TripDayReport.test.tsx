@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { AppEvent } from '../../domain/types';
-import type { HistoryDay } from './tripHistoryReport';
+import { buildBreakToRestTransition, projectAutomaticBreakAsRestWithSources } from '../../domain/metrics';
+import { buildTripHistoryDays, type HistoryDay } from './tripHistoryReport';
+import { buildBreakStartAddressReferences, getEventLocationLabel } from './tripDetailLocationInfo';
 import { formatTripDayEventTime, getTripDayMunicipality, TripDayReport } from './TripDayReport';
 
 function event(type: AppEvent['type'], index: number, extras?: Record<string, unknown>): AppEvent {
@@ -117,6 +119,43 @@ assert.ok(!describedHtml.includes('<img'), 'an address cannot add HTML');
 assert.ok(describedHtml.includes('40 L'));
 assert.ok(!describedHtml.includes('-1 L'));
 assert.equal((describedHtml.match(/data-event-id=/g) ?? []).length, 7, 'zero-length work, refuel and point records remain visible');
+
+// A break starts before midnight JST. Its generated end and rest start are on day two.
+const tripStart = { ...event('trip_start', 20), ts: '2026-10-01T13:00:00.000Z' };
+const breakStart = { ...event('break_start', 21, { breakSessionId: 'night' }),
+  ts: '2026-10-01T14:30:00.000Z', address: '北海道合成市試験町' };
+const transition = buildBreakToRestTransition([tripStart, breakStart], '2026-10-02T00:30:00.000Z')!;
+const { breakEnd, restStart } = transition;
+const sourceEvents = [tripStart, breakStart, breakEnd, restStart];
+const originalEvents = structuredClone(sourceEvents);
+const dayTwo = buildTripHistoryDays(sourceEvents)[1]!;
+const references = buildBreakStartAddressReferences(projectAutomaticBreakAsRestWithSources(sourceEvents));
+const nightHtml = renderToStaticMarkup(<TripDayReport day={dayTwo} breakStartAddresses={references} />);
+assert.equal((nightHtml.match(/休憩開始時の住所（参考）：北海道合成市/g) ?? []).length, 2);
+assert.ok(nightHtml.includes(`dateTime="${transition.thresholdTs}">02:30</time>`), 'references retain the actual transition time');
+assert.equal(getEventLocationLabel(breakEnd, references.get(breakEnd)), '休憩開始時の住所（参考）：北海道合成市試験町');
+assert.deepEqual(sourceEvents, originalEvents, 'neither the raw editor values nor the day records are backfilled');
+
+const manualPlace = { ...restStart, address: '切替時の手入力住所' };
+const measured = { ...breakEnd, geo: { lat: 0, lng: 0 } };
+const withPositions = [tripStart, breakStart, measured, manualPlace];
+const ownReferences = buildBreakStartAddressReferences(projectAutomaticBreakAsRestWithSources(withPositions));
+const ownHtml = renderToStaticMarkup(
+  <TripDayReport day={buildTripHistoryDays(withPositions)[1]!} breakStartAddresses={ownReferences} />,
+);
+assert.ok(ownHtml.includes('切替時の手入力住所'));
+assert.ok(ownHtml.includes('位置は記録済み（住所未取得）'));
+assert.ok(!ownHtml.includes('休憩開始時の住所（参考）'), 'a direct edit or fix wins over the earlier break address');
+
+for (const mismatched of [
+  [tripStart, breakStart, restStart],
+  [tripStart, breakStart, breakEnd, { ...restStart, tripId: 'another-trip' }],
+  [tripStart, breakStart, breakEnd, { ...restStart, extras: { ...restStart.extras, generatedFrom: 'other-break' } }],
+  [tripStart, breakStart, breakEnd, { ...restStart, extras: { ...restStart.extras, autoReason: 'ferry_boarding' } }],
+]) {
+  assert.equal(buildBreakStartAddressReferences(projectAutomaticBreakAsRestWithSources(mismatched)).size, 0,
+    'a missing, unrelated or cross-trip transition cannot borrow this address');
+}
 
 const empty = { ...day([]), segments: [], totals: { drive: 0, work: 0, break: 0, ferry: 0, rest: 0 }, unknownMinutes: 0 };
 const emptyHtml = renderToStaticMarkup(<TripDayReport day={empty} />);

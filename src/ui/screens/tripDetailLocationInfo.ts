@@ -1,5 +1,7 @@
 import { formatReportMinute, type ProjectedReportTimelineEvent } from '../../domain/reportLogic';
 import { getExpresswayIcDisplay, type ExpresswayIcDisplay } from '../../domain/expresswayIcDisplay';
+import type { AutomaticBreakRestProjection } from '../../domain/metrics';
+import type { AppEvent } from '../../domain/types';
 
 export type TripDetailLocationInfo = {
   key: string;
@@ -44,6 +46,29 @@ const OPERATION_BOUNDARY_TYPES: ReadonlySet<ProjectedReportTimelineEvent['event'
 
 function getExtraString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+/** Keep the original break location as a reference for its two generated rows. */
+export function buildBreakStartAddressReferences(projection: AutomaticBreakRestProjection<AppEvent>) {
+  const references = new Map<AppEvent, string>();
+  for (const { breakStart, breakEnd, restStart } of projection.sourcesByProjectedRest.values()) {
+    const address = getExtraString(breakStart.address);
+    if (!address || breakStart.tripId !== breakEnd.tripId || breakStart.tripId !== restStart.tripId) continue;
+    references.set(breakEnd, address);
+    references.set(restStart, address);
+  }
+  return references;
+}
+
+export function getEventLocationLabel(event: AppEvent, breakStartAddress?: string): string | undefined {
+  const address = getExtraString(event.address);
+  if (address) return address;
+  const geo = event.geo;
+  if (geo && Number.isFinite(geo.lat) && Math.abs(geo.lat) <= 90
+    && Number.isFinite(geo.lng) && Math.abs(geo.lng) <= 180) {
+    return '位置は記録済み（住所未取得）';
+  }
+  return breakStartAddress ? `休憩開始時の住所（参考）：${breakStartAddress}` : undefined;
 }
 
 export function buildTripDetailLocationInfo(

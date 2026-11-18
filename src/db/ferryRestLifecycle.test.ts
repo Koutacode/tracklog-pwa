@@ -29,6 +29,9 @@ const T = {
   restEnd: '2026-08-30T04:00:00.000Z',
 } as const;
 
+const boardingPlace = { address: '合成の乗船港', geo: { lat: 1, lng: 2 } };
+const landingPlace = { address: '合成の下船港', geo: { lat: 3, lng: 4 } };
+
 async function resetDatabase(): Promise<void> {
   await db.transaction(
     'rw',
@@ -90,24 +93,32 @@ async function testExistingRestSurvivesFerryLifecycle(): Promise<void> {
 async function testBoardingCreatesAndDisembarkClosesOnlyAutomaticRest(): Promise<void> {
   await resetDatabase();
   const tripId = await createTrip();
-  const boardingResult = await addBoarding({ tripId, occurredAt: T.boarding });
+  const boardingResult = await addBoarding({ tripId, occurredAt: T.boarding, ...boardingPlace });
   assert.equal(boardingResult.autoRestStarted, true);
 
   let events = await getEventsByTripId(tripId);
   const boarding = eventsOfType(events, 'boarding')[0];
   const restStart = eventsOfType(events, 'rest_start')[0];
   assert.ok(boarding && restStart, 'boarding without rest persists both start events');
+  for (const event of [boarding, restStart]) {
+    assert.equal(event.address, boardingPlace.address);
+    assert.deepEqual(event.geo, boardingPlace.geo);
+  }
   assert.equal(restStart.ts, boarding.ts, 'automatic rest starts at the boarding timestamp');
   assert.equal(restStart.extras?.autoReason, 'ferry_boarding');
   assert.equal(restStart.extras?.generatedFrom, boarding.id);
   assert.equal(boarding.extras?.autoRestSessionId, restStart.extras?.restSessionId);
 
-  await addDisembark({ tripId, occurredAt: T.disembark });
+  await addDisembark({ tripId, occurredAt: T.disembark, ...landingPlace });
   events = await getEventsByTripId(tripId);
   const restEnd = eventsOfType(events, 'rest_end')[0];
   const disembark = eventsOfType(events, 'disembark')[0];
 
   assert.ok(disembark && restEnd, 'disembarking persists both automatic closing events');
+  for (const event of [disembark, restEnd]) {
+    assert.equal(event.address, landingPlace.address);
+    assert.deepEqual(event.geo, landingPlace.geo);
+  }
   assert.equal(restEnd.ts, disembark.ts, 'automatic rest ends at the disembark timestamp');
   assert.equal(restEnd.extras?.restSessionId, restStart.extras?.restSessionId);
   assert.equal(restEnd.extras?.autoReason, 'ferry_disembark');
@@ -128,6 +139,7 @@ async function testEndingRestWhileBoardedAutomaticallyDisembarks(): Promise<void
     restSessionId: String(restStart.extras?.restSessionId),
     dayClose: false,
     occurredAt: T.disembark,
+    ...landingPlace,
   });
   const events = await getEventsByTripId(tripId);
 
@@ -136,6 +148,8 @@ async function testEndingRestWhileBoardedAutomaticallyDisembarks(): Promise<void
   assert.equal(eventsOfType(events, 'disembark').length, 1, 'ending rest during ferry auto-disembarks once');
   assert.equal(eventsOfType(events, 'rest_end')[0]?.ts, T.disembark);
   assert.equal(eventsOfType(events, 'disembark')[0]?.ts, T.disembark);
+  assert.equal(eventsOfType(events, 'disembark')[0]?.address, landingPlace.address);
+  assert.deepEqual(eventsOfType(events, 'disembark')[0]?.geo, landingPlace.geo);
   assert.deepEqual(openChannels(events), []);
 }
 

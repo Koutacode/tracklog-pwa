@@ -1570,15 +1570,28 @@ export async function startBreak(params: { tripId: string; geo?: Geo; address?: 
 }
 
 async function putBreakToRestTransitionTx(transition: BreakToRestTransition): Promise<RestStartEvent> {
+  // Confirmation can happen hours later. Use a recorded fix close to the actual
+  // three-hour boundary in this trip, even when the driver confirms offline.
+  const point = await getLatestRoutePointForTrip(transition.restStart.tripId, Date.parse(transition.thresholdTs));
+  const geo = point ? { lat: point.lat, lng: point.lng, accuracy: point.accuracy } : undefined;
+  const fixSource = point ? { breakThresholdLocationTs: point.ts } : {};
+  const breakEnd: AppEvent = {
+    ...transition.breakEnd,
+    geo,
+    extras: { ...transition.breakEnd.extras, ...fixSource },
+  };
   const restStart: RestStartEvent = {
     ...transition.restStart,
+    geo,
     extras: {
       ...transition.restStart.extras,
+      ...fixSource,
       reportMinDurationMinutes: REPORT_MIN_DURATION_MINUTES,
     },
   };
-  await putEventWithRoutePointTx(transition.breakEnd);
-  await putEventWithRoutePointTx(restStart);
+  // The measured route point already exists with its own timestamp. Saving the
+  // events together avoids adding two artificial fixes at the boundary.
+  await db.events.bulkPut([breakEnd, restStart]);
   return restStart;
 }
 
