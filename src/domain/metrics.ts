@@ -57,7 +57,7 @@ function getBreakSessionId(event: TogglePairingEvent): string | null {
 
 export type AutomaticBreakRestProjection<T extends TogglePairingEvent> = {
   events: T[];
-  sourcesByProjectedRest: ReadonlyMap<T, { breakStart: T; restStart: T }>;
+  sourcesByProjectedRest: ReadonlyMap<T, { breakStart: T; breakEnd: T; restStart: T }>;
 };
 
 function projectRestStartFromBreak<T extends TogglePairingEvent>(
@@ -66,6 +66,13 @@ function projectRestStartFromBreak<T extends TogglePairingEvent>(
 ): T {
   const restDetails = restStart as T & { address?: unknown; geo?: unknown };
   const breakDetails = breakStart as T & { address?: unknown; geo?: unknown };
+  // This view moves the event back three hours. A fix taken at the later
+  // threshold belongs to the raw event, not to the start of the break.
+  if (typeof restStart.extras?.breakThresholdLocationTs === 'string') {
+    const extras = { ...restStart.extras };
+    delete extras.breakThresholdLocationTs;
+    return { ...restStart, ts: breakStart.ts, geo: breakDetails.geo, address: breakDetails.address, extras };
+  }
   const restAddressIsMissing = restDetails.address == null
     || (typeof restDetails.address === 'string' && restDetails.address.trim() === '');
   return {
@@ -112,7 +119,7 @@ export function projectAutomaticBreakAsRestWithSources<T extends TogglePairingEv
 
   const hiddenBreakEvents = new Set<T>();
   const projectedRestBySource = new Map<T, T>();
-  const sourcesByProjectedRest = new Map<T, { breakStart: T; restStart: T }>();
+  const sourcesByProjectedRest = new Map<T, { breakStart: T; breakEnd: T; restStart: T }>();
   const breakDefinition = PERSISTED_BASIC_TOGGLE_DEFINITIONS[1];
   const breakPairs = resolveTogglePairing(events, [breakDefinition]).pairs;
 
@@ -147,7 +154,7 @@ export function projectAutomaticBreakAsRestWithSources<T extends TogglePairingEv
     for (const restStart of restStarts) {
       const projectedRest = projectRestStartFromBreak(restStart, pair.start);
       projectedRestBySource.set(restStart, projectedRest);
-      sourcesByProjectedRest.set(projectedRest, { breakStart: pair.start, restStart });
+      sourcesByProjectedRest.set(projectedRest, { breakStart: pair.start, breakEnd: pair.end, restStart });
     }
   }
 

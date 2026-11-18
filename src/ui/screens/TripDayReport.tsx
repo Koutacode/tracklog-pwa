@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { AppEvent } from '../../domain/types';
 import { getExpresswayIcDisplay } from '../../domain/expresswayIcDisplay';
 import type { HistoryDay } from './tripHistoryReport';
+import { getEventLocationLabel } from './tripDetailLocationInfo';
 
 type Category = 'drive' | 'work' | 'break' | 'ferry' | 'rest';
 
@@ -82,11 +83,16 @@ function savedAddress(event: AppEvent): string | undefined {
   return typeof event.address === 'string' && event.address.trim() ? event.address.trim() : undefined;
 }
 
-function EventRow({ event, effectiveMinute }: { event: AppEvent; effectiveMinute: number | undefined }) {
+function EventRow({ event, effectiveMinute, breakStartAddress }: {
+  event: AppEvent;
+  effectiveMinute: number | undefined;
+  breakStartAddress?: string;
+}) {
   const expressway = event.type === 'expressway_start' || event.type === 'expressway_end' || event.type === 'expressway';
   const ic = expressway ? getExpresswayIcDisplay(event.extras) : undefined;
   const address = savedAddress(event);
   const municipality = getTripDayMunicipality(address);
+  const place = municipality ?? getEventLocationLabel(event, getTripDayMunicipality(breakStartAddress) ?? breakStartAddress);
   const liters = event.type === 'refuel' && typeof event.extras?.liters === 'number'
     && Number.isFinite(event.extras.liters) && event.extras.liters > 0 ? event.extras.liters : undefined;
   const automatic = typeof event.extras?.autoReason === 'string' && !!event.extras.autoReason;
@@ -103,7 +109,7 @@ function EventRow({ event, effectiveMinute }: { event: AppEvent; effectiveMinute
           {liters != null && <span className="trip-report-event__quantity">{liters.toLocaleString('ja-JP')} L</span>}
         </div>
         {ic && <div className="trip-report-event__ic">{ic.label}</div>}
-        <div className="trip-report-event__place">{municipality ?? address ?? '場所未確認'}</div>
+        <div className="trip-report-event__place">{place ?? '場所未確認'}</div>
         {hasDetail && (
           <details className="trip-report-event__details">
             <summary>記録の詳細</summary>
@@ -117,7 +123,11 @@ function EventRow({ event, effectiveMinute }: { event: AppEvent; effectiveMinute
   );
 }
 
-export function TripDayReport({ day, km }: { day: HistoryDay; km?: number }) {
+export function TripDayReport({ day, km, breakStartAddresses }: {
+  day: HistoryDay;
+  km?: number;
+  breakStartAddresses?: ReadonlyMap<AppEvent, string>;
+}) {
   const [selectedSegment, setSelectedSegment] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -228,7 +238,10 @@ export function TripDayReport({ day, km }: { day: HistoryDay; km?: number }) {
 
       <section className="trip-report-events" aria-labelledby={`history-report-events-${day.dayIndex}`}>
         <div className="trip-report-events__heading"><h3 id={`history-report-events-${day.dayIndex}`}>時刻・作業場所</h3><span>15分単位</span></div>
-        {orderedEvents.length ? <ol>{orderedEvents.map(({ event, index }) => <EventRow key={`${event.id}-${index}`} event={event} effectiveMinute={day.effectiveMinutes[event.id]} />)}</ol>
+        {orderedEvents.length ? <ol>{orderedEvents.map(({ event, index }) => (
+          <EventRow key={`${event.id}-${index}`} event={event}
+            effectiveMinute={day.effectiveMinutes[event.id]} breakStartAddress={breakStartAddresses?.get(event)} />
+        ))}</ol>
           : <p className="trip-report-events__empty">この日の記録はありません</p>}
       </section>
     </section>

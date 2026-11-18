@@ -67,6 +67,19 @@ for (const label of ['休息開始', 'フェリー乗船', '休息終了', 'フ�
 assert.equal((restFerryHtml.match(/場所未確認/g) ?? []).length, 6);
 assert.deepEqual(restFerryEvents, restFerrySnapshot, 'rendering preserves saved events');
 
+const boardingAddress = '架空県架空市合成乗船港';
+const landingAddress = '合成下船ターミナル 架空県合成市';
+const locatedFerryHtml = renderHistory(restFerryEvents.map(event => {
+  if (event.type === 'boarding') return { ...event, address: boardingAddress };
+  if (event.type === 'disembark') return { ...event, address: landingAddress };
+  return event;
+}));
+const portRows = locatedFerryHtml.match(/<li\b[\s\S]*?<\/li>/g) ?? [];
+for (const [type, address] of [['boarding', boardingAddress], ['disembark', landingAddress]]) {
+  const row = portRows.find(item => item.includes(`data-event-type="${type}"`));
+  assert.ok(row?.includes(address), `${type} displays its own saved port even with a facility prefix`);
+}
+
 const operationRenderingPairs = [
   ['load_start', 'load_end', '積込開始', '積込終了'],
   ['unload_start', 'unload_end', '荷卸し開始', '荷卸し終了'],

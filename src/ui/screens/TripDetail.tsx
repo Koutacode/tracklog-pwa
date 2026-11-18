@@ -21,7 +21,7 @@ import {
   resolveTogglePairing,
   type TogglePairingResult,
 } from '../../domain/togglePairing';
-import { projectAutomaticBreakAsRest } from '../../domain/metrics';
+import { projectAutomaticBreakAsRestWithSources } from '../../domain/metrics';
 import { buildTripViewModel, TripViewModel } from '../../state/selectors';
 import { DAY_MS, getJstDateInfo } from '../../domain/jst';
 import { getEditableEventTypeOptions } from '../../domain/eventTypeConversion';
@@ -38,6 +38,7 @@ import {
 } from '../../services/expresswayIcManualEdit';
 import { buildTripHistoryDays } from './tripHistoryReport';
 import { TripDayReport } from './TripDayReport';
+import { buildBreakStartAddressReferences, getEventLocationLabel } from './tripDetailLocationInfo';
 import './tripDayReport.css';
 import { commitTripDetailOperationalMutation } from './tripDetailOperationalMutation';
 import { toJapanTimeInput, resolveTripDetailTimeEdit } from './tripDetailTimeInput';
@@ -546,13 +547,13 @@ export default function TripDetail() {
     () => resolveTogglePairing(events, PERSISTED_TOGGLE_DEFINITIONS),
     [events],
   );
-  const displayPairing = useMemo(
-    () => resolveTogglePairing(
-      projectAutomaticBreakAsRest(events),
-      PERSISTED_TOGGLE_DEFINITIONS,
-    ),
-    [events],
-  );
+  const { displayPairing, breakStartAddresses } = useMemo(() => {
+    const projection = projectAutomaticBreakAsRestWithSources(events);
+    return {
+      displayPairing: resolveTogglePairing(projection.events, PERSISTED_TOGGLE_DEFINITIONS),
+      breakStartAddresses: buildBreakStartAddressReferences(projection),
+    };
+  }, [events]);
   const grouped = useMemo(() => buildGrouped(displayPairing), [displayPairing]);
   const editingEvents = useMemo(() => [...togglePairing.rawEvents].reverse(), [togglePairing]);
   const excludedEndIds = useMemo(
@@ -877,6 +878,7 @@ export default function TripDetail() {
                     key={day.dateKey}
                     day={day}
                     km={distance?.km}
+                    breakStartAddresses={breakStartAddresses}
                   />
                 );
               })()}
@@ -1083,6 +1085,7 @@ export default function TripDetail() {
               <div className="trip-list">
                   {editingEvents.map(ev => {
                     const numDef = getNumericEditDef(ev);
+                    const locationLabel = getEventLocationLabel(ev, breakStartAddresses.get(ev)) ?? '住所未設定';
                     const icStatus = getIcResolveStatusLabel(ev);
                     const isOpen = openEditorId === ev.id;
                     const timeEditing = editing?.id === ev.id;
@@ -1112,7 +1115,7 @@ export default function TripDetail() {
                                 IC: {icStatus.label}（{icStatus.detail}）
                               </div>
                             )}
-                            <div className="trip-item__meta trip-edit__address-preview">{ev.address ?? '住所未設定'}</div>
+                            <div className="trip-item__meta trip-edit__address-preview">{locationLabel}</div>
                           </div>
                           <div className="trip-edit__actions">
                             <div className="trip-edit__id">{ev.id.slice(0, 8)}</div>
@@ -1382,7 +1385,7 @@ export default function TripDetail() {
                                 </div>
                               ) : (
                                 <div className="trip-edit__stack">
-                                  <div className="trip-edit__address-preview">{ev.address ?? '住所未設定'}</div>
+                                  <div className="trip-edit__address-preview">{locationLabel}</div>
                                   <div className="trip-edit__inline-actions">
                                     <button
                                       onClick={() => setAddressEditing({ id: ev.id, value: ev.address ?? '' })}
