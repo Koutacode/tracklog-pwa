@@ -1,5 +1,6 @@
 import type { AppEvent } from '../../domain/types';
 import { DAY_MS, getJstDateInfo } from '../../domain/jst';
+import { AUTO_REST_REASON_BREAK_THRESHOLD, projectAutomaticBreakAsRest } from '../../domain/metrics';
 import { ALL_TOGGLE_DEFINITIONS, resolveTogglePairing } from '../../domain/togglePairing';
 
 export type HistoryCategory = 'drive' | 'work' | 'break' | 'ferry' | 'rest';
@@ -116,11 +117,22 @@ function pushInterval(intervals: Interval[], start: number, end: number, categor
   else intervals.push({ start, end, category });
 }
 
+function isProjectedOpenAutomaticRest(
+  start: AppEvent,
+  events: readonly AppEvent[],
+): boolean {
+  if (start.extras?.autoReason !== AUTO_REST_REASON_BREAK_THRESHOLD) return false;
+  const generatedFrom = start.extras?.generatedFrom;
+  if (typeof generatedFrom !== 'string' || !generatedFrom.trim()) return false;
+  return !events.some(event => event.id === generatedFrom && event.type === 'break_start');
+}
+
 /**
- * Read-only history display. Raw timestamps and the report/sync projections are
- * deliberately untouched. Only this view applies the owner's five categories
- * and shared quarter-hour boundaries. Paired activity lasts at least 15 display
- * minutes; subsequent boundaries move together without rewriting actual time.
+ * Read-only history display. Saved rows stay unchanged. A confirmed break that
+ * reached three hours is shown as rest from the original break start, then this
+ * view applies the five categories and shared quarter-hour boundaries. Paired
+ * activity lasts at least 15 display minutes; subsequent boundaries move
+ * together without rewriting actual time.
  */
 export function buildTripHistoryDays(
   events: readonly AppEvent[],
@@ -131,8 +143,9 @@ export function buildTripHistoryDays(
   const selectedTripId = tripId ?? (identities.size === 1 ? events[0]?.tripId : undefined);
   if (selectedTripId == null) return [];
   const source = events.filter(event => event.tripId === selectedTripId);
-  const starts = source.filter(event => event.type === 'trip_start');
-  const ends = source.filter(event => event.type === 'trip_end');
+  const viewSource = projectAutomaticBreakAsRest(source);
+  const starts = viewSource.filter(event => event.type === 'trip_start');
+  const ends = viewSource.filter(event => event.type === 'trip_end');
   const startTimes = new Set(starts.map(event => Date.parse(event.ts)));
   const endTimes = new Set(ends.map(event => Date.parse(event.ts)));
   // Identical timestamp duplicates do not change the boundary. Contradictory
@@ -140,7 +153,7 @@ export function buildTripHistoryDays(
   if (startTimes.size !== 1 || [...startTimes].some(value => !Number.isFinite(value))) return [];
   if (endTimes.size > 1 || [...endTimes].some(value => !Number.isFinite(value))) return [];
   const tripStart = [...startTimes][0];
-  const validEvents = source.filter(event => Number.isFinite(Date.parse(event.ts)))
+  const validEvents = viewSource.filter(event => Number.isFinite(Date.parse(event.ts)))
     .sort((a, b) => Date.parse(a.ts) - Date.parse(b.ts) || a.id.localeCompare(b.id));
   const ongoing = ends.length === 0;
   const current = currentTs == null ? Number.NaN : Date.parse(currentTs);
@@ -150,7 +163,8 @@ export function buildTripHistoryDays(
     : [...endTimes][0];
   if (!Number.isFinite(tripEnd) || tripEnd < tripStart) return [];
 
-  // Pairing copies are normalized; all returned event objects retain raw ts.
+  // Quarter-hour copies are normalized. Confirmed three-hour breaks are already
+  // reclassified; every other returned event keeps the caller's saved timestamp.
   const calculationEvents = validEvents.filter(event => Date.parse(event.ts) >= tripStart && Date.parse(event.ts) <= tripEnd);
   const { pairing, effectiveByEvent, projected } = projectBoundaries(calculationEvents);
   const displayStarts = projected.filter(item => item.event.type === 'trip_start').map(item => Date.parse(item.effectiveTs));
@@ -169,6 +183,10 @@ export function buildTripHistoryDays(
     clip(effectiveByEvent.get(pair.start)!, effectiveByEvent.get(pair.end)!, categoryForChannel(pair.definition.channel), known);
   }
   for (const open of pairing.openStarts) {
+    if (open.definition.channel === 'rest' && isProjectedOpenAutomaticRest(open.start, calculationEvents)) {
+      clip(effectiveByEvent.get(open.start)!, roundedEnd, 'rest', known);
+      continue;
+    }
     clip(Math.min(Date.parse(open.start.ts), effectiveByEvent.get(open.start)!), roundedEnd, null, unknown);
   }
   for (const excluded of pairing.excludedEnds) {

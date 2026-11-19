@@ -95,6 +95,8 @@ function projectRestStartFromBreak<T extends TogglePairingEvent>(
  * native route-recording pause boundary. Product views instead hide the
  * converted break pair and move only its generated rest start backwards. This
  * keeps existing synced rows immutable while fixing both old and new history.
+ * A payload that has the break session and autoReason, but not generatedFrom,
+ * uses the same view when that pair is unambiguous.
  */
 export function projectAutomaticBreakAsRestWithSources<T extends TogglePairingEvent>(
   events: readonly T[],
@@ -104,16 +106,20 @@ export function projectAutomaticBreakAsRestWithSources<T extends TogglePairingEv
   }
 
   const generatedRestStarts = new Map<string, T[]>();
+  const automaticRestsWithoutSource: T[] = [];
   for (const event of events) {
     if (event.type !== 'rest_start' || !isAutomaticBreakThresholdEvent(event)) continue;
     const generatedFrom = getGeneratedFrom(event);
-    if (!generatedFrom) continue;
+    if (!generatedFrom) {
+      automaticRestsWithoutSource.push(event);
+      continue;
+    }
     const existing = generatedRestStarts.get(generatedFrom) ?? [];
     existing.push(event);
     generatedRestStarts.set(generatedFrom, existing);
   }
 
-  if (generatedRestStarts.size === 0) {
+  if (generatedRestStarts.size === 0 && automaticRestsWithoutSource.length === 0) {
     return { events: [...events], sourcesByProjectedRest: new Map() };
   }
 
@@ -122,6 +128,11 @@ export function projectAutomaticBreakAsRestWithSources<T extends TogglePairingEv
   const sourcesByProjectedRest = new Map<T, { breakStart: T; breakEnd: T; restStart: T }>();
   const breakDefinition = PERSISTED_BASIC_TOGGLE_DEFINITIONS[1];
   const breakPairs = resolveTogglePairing(events, [breakDefinition]).pairs;
+  const sessionsMatch = (start: T, end: T) => {
+    const startSessionId = getBreakSessionId(start);
+    const endSessionId = getBreakSessionId(end);
+    return !!startSessionId && startSessionId === endSessionId;
+  };
 
   for (const pair of breakPairs) {
     if (!isAutomaticBreakThresholdEvent(pair.end)) continue;
@@ -135,18 +146,26 @@ export function projectAutomaticBreakAsRestWithSources<T extends TogglePairingEv
       continue;
     }
     const generatedFrom = getGeneratedFrom(pair.end);
-    if (!generatedFrom) continue;
-    if (pair.start.id) {
-      if (pair.start.id !== generatedFrom) continue;
-    } else {
-      const startSessionId = getBreakSessionId(pair.start);
-      const endSessionId = getBreakSessionId(pair.end);
-      if (!startSessionId || startSessionId !== endSessionId) continue;
+    let restStarts: T[] | undefined;
+    if (generatedFrom) {
+      const linked = pair.start.id
+        ? pair.start.id === generatedFrom
+        : sessionsMatch(pair.start, pair.end);
+      if (!linked) continue;
+      restStarts = generatedRestStarts
+        .get(generatedFrom)
+        ?.filter(restStart => restStart.ts === pair.end.ts);
+    } else if (sessionsMatch(pair.start, pair.end)) {
+      // Ops payloads carry autoReason and the break session, not generatedFrom.
+      // Require one unambiguous pair and one generated rest at that instant.
+      const sameInstant = breakPairs.filter(other => (
+        other.end.ts === pair.end.ts
+        && isAutomaticBreakThresholdEvent(other.end)
+        && !getGeneratedFrom(other.end)
+      ));
+      const candidates = automaticRestsWithoutSource.filter(restStart => restStart.ts === pair.end.ts);
+      if (sameInstant.length === 1 && candidates.length === 1) restStarts = candidates;
     }
-
-    const restStarts = generatedRestStarts
-      .get(generatedFrom)
-      ?.filter(restStart => restStart.ts === pair.end.ts);
     if (!restStarts?.length) continue;
 
     hiddenBreakEvents.add(pair.start);

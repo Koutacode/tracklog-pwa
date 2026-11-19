@@ -1,4 +1,5 @@
 import { getJstDateInfo } from '../../../src/domain/jst.ts';
+import { projectAutomaticBreakAsRest } from '../../../src/domain/metrics.ts';
 import {
   ALL_TOGGLE_DEFINITIONS,
   EXPRESSWAY_TOGGLE_DEFINITION,
@@ -232,7 +233,7 @@ function readEvents(value: unknown): OpsEventRow[] {
   return rows;
 }
 
-function pairingEvents(rows: readonly OpsEventRow[]): TogglePairingEvent[] {
+function pairingEvents(rows: readonly OpsEventRow[]): Array<TogglePairingEvent & { address?: string }> {
   return rows.map(row => {
     const extras: Record<string, unknown> = {};
     if (row.sessionKey && row.sessionId) extras[row.sessionKey] = row.sessionId;
@@ -241,9 +242,34 @@ function pairingEvents(rows: readonly OpsEventRow[]): TogglePairingEvent[] {
       id: row.id,
       type: row.type,
       ts: row.ts,
+      ...(row.address ? { address: row.address } : {}),
       ...(Object.keys(extras).length ? { extras } : {}),
     };
   });
+}
+
+/**
+ * Same product view as the driver timeline: a confirmed three-hour break is
+ * rest from the original break start. Saved rows are not rewritten. The public
+ * payload already includes autoReason and the break session.
+ */
+function prepareOpsEvents(rows: readonly OpsEventRow[]): { rows: OpsEventRow[]; events: TogglePairingEvent[] } {
+  const projectedEvents = projectAutomaticBreakAsRest(pairingEvents(rows));
+  const byId = rowById(rows);
+  const projectedRows: OpsEventRow[] = [];
+  for (const event of projectedEvents) {
+    if (!event.id) continue;
+    const original = byId.get(event.id);
+    if (!original) continue;
+    const address = (event as { address?: unknown }).address;
+    projectedRows.push({
+      ...original,
+      type: event.type,
+      ts: event.ts,
+      address: typeof address === 'string' && address.trim() ? address : original.address,
+    });
+  }
+  return { rows: projectedRows, events: projectedEvents };
 }
 
 /**
@@ -309,9 +335,10 @@ function rowById(rows: readonly OpsEventRow[]): Map<string, OpsEventRow> {
 }
 
 function buildIntervals(rows: readonly OpsEventRow[]): BuiltEvent[] {
-  const events = pairingEvents(rows);
+  const prepared = prepareOpsEvents(rows);
+  const events = prepared.events;
   const paired = resolveTogglePairing(events, ALL_TOGGLE_DEFINITIONS);
-  const rowsById = rowById(rows);
+  const rowsById = rowById(prepared.rows);
   const built: BuiltEvent[] = [];
 
   for (const pair of paired.pairs) {
@@ -489,8 +516,9 @@ export function buildOpsStatus(raw: unknown): BuiltOpsStatus {
     throw new Error('invalid_status_payload');
   }
 
-  const rows = readEvents(payload.events);
-  const events = pairingEvents(rows);
+  const prepared = prepareOpsEvents(readEvents(payload.events));
+  const rows = prepared.rows;
+  const events = prepared.events;
   const normalEvents = resolveTogglePairing(events, PERSISTED_TOGGLE_DEFINITIONS).normalEvents;
   let state = normalEvents.length > 0
     ? { state: '走行', label: '走行中' }

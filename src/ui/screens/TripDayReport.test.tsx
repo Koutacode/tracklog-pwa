@@ -128,11 +128,16 @@ const transition = buildBreakToRestTransition([tripStart, breakStart], '2026-10-
 const { breakEnd, restStart } = transition;
 const sourceEvents = [tripStart, breakStart, breakEnd, restStart];
 const originalEvents = structuredClone(sourceEvents);
-const dayTwo = buildTripHistoryDays(sourceEvents)[1]!;
+const history = buildTripHistoryDays(sourceEvents);
 const references = buildBreakStartAddressReferences(projectAutomaticBreakAsRestWithSources(sourceEvents));
-const nightHtml = renderToStaticMarkup(<TripDayReport day={dayTwo} breakStartAddresses={references} />);
-assert.equal((nightHtml.match(/休憩開始時の住所（参考）：北海道合成市/g) ?? []).length, 2);
-assert.ok(nightHtml.includes(`dateTime="${transition.thresholdTs}">02:30</time>`), 'references retain the actual transition time');
+assert.equal(history.length, 1, 'rest moved back before midnight stays on the break-start day');
+const nightHtml = renderToStaticMarkup(<TripDayReport day={history[0]!} breakStartAddresses={references} />);
+assert.ok(nightHtml.includes('休息開始'));
+assert.ok(!nightHtml.includes('休憩開始') && !nightHtml.includes('休憩終了'), 'the converted break pair is not a separate timeline segment');
+assert.ok(nightHtml.includes('>23:30</time>'), 'rest is shown from the original break start');
+assert.ok(!nightHtml.includes('02:30</time>'));
+assert.ok(nightHtml.includes('北海道合成市'));
+assert.equal(references.size, 2, 'editor references still describe the stored threshold rows');
 assert.equal(getEventLocationLabel(breakEnd, references.get(breakEnd)), '休憩開始時の住所（参考）：北海道合成市試験町');
 assert.deepEqual(sourceEvents, originalEvents, 'neither the raw editor values nor the day records are backfilled');
 
@@ -140,12 +145,14 @@ const manualPlace = { ...restStart, address: '切替時の手入力住所' };
 const measured = { ...breakEnd, geo: { lat: 0, lng: 0 } };
 const withPositions = [tripStart, breakStart, measured, manualPlace];
 const ownReferences = buildBreakStartAddressReferences(projectAutomaticBreakAsRestWithSources(withPositions));
+const ownHistory = buildTripHistoryDays(withPositions);
 const ownHtml = renderToStaticMarkup(
-  <TripDayReport day={buildTripHistoryDays(withPositions)[1]!} breakStartAddresses={ownReferences} />,
+  <TripDayReport day={ownHistory[0]!} breakStartAddresses={ownReferences} />,
 );
 assert.ok(ownHtml.includes('切替時の手入力住所'));
-assert.ok(ownHtml.includes('位置は記録済み（住所未取得）'));
-assert.ok(!ownHtml.includes('休憩開始時の住所（参考）'), 'a direct edit or fix wins over the earlier break address');
+assert.ok(ownHtml.includes('休息開始'));
+assert.ok(!ownHtml.includes('休憩開始時の住所（参考）'), 'a direct edit wins over the earlier break address');
+assert.ok(!ownHtml.includes('位置は記録済み（住所未取得）'), 'the stored threshold row is not a second timeline event');
 
 for (const mismatched of [
   [tripStart, breakStart, restStart],

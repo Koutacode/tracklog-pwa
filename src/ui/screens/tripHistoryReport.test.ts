@@ -215,10 +215,69 @@ const automatic = [
   event('rest_end', ts('06:00:00'), { restSessionId: 'auto-rest' }),
   event('trip_end', ts('07:00:00')),
 ];
+const automaticSnapshot = JSON.stringify(automatic);
 const automaticDay = buildTripHistoryDays(automatic)[0];
 assertDay(automaticDay);
-assert.equal(automaticDay.totals.break, 180, 'history respects the raw three-hour break');
-assert.equal(automaticDay.totals.rest, 60, 'history does not project the rest backwards');
+assert.equal(automaticDay.totals.break, 0, 'a confirmed three-hour break is not counted as break');
+assert.equal(automaticDay.totals.rest, 240, 'rest includes the original break interval through rest end');
+assert.deepEqual(
+  automaticDay.events.map(item => item.type),
+  ['trip_start', 'rest_start', 'rest_end', 'trip_end'],
+  'the history timeline drops the converted break pair',
+);
+assert.equal(automaticDay.events.find(item => item.type === 'rest_start')?.ts, ts('02:00:00'));
+assert.equal(automaticDay.effectiveMinutes[automatic[3].id], 120, 'rest is displayed from the original break start');
+assert.equal(JSON.stringify(automatic), automaticSnapshot, 'history projection does not rewrite the saved events');
+
+const openAutomatic = [
+  event('trip_start', ts('08:00:00')),
+  { ...event('break_start', ts('09:00:00'), { breakSessionId: 'open-auto' }), id: 'open-break', address: '埼玉県合成市' },
+  event('break_end', ts('12:00:00'), { breakSessionId: 'open-auto', autoReason: 'break_3h_threshold', generatedFrom: 'open-break' }),
+  event('rest_start', ts('12:00:00'), { restSessionId: 'open-rest', autoReason: 'break_3h_threshold', generatedFrom: 'open-break' }),
+];
+const openAutomaticDay = buildTripHistoryDays(openAutomatic, ts('13:00:00'))[0];
+assertDay(openAutomaticDay);
+assert.equal(openAutomaticDay.totals.break, 0);
+assert.equal(openAutomaticDay.totals.rest, 240, 'an ongoing converted rest runs from the original break start');
+assert.equal(openAutomaticDay.events.some(item => item.type === 'break_start' || item.type === 'break_end'), false);
+assert.equal(openAutomaticDay.events.find(item => item.type === 'rest_start')?.address, '埼玉県合成市');
+
+const shortBreak = [
+  event('trip_start', ts('08:00:00')),
+  event('break_start', ts('09:00:00'), { breakSessionId: 'short' }),
+  event('break_end', ts('11:00:00'), { breakSessionId: 'short' }),
+  event('trip_end', ts('12:00:00')),
+];
+const shortBreakDay = buildTripHistoryDays(shortBreak)[0];
+assertDay(shortBreakDay);
+assert.equal(shortBreakDay.totals.break, 120, 'a break ended before three hours stays a break');
+assert.equal(shortBreakDay.totals.rest, 0);
+assert.equal(shortBreakDay.events.filter(item => item.type.startsWith('break_')).length, 2);
+
+const earlyMarked = [
+  event('trip_start', ts('08:00:00')),
+  { ...event('break_start', ts('09:00:00'), { breakSessionId: 'early' }), id: 'early-break' },
+  event('break_end', ts('11:30:00'), { breakSessionId: 'early', autoReason: 'break_3h_threshold', generatedFrom: 'early-break' }),
+  event('rest_start', ts('11:30:00'), { restSessionId: 'early-rest', autoReason: 'break_3h_threshold', generatedFrom: 'early-break' }),
+  event('rest_end', ts('12:00:00'), { restSessionId: 'early-rest' }),
+  event('trip_end', ts('12:30:00')),
+];
+const earlyMarkedDay = buildTripHistoryDays(earlyMarked)[0];
+assertDay(earlyMarkedDay);
+assert.equal(earlyMarkedDay.totals.break, 150, 'markers on an interval shorter than three hours stay a break');
+assert.equal(earlyMarkedDay.totals.rest, 30);
+assert.equal(earlyMarkedDay.events.some(item => item.type === 'break_start'), true);
+
+const manualLong = [
+  event('trip_start', ts('08:00:00')),
+  event('break_start', ts('09:00:00'), { breakSessionId: 'manual-long' }),
+  event('break_end', ts('13:00:00'), { breakSessionId: 'manual-long' }),
+  event('trip_end', ts('14:00:00')),
+];
+const manualLongDay = buildTripHistoryDays(manualLong)[0];
+assertDay(manualLongDay);
+assert.equal(manualLongDay.totals.break, 240, 'a manually ended long break stays a break');
+assert.equal(manualLongDay.totals.rest, 0);
 
 const mixed = [...tiny, event('trip_start', ts('01:00:00'), undefined, 'other-trip'), event('trip_end', ts('23:00:00'), undefined, 'other-trip')];
 assert.deepEqual(buildTripHistoryDays(mixed), [], 'mixed trips need an explicit identity');

@@ -6,6 +6,7 @@ import type { AppEvent, EventType } from '../../../src/domain/types.ts';
 import { isOpsTokenHash, opsTokenMatches, readBearerToken, sha256Hex } from './auth.ts';
 import {
   applyCoarsePlace,
+  buildClosedTripReport,
   buildOpsStatus,
   findSensitive,
   getOpsMunicipality,
@@ -158,6 +159,80 @@ const breaking = [
   event('break', 'break_start', '2026-11-11T13:00:00.000Z', { session_key: 'breakSessionId', session_id: 'break-1' }),
 ];
 assertMatchesLiveDrive(breaking, 'break');
+
+const breakStartAt = '2026-11-11T10:15:00.000Z';
+const breakThresholdAt = '2026-11-11T13:15:00.000Z';
+const convertedSyncedAt = '2026-11-11T15:00:00.000Z';
+const convertedRows = [
+  event('start', 'trip_start', TRIP_START),
+  event('break-start', 'break_start', breakStartAt, {
+    session_key: 'breakSessionId',
+    session_id: 'break-1',
+    address: '埼玉県合成市',
+  }),
+  event('break-end', 'break_end', breakThresholdAt, {
+    session_key: 'breakSessionId',
+    session_id: 'break-1',
+    auto_reason: 'break_3h_threshold',
+  }),
+  event('rest', 'rest_start', breakThresholdAt, {
+    session_key: 'restSessionId',
+    session_id: 'rest-1',
+    auto_reason: 'break_3h_threshold',
+  }),
+];
+const converted = buildOpsStatus(activePayload(convertedRows, { synced_at: convertedSyncedAt }));
+assert.equal(converted.body.state, '休息');
+assert.equal(converted.body.state_started_at, toJstIso(breakStartAt));
+const convertedEvents = converted.body.trip_events as Array<Record<string, unknown>>;
+assert.equal(convertedEvents.some(item => item.kind === 'break'), false, 'ops hides the converted break');
+const convertedRest = convertedEvents.find(item => item.kind === 'rest');
+assert.equal(convertedRest?.start_at, toJstIso(breakStartAt));
+assert.equal(convertedRest?.end_at, null);
+assert.deepEqual(convertedRest?.place, { kind: 'municipality', name: '埼玉県合成市' });
+assertClean(converted.body, 'converted break');
+const convertedLive = computeLiveDriveStatus([
+  { id: 'start', tripId: 'trip-ferry-1', type: 'trip_start', ts: TRIP_START, syncStatus: 'synced', extras: {} },
+  { id: 'break-start', tripId: 'trip-ferry-1', type: 'break_start', ts: breakStartAt, syncStatus: 'synced', extras: { breakSessionId: 'break-1' }, address: '埼玉県合成市' },
+  { id: 'break-end', tripId: 'trip-ferry-1', type: 'break_end', ts: breakThresholdAt, syncStatus: 'synced', extras: { breakSessionId: 'break-1', autoReason: 'break_3h_threshold', generatedFrom: 'break-start' } },
+  { id: 'rest', tripId: 'trip-ferry-1', type: 'rest_start', ts: breakThresholdAt, syncStatus: 'synced', extras: { restSessionId: 'rest-1', autoReason: 'break_3h_threshold', generatedFrom: 'break-start' } },
+], convertedSyncedAt);
+assert.equal(convertedLive.currentCategory, 'rest');
+assert.equal(toJstIso(convertedLive.currentCategoryStartedAt ?? ''), converted.body.state_started_at);
+
+const shortBreakRows = [
+  event('start', 'trip_start', TRIP_START),
+  event('break-start', 'break_start', breakStartAt, { session_key: 'breakSessionId', session_id: 'break-short' }),
+  event('break-end', 'break_end', '2026-11-11T12:00:00.000Z', { session_key: 'breakSessionId', session_id: 'break-short' }),
+];
+const shortBreakStatus = buildOpsStatus(activePayload(shortBreakRows, { synced_at: convertedSyncedAt }));
+assert.equal(shortBreakStatus.body.state, '走行');
+assert.equal(
+  (shortBreakStatus.body.trip_events as Array<Record<string, unknown>>).some(item => item.kind === 'break'),
+  true,
+  'a break ended before three hours stays a break',
+);
+assertClean(shortBreakStatus.body, 'short break');
+
+const closedConverted = buildClosedTripReport({
+  closed: true,
+  trip_id: 'trip-ferry-1',
+  trip_started_at: TRIP_START,
+  trip_ended_at: '2026-11-11T16:00:00.000Z',
+  events: [
+    ...convertedRows,
+    event('rest-end', 'rest_end', '2026-11-11T16:00:00.000Z', {
+      session_key: 'restSessionId',
+      session_id: 'rest-1',
+    }),
+    event('end', 'trip_end', '2026-11-11T16:00:00.000Z'),
+  ],
+});
+const closedSegments = closedConverted.segments as Array<Record<string, unknown>>;
+assert.deepEqual(closedSegments.map(item => item.kind), ['rest']);
+assert.equal(closedSegments[0]?.start_at, toJstIso(breakStartAt));
+assert.equal(closedSegments[0]?.end_at, toJstIso('2026-11-11T16:00:00.000Z'));
+assertClean(closedConverted, 'closed converted rest');
 
 const loading = [
   event('start', 'trip_start', TRIP_START),
