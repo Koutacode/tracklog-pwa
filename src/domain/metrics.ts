@@ -1,11 +1,11 @@
-import type { AppEvent, RestStartEvent, Segment, DayRun } from './types';
-import { DAY_MS, getJstDateInfo } from './jst';
+import type { AppEvent, RestStartEvent, Segment, DayRun } from './types.ts';
+import { DAY_MS, getJstDateInfo } from './jst.ts';
 import {
   findOpenToggleStart,
   PERSISTED_BASIC_TOGGLE_DEFINITIONS,
   resolveTogglePairing,
   type TogglePairingEvent,
-} from './togglePairing';
+} from './togglePairing.ts';
 
 export const BREAK_TO_REST_THRESHOLD_MS = 3 * 60 * 60 * 1000;
 export const AUTO_REST_REASON_BREAK_THRESHOLD = 'break_3h_threshold';
