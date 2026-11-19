@@ -284,6 +284,71 @@ assert.deepEqual(
   'a manual long break without generation markers must remain a break',
 );
 
+const unscopedEvents: AppEvent[] = [
+  ...openBreakEvents().map(event => (
+    event.type === 'break_start' ? { ...event, address: '埼玉県合成市' } : event
+  )),
+  {
+    id: 'unscoped-break-end',
+    tripId,
+    type: 'break_end',
+    ts: '2026-07-17T03:00:00.000Z',
+    syncStatus: 'pending',
+    extras: { breakSessionId, autoReason: AUTO_REST_REASON_BREAK_THRESHOLD },
+  },
+  {
+    id: 'unscoped-rest-start',
+    tripId,
+    type: 'rest_start',
+    ts: '2026-07-17T03:00:00.000Z',
+    syncStatus: 'pending',
+    extras: { restSessionId: 'unscoped-rest', autoReason: AUTO_REST_REASON_BREAK_THRESHOLD },
+  },
+];
+const unscopedSnapshot = JSON.stringify(unscopedEvents);
+const unscopedProjected = projectAutomaticBreakAsRest(unscopedEvents);
+assert.deepEqual(
+  unscopedProjected.map(event => event.type),
+  ['trip_start', 'rest_start'],
+  'a session-matched automatic rest without generatedFrom is still reclassified',
+);
+assert.equal(unscopedProjected.find(event => event.type === 'rest_start')?.ts, breakStartTs);
+assert.equal(unscopedProjected.find(event => event.type === 'rest_start')?.address, '埼玉県合成市');
+assert.equal(JSON.stringify(unscopedEvents), unscopedSnapshot, 'session-only projection does not mutate saved rows');
+assert.deepEqual(
+  projectAutomaticBreakAsRest(unscopedProjected).map(event => event.type),
+  ['trip_start', 'rest_start'],
+  'session-only projection is idempotent',
+);
+
+const ambiguousUnscopedRests: AppEvent[] = [
+  ...unscopedEvents,
+  {
+    id: 'unscoped-rest-start-2',
+    tripId,
+    type: 'rest_start',
+    ts: '2026-07-17T03:00:00.000Z',
+    syncStatus: 'pending',
+    extras: { restSessionId: 'unscoped-rest-2', autoReason: AUTO_REST_REASON_BREAK_THRESHOLD },
+  },
+];
+assert.deepEqual(
+  projectAutomaticBreakAsRest(ambiguousUnscopedRests),
+  ambiguousUnscopedRests,
+  'two automatic rests at the same instant without generatedFrom stay unchanged',
+);
+
+const mismatchedSession: AppEvent[] = unscopedEvents.map(event => (
+  event.id === 'unscoped-break-end'
+    ? { ...event, extras: { ...event.extras, breakSessionId: 'other-session' } }
+    : event
+));
+assert.deepEqual(
+  projectAutomaticBreakAsRest(mismatchedSession),
+  mismatchedSession,
+  'an automatic end from another break session is not reclassified',
+);
+
 const manualRestStart: RestStartEvent = {
   id: 'manual-rest-start-1',
   tripId,
